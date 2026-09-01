@@ -127,7 +127,7 @@ services:
       - biomarker-net
 
   grafana:
-    image: grafana/grafana-oss:latest
+    image: grafana/grafana:latest
     container_name: biomarker-grafana
     restart: unless-stopped
     ports:
@@ -219,7 +219,7 @@ services:
   # volume tied to the old name) so this is safe, just expect a brief
   # restart.
   parser-colmi:
-    image: ${PARSER_COLMI_IMAGE:-yourdockerhubuser/colmi2influx:latest}
+    image: ${PARSER_COLMI_IMAGE:-dibz15/colmi2influx:latest}
     container_name: biomarker-parser-colmi
     restart: unless-stopped
     environment:
@@ -300,11 +300,9 @@ services:
   # drop the `profiles:` line (or run with `--profile activefit`) to
   # enable it.
   parser-activefit:
-    image: ${PARSER_ACTIVEFIT_IMAGE:-yourdockerhubuser/activefit2influx:latest}
+    image: ${PARSER_ACTIVEFIT_IMAGE:-dibz15/amazfit2influx:latest}
     container_name: biomarker-parser-activefit
     restart: unless-stopped
-    profiles:
-      - activefit
     environment:
       WEBDAV_URL: ${WEBDAV_URL:-https://your-nextcloud-domain/remote.php/dav/}
       WEBDAV_PATH: ${WEBDAV_PATH:-files/your_nextcloud_user/GadgetBridge/}
@@ -338,7 +336,7 @@ services:
       - influxdb
 
   wearable-events:
-    image: ${WEARABLE_EVENTS_IMAGE:-yourdockerhubuser/wearable-events:latest}
+    image: ${WEARABLE_EVENTS_IMAGE:-dibz15/wearable-events-ui:latest}
     container_name: biomarker-wearable-events
     restart: unless-stopped
     environment:

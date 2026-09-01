@@ -12,10 +12,11 @@ and a subjective sleep-quality score, so the raw sensor trends can
 eventually be correlated against what was actually happening in your day.
 
 An Amazfit parser (`parser/activefit/`) runs alongside the ring parser
-for a second device, but its HUAMI_* table/column names are still
-best-effort guesses, not verified against real hardware - it's safe to
-run continuously (gracefully does nothing until the watch is paired),
-but don't trust the data it produces as correct yet. See
+for a second device. Its table/column names are confirmed against a
+real Gadgetbridge schema dump, but the semantics of some fields (e.g.
+sleep-stage columns, timestamp units) aren't yet verified against real
+Active 3 Premium data - safe to run continuously either way (gracefully
+does nothing until the watch is paired). See
 [`parser/activefit/README.md`](./parser/activefit/README.md).
 
 Everything runs in Docker and is designed to be pasted straight into a
