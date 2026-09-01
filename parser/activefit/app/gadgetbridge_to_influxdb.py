@@ -4,21 +4,33 @@
 # stats for an Amazfit device into InfluxDB - the HUAMI_* counterpart
 # to ../../colmi/app/gadgetbridge_to_influxdb.py.
 #
-# STATUS: SKELETON, NOT YET VERIFIED AGAINST REAL HARDWARE.
+# STATUS: BEST-EFFORT, NOT VERIFIED AGAINST REAL ACTIVE 3 PREMIUM
+# HARDWARE. Table/column names below are drawn from Gadgetbridge's
+# public issue tracker (Codeberg) describing OTHER Huami/Zepp OS
+# devices, not this one specifically. See README.md in this directory
+# for sources and confidence level per table.
 #
-# Everything device-agnostic (WebDAV fetch, DEVICE table lookup,
-# checkpoint mechanics, the future-timestamp guard, the InfluxDB write
-# path) is already wired up below via ../../common/ - that part is
-# safe to run as-is.
+# This is deliberately written to run safely before the watch is even
+# paired: every query goes through common.devices.run_query, which
+# catches sqlite3.OperationalError (missing table, wrong column names)
+# and returns None rather than raising - so a wrong guess just means
+# that section is silently skipped this run, not a crash. Before
+# pairing, the HUAMI_* tables won't exist in the export at all, so
+# every section will report "table missing" and this will complete as
+# a harmless no-op every cycle. That's the point: this needs to be
+# deployable NOW, running quietly alongside the existing Colmi parser,
+# without both breaking anything or crash-looping the container - not
+# deferred until the watch is physically paired.
 #
-# extract_data() itself is deliberately left raising NotImplementedError.
-# The Colmi parser's own history (COLMI_TIMESTAMPS_ARE_MS assumed wrong
-# on the first pass, DURATION units assumed wrong TWICE) is exactly why:
-# guessing HUAMI_* table/column names and unit conventions from
-# secondhand research and shipping them as if verified would very
-# likely repeat that pattern. See README.md in this directory for what
-# research turned up as a starting point, and what to check for real
-# once the Active 3 Premium is actually paired and has exported data.
+# Once real HUAMI_* data starts flowing in, watch the logs for which
+# guessed queries actually returned rows vs which errored out, and
+# treat that as the starting point for the real verification pass
+# described in README.md (do NOT assume rows landing in InfluxDB means
+# the field semantics are also correct - e.g. real-world reports say
+# HUAMI_EXTENDED_ACTIVITY_SAMPLE's REM_SLEEP and DEEP_SLEEP columns
+# have been observed to hold IDENTICAL values on at least one device,
+# so a non-error result there doesn't by itself confirm the fields
+# mean what their names suggest).
 #
 # pip install webdavclient3 influxdb-client loguru
 
@@ -38,8 +50,6 @@ from common.influx import build_client, write_results
 
 ### Config section
 
-# Identifies this parser's points/checkpoints, distinct from the
-# physical `device` tag. See common/checkpoint.py's module docstring.
 PARSER_SOURCE = os.getenv("PARSER_SOURCE", "activefit")
 
 WEBDAV_URL = os.getenv("WEBDAV_URL", False)
@@ -60,14 +70,13 @@ SLEEP_HOURS = os.getenv("SLEEP_HOURS", "0,1,2,3,4,5,6").split(",")
 REMOVE_TEMP_DB = os.getenv("REMOVE_TEMP_DB", "Y")
 GADGETBRIDGE_USER = os.getenv("GADGETBRIDGE_USER", "primary")
 
-# UNVERIFIED - research (Gadgetbridge issue tracker + blog posts
-# describing real exports from other Huami/Zepp OS devices) points to
-# HUAMI_* tables using MILLISECOND timestamps, same convention as
-# COLMI_*. NOT confirmed against an actual Active 3 Premium export.
-# Do not trust this default until checked the same way
-# COLMI_TIMESTAMPS_ARE_MS was checked (see colmi/app's docstring for
-# that verification story) - look for "value out of range" InfluxDB
-# write errors, or implausible far-future graphed data, as the tell.
+# UNVERIFIED - research suggests HUAMI_* tables use millisecond
+# timestamps, same convention as COLMI_*, but this is NOT confirmed
+# against a real Active 3 Premium export. See colmi/app's docstring
+# for how COLMI_TIMESTAMPS_ARE_MS was actually confirmed (InfluxDB
+# "value out of range" write errors, or implausible far-future
+# graphed data, are the tell) - do the same check here once real data
+# exists before trusting this default.
 HUAMI_TIMESTAMPS_ARE_MS = os.getenv("HUAMI_TIMESTAMPS_ARE_MS", "Y") == "Y"
 
 MAX_CATCHUP_SECONDS = int(os.getenv("MAX_CATCHUP_SECONDS", str(30 * 86400)))
@@ -95,36 +104,230 @@ def scaled_to_iso(ts_scaled) -> str:
 
 
 def extract_data(cur, client):
-    ''' UNVERIFIED SKELETON - raises NotImplementedError on purpose.
-
-    What research (not a real export) suggests as a starting point,
-    per device.py::TABLE_NOTES-equivalent - see README.md for sources:
-
-      - Resting HR:  HUAMI_HEART_RATE_RESTING_SAMPLE (TIMESTAMP, UTC_OFFSET, HEART_RATE)
-      - Stress:      HUAMI_STRESS_SAMPLE (TIMESTAMP, TYPE_NUM, STRESS)
-      - SpO2:        likely HUAMI_SPO2_SAMPLE, unconfirmed column names
-      - Activity:    HUAMI_ACTIVITY_SAMPLE (older) vs HUAMI_EXTENDED_ACTIVITY_SAMPLE
-                      (newer Zepp OS devices, adds SLEEP/REM_SLEEP/DEEP_SLEEP
-                      columns) - Active 3 Premium is a recent Zepp OS device,
-                      so EXTENDED is the more likely candidate, unconfirmed
-      - Sleep:       HUAMI_SLEEP_SESSION_SAMPLE exists on Gadgetbridge >=0.85
-                      for Zepp OS devices, but per real-world reports its
-                      per-night data lives largely in a BLOB `DATA` column
-                      (not a queryable per-stage row the way COLMI_SLEEP_STAGE_SAMPLE
-                      is) - decoding that BLOB, if needed, is real reverse-
-                      engineering work, not a SELECT statement.
-
-    None of the above should be trusted as-is. Once the Active 3
-    Premium is paired and has produced a real Gadgetbridge export,
-    inspect it directly (sqlite3 .schema against every HUAMI_* table
-    actually present) before writing real queries here - exactly the
-    same empirical-first approach used to verify the Colmi parser.
+    ''' Query the database for data - see this file's module docstring
+    and README.md for the unverified/best-effort status of every table
+    queried here.
     '''
-    raise NotImplementedError(
-        "activefit extraction not yet implemented - schema unverified against "
-        "real Amazfit Active 3 Premium hardware. See this file's docstring "
-        "and parser/activefit/README.md before writing real queries here."
+    results = []
+
+    now_seconds = int(time.time())
+    fallback_bound_seconds = now_seconds - QUERY_DURATION
+
+    checkpoint_ns = get_last_checkpoint_ns(
+        client, INFLUXDB_BUCKET, INFLUXDB_MEASUREMENT, GADGETBRIDGE_USER, source=PARSER_SOURCE
     )
+
+    if checkpoint_ns is not None:
+        now_ns_check = time.time_ns()
+        if checkpoint_ns > now_ns_check + (MAX_FUTURE_TOLERANCE_SECONDS * 1_000_000_000):
+            hours_ahead = (checkpoint_ns - now_ns_check) / 1e9 / 3600
+            logger.warning(
+                f"Checkpoint is {hours_ahead:.2f}h in the future - ignoring it and "
+                f"falling back to QUERY_DURATION instead of resuming from an "
+                f"impossible point in time."
+            )
+            checkpoint_ns = None
+
+    if checkpoint_ns is not None:
+        checkpoint_scaled = from_nanos(checkpoint_ns)
+        unit_multiplier = 1000 if HUAMI_TIMESTAMPS_ARE_MS else 1
+        overlap_scaled = CHECKPOINT_OVERLAP_SECONDS * unit_multiplier
+        resume_bound_scaled = checkpoint_scaled - overlap_scaled
+
+        min_allowed_scaled = (now_seconds - MAX_CATCHUP_SECONDS) * unit_multiplier
+
+        if resume_bound_scaled < min_allowed_scaled:
+            logger.warning(
+                f"Checkpoint ({scaled_to_iso(checkpoint_scaled)}) is older than "
+                f"MAX_CATCHUP_SECONDS ({MAX_CATCHUP_SECONDS}s) - clamping catch-up "
+                f"window to {scaled_to_iso(min_allowed_scaled)}."
+            )
+            query_start_bound_scaled = min_allowed_scaled
+        else:
+            query_start_bound_scaled = resume_bound_scaled
+
+        logger.info(
+            f"Resuming from checkpoint at {scaled_to_iso(checkpoint_scaled)} - "
+            f"querying from {scaled_to_iso(query_start_bound_scaled)} after "
+            f"subtracting a {CHECKPOINT_OVERLAP_SECONDS}s overlap margin"
+        )
+    else:
+        query_start_bound_scaled = fallback_bound_seconds * 1000 if HUAMI_TIMESTAMPS_ARE_MS else fallback_bound_seconds
+        logger.info(
+            f"No checkpoint found - using QUERY_DURATION fallback ({QUERY_DURATION}s), "
+            f"querying from {scaled_to_iso(query_start_bound_scaled)}"
+        )
+
+    devices = fetch_devices(cur)
+    if devices is None:
+        logger.error("Unable to fetch stats - DEVICE table missing or unreadable (empty/corrupt database export?)")
+        return False
+
+    device_tags = device_tags_factory(devices)
+    observed = ObservedTracker(MAX_FUTURE_TOLERANCE_SECONDS)
+    section_counts = {}
+
+    # --- Activity (steps/HR/intensity, + best-effort sleep columns on
+    # newer Zepp OS devices). UNVERIFIED: tries the newer
+    # HUAMI_EXTENDED_ACTIVITY_SAMPLE first (confirmed to exist, with
+    # SLEEP/REM_SLEEP/DEEP_SLEEP columns, on at least one real Zepp OS
+    # device per Gadgetbridge issue #4715 - though NOT confirmed for
+    # this exact device, and that same report notes REM_SLEEP and
+    # DEEP_SLEEP were observed holding IDENTICAL values, so don't trust
+    # the REM/deep split without checking your own data). Falls back
+    # to the older HUAMI_ACTIVITY_SAMPLE (no sleep columns) if the
+    # extended table doesn't exist for this device/Gadgetbridge version.
+    extended_query = (
+        "SELECT TIMESTAMP, DEVICE_ID, RAW_KIND, STEPS, HEART_RATE, RAW_INTENSITY, "
+        "SLEEP, REM_SLEEP, DEEP_SLEEP FROM HUAMI_EXTENDED_ACTIVITY_SAMPLE "
+        f"WHERE TIMESTAMP >= {query_start_bound_scaled} ORDER BY TIMESTAMP ASC"
+    )
+    rows = run_query(cur, "HUAMI_EXTENDED_ACTIVITY_SAMPLE", extended_query)
+    activity_table_used = "HUAMI_EXTENDED_ACTIVITY_SAMPLE"
+
+    if rows is None:
+        # Extended table doesn't exist - fall back to the base table
+        # (older Huami devices / older Gadgetbridge). No sleep columns
+        # here at all, so those fields are simply omitted.
+        basic_query = (
+            "SELECT TIMESTAMP, DEVICE_ID, RAW_KIND, STEPS, HEART_RATE, RAW_INTENSITY "
+            "FROM HUAMI_ACTIVITY_SAMPLE "
+            f"WHERE TIMESTAMP >= {query_start_bound_scaled} ORDER BY TIMESTAMP ASC"
+        )
+        rows = run_query(cur, "HUAMI_ACTIVITY_SAMPLE", basic_query)
+        activity_table_used = "HUAMI_ACTIVITY_SAMPLE"
+
+    if rows is not None:
+        for r in rows:
+            row_ts = to_nanos(r[0])
+            fields = {
+                "steps": r[3],
+                "heart_rate": r[4],
+                "raw_intensity": r[5],
+            }
+            if len(r) > 6:
+                # Extended table - present but UNVERIFIED semantics,
+                # see docstring above. Named "*_raw" deliberately so
+                # these aren't confused with Colmi's independently
+                # verified sleep_stage_* fields.
+                if r[6] is not None:
+                    fields["sleep_extended_raw"] = r[6]
+                if r[7] is not None:
+                    fields["sleep_rem_raw"] = r[7]
+                if r[8] is not None:
+                    fields["sleep_deep_raw"] = r[8]
+            results.append({
+                "timestamp": row_ts,
+                "fields": fields,
+                "tags": {
+                    **device_tags(r[1]),
+                    "activity_kind": r[2],
+                    "sample_type": "activity"
+                }
+            })
+            observed.note(r[1], row_ts)
+        section_counts[f"activity ({activity_table_used})"] = len(rows)
+
+    # --- Resting heart rate. UNVERIFIED table/columns. ---
+    rows = run_query(cur, "HUAMI_HEART_RATE_RESTING_SAMPLE",
+        "SELECT TIMESTAMP, DEVICE_ID, HEART_RATE FROM HUAMI_HEART_RATE_RESTING_SAMPLE "
+        f"WHERE TIMESTAMP >= {query_start_bound_scaled} ORDER BY TIMESTAMP ASC")
+    if rows is not None:
+        for r in rows:
+            row_ts = to_nanos(r[0])
+            results.append({
+                "timestamp": row_ts,
+                "fields": {"resting_heart_rate": r[2]},
+                "tags": {**device_tags(r[1]), "sample_type": "resting_heart_rate"}
+            })
+            observed.note(r[1], row_ts)
+        section_counts["resting_heart_rate"] = len(rows)
+
+    # --- Stress. UNVERIFIED table/columns - a Gadgetbridge design
+    # discussion (issue #2797) considered storing this as extra columns
+    # on the activity table instead of a dedicated one; if that's what
+    # actually shipped for this device, this query will just report
+    # "table missing" and skip, harmlessly. ---
+    rows = run_query(cur, "HUAMI_STRESS_SAMPLE",
+        "SELECT TIMESTAMP, DEVICE_ID, STRESS FROM HUAMI_STRESS_SAMPLE "
+        f"WHERE TIMESTAMP >= {query_start_bound_scaled} ORDER BY TIMESTAMP ASC")
+    if rows is not None:
+        for r in rows:
+            row_ts = to_nanos(r[0])
+            fields = {"stress": r[2]}
+            sample_epoch_s = r[0] / 1000 if HUAMI_TIMESTAMPS_ARE_MS else r[0]
+            try:
+                sample_hour = time.gmtime(sample_epoch_s).tm_hour
+                if str(sample_hour) not in SLEEP_HOURS:
+                    fields["stress_exc_sleep"] = r[2]
+            except (OverflowError, OSError, ValueError):
+                pass
+            results.append({
+                "timestamp": row_ts,
+                "fields": fields,
+                "tags": device_tags(r[1])
+            })
+            observed.note(r[1], row_ts)
+        section_counts["stress"] = len(rows)
+
+    # --- SpO2. UNVERIFIED table/columns, and per Gadgetbridge issue
+    # #3131, SpO2 fetch support itself is relatively recent and
+    # per-device - may simply not exist for this device/firmware even
+    # once real data is flowing. ---
+    rows = run_query(cur, "HUAMI_SPO2_SAMPLE",
+        "SELECT TIMESTAMP, DEVICE_ID, SPO2 FROM HUAMI_SPO2_SAMPLE "
+        f"WHERE TIMESTAMP >= {query_start_bound_scaled} ORDER BY TIMESTAMP ASC")
+    if rows is not None:
+        for r in rows:
+            row_ts = to_nanos(r[0])
+            results.append({
+                "timestamp": row_ts,
+                "fields": {"spo2": r[2]},
+                "tags": device_tags(r[1])
+            })
+            observed.note(r[1], row_ts)
+        section_counts["spo2"] = len(rows)
+
+    # --- Sleep sessions: intentionally NOT attempted. Per Gadgetbridge
+    # issue #4715, HUAMI_SLEEP_SESSION_SAMPLE's per-night detail lives
+    # largely in a BLOB `DATA` column on newer Zepp OS devices, not
+    # queryable rows the way COLMI_SLEEP_STAGE_SAMPLE is - decoding
+    # that blob format is real reverse-engineering work this parser
+    # doesn't attempt yet. The best-effort SLEEP/REM_SLEEP/DEEP_SLEEP
+    # columns pulled from HUAMI_EXTENDED_ACTIVITY_SAMPLE above are the
+    # only sleep-related data this parser currently extracts.
+
+    now = time.time_ns()
+    for device_key, row_ts in observed.observed.items():
+        device_id = device_key.replace("dev-", "")
+        row_age = now - row_ts
+        row_age_hours = row_age / 1_000_000_000 / 3600
+        if row_age_hours > 24:
+            logger.warning(f"Device {devices.get(device_key, {}).get('name', device_key)}: "
+                           f"last sample is {row_age_hours:.1f}h old")
+        results.append({
+            "timestamp": now,
+            "fields": {
+                "last_seen": row_ts,
+                "last_seen_age": row_age
+            },
+            "tags": {
+                **device_tags(device_id),
+                "sample_type": "sync_check"
+            }
+        })
+
+    if not section_counts:
+        logger.info(
+            "No HUAMI_* tables produced any data this run (none of the guessed "
+            "table names matched anything queryable) - this is expected before "
+            "the watch is paired, or if the real schema differs from what's "
+            "guessed here. See README.md for the verification checklist."
+        )
+
+    logger.info(f"Extraction summary: {section_counts} | total points to write: {len(results)}")
+
+    return results
 
 
 if __name__ == "__main__":
@@ -148,14 +351,25 @@ if __name__ == "__main__":
 
     with build_client(INFLUXDB_URL, INFLUXDB_TOKEN, INFLUXDB_ORG) as influx_client:
         results = extract_data(cur, influx_client)
-        if not results:
+        # See colmi/app's __main__ for why False (fatal) and an empty
+        # list (legitimately nothing to sync - the normal case before
+        # pairing, or any quiet cycle after) are handled differently.
+        # This distinction matters MORE here than for colmi: before
+        # the watch is paired, every single cycle will legitimately
+        # find zero HUAMI_* data, and treating that as failure would
+        # crash-loop this container indefinitely under
+        # `restart: unless-stopped`.
+        if results is False:
             logger.error("Data extraction failed")
             sys.exit(1)
 
-        write_results(
-            influx_client, results, INFLUXDB_BUCKET, INFLUXDB_ORG, INFLUXDB_MEASUREMENT,
-            GADGETBRIDGE_USER, PARSER_SOURCE, MAX_FUTURE_TOLERANCE_SECONDS
-        )
+        if results:
+            write_results(
+                influx_client, results, INFLUXDB_BUCKET, INFLUXDB_ORG, INFLUXDB_MEASUREMENT,
+                GADGETBRIDGE_USER, PARSER_SOURCE, MAX_FUTURE_TOLERANCE_SECONDS
+            )
+        else:
+            logger.info("No new data points to sync this run")
 
     conn.close()
     if tempdir not in ["/", ""]:

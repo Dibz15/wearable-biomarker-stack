@@ -33,7 +33,20 @@ def run_query(cur, table_name, query) -> list | None:
         logger.debug(f"{table_name}: query returned {len(rows)} row(s)")
         return rows
     except sqlite3.OperationalError as e:
-        logger.warning(f"{table_name}: query failed ({e}) - skipping this table")
+        # "no such table" is the expected, harmless case for a table
+        # that genuinely doesn't exist yet (e.g. a HUAMI_* table before
+        # the device is paired, or an optional table this Gadgetbridge
+        # version/build doesn't populate) - logged quietly so it
+        # doesn't spam the logs every sync cycle. Any OTHER
+        # OperationalError (most commonly "no such column") means the
+        # table exists but the query's assumptions about it are wrong
+        # - that's worth a louder warning, since it signals a genuine
+        # schema mismatch worth fixing rather than an expected absence.
+        if "no such table" in str(e):
+            logger.debug(f"{table_name}: table does not exist in this export - skipping")
+        else:
+            logger.warning(f"{table_name}: query failed ({e}) - table exists but query assumptions "
+                           f"may be wrong (e.g. a guessed column name) - skipping this table")
         return None
 
 

@@ -702,14 +702,25 @@ if __name__ == "__main__":
     # rather than each opening its own connection.
     with build_client(INFLUXDB_URL, INFLUXDB_TOKEN, INFLUXDB_ORG) as influx_client:
         results = extract_data(cur, influx_client)
-        if not results:
+        # extract_data returns False (not a list) only for a genuinely
+        # fatal condition (DEVICE table missing/unreadable) - an empty
+        # list is a legitimate, non-fatal outcome (e.g. nothing new
+        # since the last checkpoint) and must NOT be treated the same
+        # way. Conflating the two would crash-loop this container
+        # every single cycle in which nothing new happened to sync -
+        # which is the normal, expected case any time the ring hasn't
+        # produced fresh data since the last run, not just an edge case.
+        if results is False:
             logger.error("Data extraction failed")
             sys.exit(1)
 
-        write_results(
-            influx_client, results, INFLUXDB_BUCKET, INFLUXDB_ORG, INFLUXDB_MEASUREMENT,
-            GADGETBRIDGE_USER, PARSER_SOURCE, MAX_FUTURE_TOLERANCE_SECONDS
-        )
+        if results:
+            write_results(
+                influx_client, results, INFLUXDB_BUCKET, INFLUXDB_ORG, INFLUXDB_MEASUREMENT,
+                GADGETBRIDGE_USER, PARSER_SOURCE, MAX_FUTURE_TOLERANCE_SECONDS
+            )
+        else:
+            logger.info("No new data points to sync this run")
 
     # Tidy up
     conn.close()
