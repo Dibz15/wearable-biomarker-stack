@@ -59,13 +59,12 @@ import sys
 import time
 from datetime import datetime, timezone
 
+from common.checkpoint import ObservedTracker, get_last_checkpoint_ns
+from common.devices import device_tags_factory, fetch_devices, run_query
+from common.influx import build_client, write_results
+from common.webdav import fetch_database, open_database
 from loguru import logger
 from webdav3.client import Client
-
-from common.webdav import fetch_database, open_database
-from common.devices import run_query, fetch_devices, device_tags_factory
-from common.checkpoint import get_last_checkpoint_ns, ObservedTracker
-from common.influx import build_client, write_results
 
 ### Config section
 
