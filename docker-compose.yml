@@ -114,6 +114,11 @@ services:
       INFLUXDB_TOKEN: ${INFLUXDB_TOKEN:-changeme_admin_token}
       INFLUXDB_MEASUREMENT: ${INFLUXDB_MEASUREMENT:-colmi}
       ALERT_HRV_USER: ${ALERT_HRV_USER:-primary}
+      # Which parser's HRV data the alert rule evaluates - see
+      # grafana/provisioning-templates/alerting/rules.yaml.template.
+      # Defaults to "colmi" since HRV isn't extracted by parser-activefit
+      # yet (see parser/activefit/README.md).
+      ALERT_HRV_SOURCE: ${ALERT_HRV_SOURCE:-colmi}
       NTFY_TOPIC: ${NTFY_TOPIC:-biomarker-alerts}
       NTFY_USER: ${NTFY_GRAFANA_USER:-grafana}
       NTFY_PASSWORD: ${NTFY_GRAFANA_PASSWORD:-changeme_ntfy_password}

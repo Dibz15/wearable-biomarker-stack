@@ -16,6 +16,15 @@ apiVersion: 1
 # synced. Before that, expect this rule to sit in "No data" state, which
 # is the intended (non-alerting) behaviour, not a bug.
 #
+# Scoped by $ALERT_HRV_SOURCE (see env.stack.example, defaults "colmi")
+# as well as $ALERT_HRV_USER - deliberately, not just by user, since
+# HRV is currently only extracted by the Colmi parser (see
+# parser/activefit/README.md - HRV isn't in the confirmed HUAMI_*
+# schema for the Amazfit yet). Without this, a source that starts
+# writing an "hrv" field under the same user later would silently
+# blend into this alert's mean() rather than requiring a deliberate
+# decision about whether/how to combine two devices' HRV readings.
+#
 # This is deliberately just ONE rule (HRV drop vs baseline) as a worked
 # template - copy this block and adjust the Flux queries/thresholds to
 # add similar rules for resting heart rate rise or nighttime temperature
@@ -58,6 +67,7 @@ groups:
                   |> filter(fn: (r) => r._measurement == "$INFLUXDB_MEASUREMENT")
                   |> filter(fn: (r) => r._field == "hrv")
                   |> filter(fn: (r) => r.user == "$ALERT_HRV_USER")
+                  |> filter(fn: (r) => r.source == "$ALERT_HRV_SOURCE")
                   |> mean()
 
           # B: mean HRV over the 14 days before that (excludes the last
@@ -76,6 +86,7 @@ groups:
                   |> filter(fn: (r) => r._measurement == "$INFLUXDB_MEASUREMENT")
                   |> filter(fn: (r) => r._field == "hrv")
                   |> filter(fn: (r) => r.user == "$ALERT_HRV_USER")
+                  |> filter(fn: (r) => r.source == "$ALERT_HRV_SOURCE")
                   |> mean()
 
           # C: percent deviation of A from B
