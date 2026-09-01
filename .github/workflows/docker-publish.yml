@@ -1,0 +1,179 @@
+name: Build and push images
+
+# Monorepo workflow: builds parser/colmi, parser/activefit, and
+# wearable-events/ as three separate Docker Hub images from one repo.
+# Each only rebuilds when its own sources (or this workflow file)
+# change, via dorny/paths-filter - pushing a wearable-events change
+# doesn't trigger an unnecessary parser rebuild and vice versa.
+#
+# The two parser images share parser/common/ - a change there is a
+# "filter hit" for BOTH parser jobs (see the filters below), since a
+# shared-infrastructure fix genuinely does affect both images and
+# should rebuild both. A change scoped to only parser/colmi/** or only
+# parser/activefit/** rebuilds just that one image.
+#
+# workflow_dispatch always builds all three, regardless of what
+# changed - useful for a manual "rebuild everything" (e.g. after
+# rotating a base image or changing a shared secret).
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*.*.*"]
+  workflow_dispatch: {}
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      parser_colmi: ${{ steps.filter.outputs.parser_colmi }}
+      parser_activefit: ${{ steps.filter.outputs.parser_activefit }}
+      wearable_events: ${{ steps.filter.outputs.wearable_events }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        # On workflow_dispatch there's no base ref to diff against, so
+        # paths-filter can't compute changes - force all true in that
+        # case rather than defaulting to "nothing changed".
+        with:
+          filters: |
+            parser_colmi:
+              - 'parser/common/**'
+              - 'parser/colmi/**'
+              - '.github/workflows/docker-publish.yml'
+            parser_activefit:
+              - 'parser/common/**'
+              - 'parser/activefit/**'
+              - '.github/workflows/docker-publish.yml'
+            wearable_events:
+              - 'wearable-events/**'
+              - '.github/workflows/docker-publish.yml'
+
+      - name: Force all on manual dispatch
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "Manual run - building all images regardless of changed paths"
+
+  build-parser-colmi:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.parser_colmi == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/colmi2influx
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata (tags/labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKERHUB_IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=sha,prefix=,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./parser
+          file: ./parser/colmi/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=parser-colmi
+          cache-to: type=gha,mode=max,scope=parser-colmi
+
+  build-parser-activefit:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.parser_activefit == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/activefit2influx
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata (tags/labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKERHUB_IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=sha,prefix=,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./parser
+          file: ./parser/activefit/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=parser-activefit
+          cache-to: type=gha,mode=max,scope=parser-activefit
+
+  build-wearable-events:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.wearable_events == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/wearable-events-ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata (tags/labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKERHUB_IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=sha,prefix=,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./wearable-events
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=wearable-events
+          cache-to: type=gha,mode=max,scope=wearable-events
