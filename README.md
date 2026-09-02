@@ -85,7 +85,7 @@ Two custom images are built from this repo (see
 .
 ├── .github/workflows/docker-publish.yml   builds + pushes all THREE container images
 ├── docker-compose.yml              the full stack: InfluxDB, Grafana, ntfy, both parsers, wearable-events
-├── .env.example                    copy to .env, fill in your own values
+├── env.stack.example                copy to .env, fill in your own values
 ├── parser/                         device parsers - see parser/colmi/README.md and parser/activefit/README.md
 │   ├── common/                     shared, device-agnostic: WebDAV fetch, DEVICE table lookup,
 │   │                               checkpoint mechanics, future-timestamp guard, InfluxDB write path
@@ -161,14 +161,14 @@ there — that's what the parser container reads.
 ```bash
 git clone https://github.com/<your-username>/wearable-biomarker-stack
 cd wearable-biomarker-stack
-cp .env.example .env
+cp env.stack.example .env
 ```
 
-> Before generating any secrets: Compose applies its own `${VAR}` interpolation syntax to .env's own values, not just to docker-compose.yml. A raw `$` inside a generated password gets misread as the start of a variable reference and silently truncates everything after it — no error, it just quietly produces a shorter, wrong value. Generating secrets with openssl rand -hex N (as used throughout this guide) sidesteps this entirely, since hex output can never contain $. See the comment at the top of .env.example for the full explanation.
+> Before generating any secrets: Compose applies its own `${VAR}` interpolation syntax to .env's own values, not just to docker-compose.yml. A raw `$` inside a generated password gets misread as the start of a variable reference and silently truncates everything after it — no error, it just quietly produces a shorter, wrong value. Generating secrets with openssl rand -hex N (as used throughout this guide) sidesteps this entirely, since hex output can never contain $. See the comment at the top of env.stack.example for the full explanation.
 
 Edit `.env` and fill in, at minimum:
 
-- `PARSER_IMAGE` / `WEARABLE_EVENTS_IMAGE` — set these to wherever the
+- `PARSER_COLMI_IMAGE` / `PARSER_ACTIVEFIT_IMAGE` / `WEARABLE_EVENTS_IMAGE` — set these to wherever the
   images live (prebuilt or your own, per step 1)
 - `INFLUXDB_TOKEN` and `INFLUXDB_INIT_ADMIN_TOKEN` — set both to the same value: a randomly generated token, not something you type yourself (this is a real credential with full API access). Generate one with:
 ```bash
@@ -180,8 +180,26 @@ Edit `.env` and fill in, at minimum:
 - `WEARABLE_EVENTS_ADMIN_USERNAME` / `WEARABLE_EVENTS_ADMIN_PASSWORD` —
   your first login for the wearable-events web UI
 
-Every variable in `.env.example` has an inline comment explaining what
+Every variable in `env.stack.example` has an inline comment explaining what
 it does and a safe default where one exists.
+
+`PUID`/`PGID` (default 1000:1000, the first non-root user on most Linux
+distros) control which host uid/gid the InfluxDB, Grafana, ntfy, and
+wearable-events containers run as — set to `id -u`/`id -g` for whichever
+host user you want owning the data under `APPDATA_ROOT`. Because these
+are host bind mounts (not Docker-managed named volumes), the containers
+running as a non-root user can't create or fix ownership on their own —
+**create the directories and set ownership before first boot**:
+
+```bash
+sudo mkdir -p ${APPDATA_ROOT:-/DATA/AppData/biomarker-stack}/{influxdb/data,influxdb/config,grafana/data,ntfy/cache,ntfy/lib,wearable-events}
+sudo chown -R $(id -u):$(id -g) ${APPDATA_ROOT:-/DATA/AppData/biomarker-stack}
+```
+
+(Skip this if you're fine with the images' own default user — in that
+case just leave `PUID`/`PGID` unset in `.env` and Docker will create
+these directories automatically on first start, same as before this
+was configurable.)
 
 ### 4. Start everything
 
@@ -251,7 +269,7 @@ Developing or modifying this component? See `wearable-events/README.md` for the 
 
 Each person gets their own ring and their own parser container instance
 (set `GADGETBRIDGE_USER` differently per instance — see
-[`.env.example`](./.env.example)). The wearable-events web app supports
+[`env.stack.example`](./env.stack.example)). The wearable-events web app supports
 multiple logins itself: use the *same* username for a person's
 wearable-events account as their `GADGETBRIDGE_USER` value, so their
 calendar/sleep-score data and their sensor data share the same `user` tag

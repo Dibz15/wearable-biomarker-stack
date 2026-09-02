@@ -58,6 +58,13 @@ services:
     image: influxdb:2.7
     container_name: biomarker-influxdb
     restart: unless-stopped
+    # Runs as PUID:PGID instead of the image's default (usually root or a
+    # fixed image-baked uid) so files written into the bind-mounted
+    # APPDATA_ROOT paths below are owned by a uid/gid you control on the
+    # host, not whatever the image happens to hard-code. Matters because
+    # these are host bind mounts, not Docker-managed named volumes -
+    # ownership is real host filesystem ownership. See env.stack.example.
+    user: "${PUID:-1000}:${PGID:-1000}"
     ports:
       - "${INFLUXDB_HOST_PORT:-8086}:8086"
     environment:
@@ -135,6 +142,9 @@ services:
     image: grafana/grafana:latest
     container_name: biomarker-grafana
     restart: unless-stopped
+    # See the same note on the influxdb service above - matches ownership
+    # of the bind-mounted grafana/data path to a host-controlled uid/gid.
+    user: "${PUID:-1000}:${PGID:-1000}"
     ports:
       - "${GRAFANA_HOST_PORT:-3000}:3000"
     environment:
@@ -179,6 +189,13 @@ services:
     image: binwiederhier/ntfy:latest
     container_name: biomarker-ntfy
     restart: unless-stopped
+    # See the same note on the influxdb service above - matches ownership
+    # of the bind-mounted ntfy/cache and ntfy/lib paths to a
+    # host-controlled uid/gid. Because of this, NTFY_LISTEN_HTTP below is
+    # set to an unprivileged port (8080, not the image's default 80) -
+    # a non-root user can't bind ports below 1024 on most kernels, so
+    # staying on 80 here would fail to start once PUID/PGID isn't root.
+    user: "${PUID:-1000}:${PGID:-1000}"
     command:
       - serve
     environment:
@@ -187,13 +204,13 @@ services:
       # Keep this reachable only over Tailscale rather than opening it to
       # the wider internet - ntfy has no auth by default on the topic you
       # publish/subscribe to
-      NTFY_LISTEN_HTTP: ":80"
+      NTFY_LISTEN_HTTP: ":8080"
       NTFY_CACHE_FILE: "/var/cache/ntfy/cache.db"
       NTFY_AUTH_FILE: "/var/lib/ntfy/auth.db"
       NTFY_AUTH_DEFAULT_ACCESS: "deny-all"
       NTFY_ENABLE_SIGNUP: "false"
     ports:
-      - "${NTFY_HOST_PORT:-8090}:80"
+      - "${NTFY_HOST_PORT:-8090}:8080"
     volumes:
       - ${APPDATA_ROOT:-/DATA/AppData/biomarker-stack}/ntfy/cache:/var/cache/ntfy
       - ${APPDATA_ROOT:-/DATA/AppData/biomarker-stack}/ntfy/lib:/var/lib/ntfy
@@ -205,7 +222,7 @@ services:
           description:
             en_us: "Timezone for notification timestamps"
       ports:
-        - container: "80"
+        - container: "8080"
           description:
             en_us: "ntfy web UI / publish-subscribe API"
       volumes:
@@ -347,6 +364,10 @@ services:
     image: ${WEARABLE_EVENTS_IMAGE:-dibz15/wearable-events-ui:latest}
     container_name: biomarker-wearable-events
     restart: unless-stopped
+    # See the same note on the influxdb service above - matches ownership
+    # of the bind-mounted wearable-events path (holds config.db) to a
+    # host-controlled uid/gid.
+    user: "${PUID:-1000}:${PGID:-1000}"
     environment:
       SQLITE_PATH: /data/config.db
       TZ: ${TZ:-UTC}
