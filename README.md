@@ -12,12 +12,10 @@ and a subjective sleep-quality score, so the raw sensor trends can
 eventually be correlated against what was actually happening in your day.
 
 An Amazfit parser (`parser/activefit/`) runs alongside the ring parser
-for a second device. Its table/column names are confirmed against a
-real Gadgetbridge schema dump, but the semantics of some fields (e.g.
-sleep-stage columns, timestamp units) aren't yet verified against real
-Active 3 Premium data - safe to run continuously either way (gracefully
-does nothing until the watch is paired). See
-[`parser/activefit/README.md`](./parser/activefit/README.md).
+for a second device. Real data from a paired Active 3 Premium has
+confirmed several tables (activity, HRV, temperature, stress, SpO2 and
+more), but field semantics (units, some code meanings) aren't fully
+verified yet - see [`parser/activefit/README.md`](./parser/activefit/README.md).
 
 Everything runs in Docker and is designed to be pasted straight into a
 home server / NAS setup (tested against [CasaOS](https://casaos.io/), but

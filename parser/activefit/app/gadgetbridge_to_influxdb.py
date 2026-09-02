@@ -59,12 +59,13 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from common.checkpoint import ObservedTracker, get_last_checkpoint_ns
-from common.devices import device_tags_factory, fetch_devices, run_query
-from common.influx import build_client, write_results
-from common.webdav import fetch_database, open_database
 from loguru import logger
 from webdav3.client import Client
+
+from common.webdav import fetch_database, open_database
+from common.devices import run_query, fetch_devices, device_tags_factory
+from common.checkpoint import get_last_checkpoint_ns, ObservedTracker
+from common.influx import build_client, write_results
 
 ### Config section
 
@@ -243,6 +244,52 @@ def extract_data(cur, client):
             })
             observed.note(r[1], row_ts)
         section_counts[f"activity ({activity_table_used})"] = len(rows)
+
+    # --- HRV. CONFIRMED table AND real data - discovered via
+    # scripts/check_table_usage.py against actual synced watch data,
+    # not schema-reading. Answers the original open question of where
+    # HRV lives for this device: not a HUAMI_*-prefixed table at all,
+    # but the cross-vendor GENERIC_HRV_VALUE_SAMPLE. Same shape and
+    # field name as Colmi's own HRV extraction (TIMESTAMP, DEVICE_ID,
+    # VALUE -> field "hrv", no extra tags) - this is exactly the
+    # shared-field design point: same field name across devices, so
+    # they compare directly once split apart by the ${device}
+    # dashboard filter, rather than needing device-specific field names. ---
+    rows = run_query(cur, "GENERIC_HRV_VALUE_SAMPLE",
+        "SELECT TIMESTAMP, DEVICE_ID, VALUE FROM GENERIC_HRV_VALUE_SAMPLE "
+        f"WHERE TIMESTAMP >= {query_start_bound_scaled} ORDER BY TIMESTAMP ASC")
+    if rows is not None:
+        for r in rows:
+            row_ts = to_nanos(r[0])
+            results.append({
+                "timestamp": row_ts,
+                "fields": {"hrv": r[2]},
+                "tags": device_tags(r[1])
+            })
+            observed.note(r[1], row_ts)
+        section_counts["hrv (GENERIC_HRV_VALUE_SAMPLE)"] = len(rows)
+
+    # --- Temperature. CONFIRMED table AND real data (same discovery
+    # path as HRV above). Same shape as Colmi's COLMI_TEMPERATURE_SAMPLE
+    # and the same field/tag names, for the same shared-field reason. ---
+    rows = run_query(cur, "GENERIC_TEMPERATURE_SAMPLE",
+        "SELECT TIMESTAMP, DEVICE_ID, TEMPERATURE, TEMPERATURE_TYPE, TEMPERATURE_LOCATION "
+        "FROM GENERIC_TEMPERATURE_SAMPLE "
+        f"WHERE TIMESTAMP >= {query_start_bound_scaled} ORDER BY TIMESTAMP ASC")
+    if rows is not None:
+        for r in rows:
+            row_ts = to_nanos(r[0])
+            results.append({
+                "timestamp": row_ts,
+                "fields": {"temperature": r[2]},
+                "tags": {
+                    **device_tags(r[1]),
+                    "temperature_type": r[3],
+                    "temperature_location": r[4]
+                }
+            })
+            observed.note(r[1], row_ts)
+        section_counts["temperature (GENERIC_TEMPERATURE_SAMPLE)"] = len(rows)
 
     # --- Resting heart rate. CONFIRMED table/columns. ---
     rows = run_query(cur, "HUAMI_HEART_RATE_RESTING_SAMPLE",
