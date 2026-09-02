@@ -6,10 +6,14 @@
 #
 #   docker build -f parser/activefit/Dockerfile ./parser
 #
-# NOTE: the image builds and runs, but extract_data() currently raises
-# NotImplementedError on every sync - see README.md in this directory.
-# Not meant to be deployed yet; this Dockerfile exists so CI/build
-# plumbing is exercised and ready the moment extraction is filled in.
+# NOTE: this image runs safely before the Active 3 Premium is even
+# paired - every query gracefully skips a missing/mismatched table
+# instead of crashing (see README.md in this directory), so it just
+# quietly does nothing every cycle until the watch exists in the
+# Gadgetbridge export. The HUAMI_* table/column names it queries are
+# still best-effort guesses, not verified against real hardware -
+# don't trust the data it produces as correct until you've gone
+# through this directory's README.md checklist.
 
 FROM python:slim-bullseye
 

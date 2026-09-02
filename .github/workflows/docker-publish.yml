@@ -104,7 +104,7 @@ jobs:
     permissions:
       contents: read
     env:
-      DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/activefit2influx
+      DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/amazfit2influx
     steps:
       - uses: actions/checkout@v4
 

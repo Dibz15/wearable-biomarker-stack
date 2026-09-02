@@ -11,9 +11,12 @@ context tagging (caffeine, alcohol, meetings pulled from your calendar)
 and a subjective sleep-quality score, so the raw sensor trends can
 eventually be correlated against what was actually happening in your day.
 
-An Amazfit parser (`parser/activefit/`) is scaffolded alongside the ring
-parser for running a second device simultaneously and comparing sensor
-readings, but its extraction logic isn't implemented yet - see
+An Amazfit parser (`parser/activefit/`) runs alongside the ring parser
+for a second device. Its table/column names are confirmed against a
+real Gadgetbridge schema dump, but the semantics of some fields (e.g.
+sleep-stage columns, timestamp units) aren't yet verified against real
+Active 3 Premium data - safe to run continuously either way (gracefully
+does nothing until the watch is paired). See
 [`parser/activefit/README.md`](./parser/activefit/README.md).
 
 Everything runs in Docker and is designed to be pasted straight into a
@@ -90,9 +93,9 @@ Two custom images are built from this repo (see
 │   │   ├── app/gadgetbridge_to_influxdb.py
 │   │   ├── Dockerfile
 │   │   └── scripts/                 one-off maintenance scripts (checkpoint reset, historical data fixes)
-│   └── activefit/                  Amazfit Active 3 Premium parser (HUAMI_* tables) - SKELETON ONLY,
-│       ├── app/gadgetbridge_to_influxdb.py   extract_data() raises NotImplementedError until
-│       ├── Dockerfile                        verified against a real export - see its README
+│   └── activefit/                  Amazfit Active 3 Premium parser (HUAMI_* tables) - best-effort,
+│       ├── app/gadgetbridge_to_influxdb.py   runs safely pre-pairing (graceful no-op), but
+│       ├── Dockerfile                        table/column guesses are unverified - see its README
 │       └── README.md
 ├── grafana/                         Grafana datasource + alerting config-as-code (see step 7)
 │   ├── provisioning-templates/      templates - NOT read directly by Grafana, see render-provisioning.sh
@@ -135,9 +138,10 @@ parser-colmi:
     dockerfile: ./parser/colmi/Dockerfile
 ```
 
-(`parser-activefit` isn't functional yet - see
-[`parser/activefit/README.md`](./parser/activefit/README.md) - so
-there's no need to build it locally until that's filled in.)
+(The same applies to `parser-activefit` if you want it built locally -
+same context/Dockerfile pattern, just under `activefit/`. It's
+best-effort/unverified against real hardware but safe to run - see
+[`parser/activefit/README.md`](./parser/activefit/README.md).)
 
 (If you're maintaining your own fork and want it to build and publish
 images automatically on every push, the repo includes a GitHub Actions

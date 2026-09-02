@@ -24,7 +24,7 @@ apk add --no-cache gettext >/dev/null
 # like ntfy's own {{.title}}/{{.message}} template syntax, or Grafana's
 # own v.timeRangeStart/v.windowPeriod Flux macros in dashboard JSON -
 # can be accidentally mangled.
-VARS='$INFLUX_URL $INFLUXDB_ORG $INFLUXDB_BUCKET $INFLUXDB_TOKEN $INFLUXDB_MEASUREMENT $ALERT_HRV_USER $NTFY_TOPIC $NTFY_USER $NTFY_PASSWORD $NTFY_PRIORITY'
+VARS='$INFLUX_URL $INFLUXDB_ORG $INFLUXDB_BUCKET $INFLUXDB_TOKEN $INFLUXDB_MEASUREMENT $ALERT_HRV_USER $ALERT_HRV_SOURCE $NTFY_TOPIC $NTFY_USER $NTFY_PASSWORD $NTFY_PRIORITY'
 
 for dir in /templates/*/; do
     category=$(basename "$dir")
