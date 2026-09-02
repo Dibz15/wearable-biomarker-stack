@@ -197,7 +197,7 @@ This starts InfluxDB, Grafana, ntfy, the ring parser, and wearable-events.
 
 InfluxDB initializes itself on first boot, using the INFLUXDB_ORG, INFLUXDB_BUCKET, INFLUXDB_INIT_USERNAME, INFLUXDB_INIT_PASSWORD, and INFLUXDB_TOKEN values from your .env — no manual setup wizard needed.
 
-Open http://<your-host>:8086 and log in with INFLUXDB_INIT_USERNAME/ INFLUXDB_INIT_PASSWORD to confirm the org and bucket you set exist.
+Open http://<your-host>:8086 and log in with INFLUXDB_INIT_USERNAME/ INFLUXDB_INIT_PASSWORD to confirm the org and bucket you set exist. (8086, and the other host ports mentioned throughout this doc — 3000, 8090, 8081 — are each just the default; override with INFLUXDB_HOST_PORT/GRAFANA_HOST_PORT/NTFY_HOST_PORT/WEARABLE_EVENTS_HOST_PORT in .env if any of them collide with something else on your host.)
 
 This auto-init only runs once, against an empty data volume. If you change INFLUXDB_ORG/INFLUXDB_BUCKET/etc. in .env after the first boot, it won't retroactively apply — either create the new org/bucket/ token manually from this UI, or wipe the InfluxDB volume (you'll lose any data already collected) to trigger a fresh init.
 

@@ -59,7 +59,7 @@ services:
     container_name: biomarker-influxdb
     restart: unless-stopped
     ports:
-      - "8086:8086"
+      - "${INFLUXDB_HOST_PORT:-8086}:8086"
     environment:
       # First-run setup - only takes effect on an empty data volume.
       # After first boot, manage users/tokens via the InfluxDB UI instead
@@ -136,7 +136,7 @@ services:
     container_name: biomarker-grafana
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "${GRAFANA_HOST_PORT:-3000}:3000"
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-changeme_grafana_password}
@@ -193,7 +193,7 @@ services:
       NTFY_AUTH_DEFAULT_ACCESS: "deny-all"
       NTFY_ENABLE_SIGNUP: "false"
     ports:
-      - "8090:80"
+      - "${NTFY_HOST_PORT:-8090}:80"
     volumes:
       - ${APPDATA_ROOT:-/DATA/AppData/biomarker-stack}/ntfy/cache:/var/cache/ntfy
       - ${APPDATA_ROOT:-/DATA/AppData/biomarker-stack}/ntfy/lib:/var/lib/ntfy
@@ -297,13 +297,16 @@ services:
           description:
             en_us: "How often to re-check the Nextcloud export, in seconds"
 
-  # Amazfit Active 3 Premium parser. NOT YET FUNCTIONAL - the HUAMI_*
-  # extraction logic is still an unverified skeleton (see
-  # parser/activefit/README.md), so this service is gated behind the
-  # `activefit` Compose profile and won't start on a plain
-  # `docker compose up`. Once extraction is implemented and verified,
-  # drop the `profiles:` line (or run with `--profile activefit`) to
-  # enable it.
+  # Amazfit Active 3 Premium parser. Best-effort implementation - the
+  # HUAMI_* table/column names are guessed from Gadgetbridge's public
+  # issue tracker, NOT verified against real Active 3 Premium hardware
+  # yet (see parser/activefit/README.md). Safe to run continuously
+  # before the watch is even paired: every query gracefully skips a
+  # missing/mismatched table instead of crashing, so before pairing
+  # this just quietly does nothing every cycle. Once real data starts
+  # flowing in, treat it as a starting point to verify, not as
+  # confirmed-correct - watch the logs and follow the checklist in
+  # that README.
   parser-activefit:
     image: ${PARSER_ACTIVEFIT_IMAGE:-dibz15/amazfit2influx:latest}
     container_name: biomarker-parser-activefit
@@ -369,7 +372,7 @@ services:
     volumes:
       - ${APPDATA_ROOT:-/DATA/AppData/biomarker-stack}/wearable-events:/data
     ports:
-      - "8081:8080"
+      - "${WEARABLE_EVENTS_HOST_PORT:-8081}:8080"
     networks:
       - biomarker-net
     depends_on:
