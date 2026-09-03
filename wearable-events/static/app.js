@@ -308,7 +308,7 @@ const DETAIL_VIEWS = {
     // rolling 7-day baseline would just be noise, not signal.
     periods: ["day", "week", "month"],
     charts: [
-      { field: "temperature", label: "Temperature" },
+      { field: "temperature", label: "Temperature", decimals: 1 },
     ],
     // A second, PARALLEL section (not just another entry in `charts`)
     // - Day shows a single point-in-time comparison (reusing the same
@@ -320,13 +320,24 @@ const DETAIL_VIEWS = {
       field: "temperature",
       label: "Change from Baseline",
       unit: "\u00b0",
+      decimals: 1,
       baseline: {
         lowLabel: "Cooler",
         highLabel: "Warmer",
         unit: "\u00b0",
-        // Unlike HRV/SpO2's threshold (a statistical z-score with no
-        // settled convention), this one is a DIRECT match to Zepp's
-        // own confirmed "optimal" band - not a guess.
+        decimals: 1,
+        // Fixed absolute scale, not the statistical z-score every
+        // other field's comparison bar uses - matches how the W/M
+        // differential trend chart already works, and how Zepp itself
+        // actually displays temperature (confirmed fixed thresholds,
+        // not a statistical measure). scaleMax=1.5 means the bar's
+        // full width represents +-1.5 degrees; driftThreshold=0.5 is
+        // now correctly compared against the RAW DEGREE delta, not a
+        // z-score (an earlier version of this compared it against z
+        // instead, which would have miscalibrated the clue - a z-score
+        // commonly exceeds 0.5 even for an unremarkable night).
+        scaleType: "fixed",
+        scaleMax: 1.5,
         driftThreshold: 0.5,
         lowClue: "Cooler than your recent baseline",
         highClue: "Warmer than your recent baseline \u2013 can precede illness, poor recovery, or reflect a warm sleep environment",
@@ -441,7 +452,16 @@ async function openMetricDetail(viewKey) {
   await renderDetailPeriod(view, "day", todayISO());
 }
 
-function computeStatsFromSeries(series, period) {
+// A single place to round-and-format a display number - `decimals`
+// left undefined means "don't force a precision", preserving whatever
+// a field already showed before this existed (heart_rate/HRV/etc.
+// don't need this; temperature does, per person's explicit request).
+function formatNum(v, decimals) {
+  if (v === null || v === undefined) return v;
+  return decimals === undefined ? v : Number(v.toFixed(decimals));
+}
+
+function computeStatsFromSeries(series, period, decimals) {
   // Stats computed client-side from whatever data is already fetched
   // for the current chart/period, rather than depending on a separate
   // pre-fetched prop (Today's vitals summary, which doesn't cover
@@ -460,14 +480,14 @@ function computeStatsFromSeries(series, period) {
     if (isRawPoints) {
       const values = points.map(p => p.v);
       stats[device] = {
-        last: points[points.length - 1].v,
-        min: Math.min(...values),
-        max: Math.max(...values),
+        last: formatNum(points[points.length - 1].v, decimals),
+        min: formatNum(Math.min(...values), decimals),
+        max: formatNum(Math.max(...values), decimals),
       };
     } else {
       stats[device] = {
-        min: Math.min(...points.map(p => p.min)),
-        max: Math.max(...points.map(p => p.max)),
+        min: formatNum(Math.min(...points.map(p => p.min)), decimals),
+        max: formatNum(Math.max(...points.map(p => p.max)), decimals),
       };
     }
   }
@@ -527,6 +547,21 @@ function renderBaselineBar(comparisonByDevice, baselineDays, config = {}) {
     lowClue = null,
     highClue = null,
     normalClue = null,
+    // "zscore" (default): position and drift-clue driven by the
+    // statistical z-score, same as HRV/SpO2/Resting HR - there's no
+    // fixed, field-meaningful unit to scale the bar to for those.
+    // "fixed": position and drift-clue driven by the RAW delta
+    // instead, scaled to +-scaleMax - for a field like temperature
+    // where Zepp itself uses fixed absolute thresholds (confirmed
+    // +-0.5/1.0/1.5 degrees), not a statistical measure. Mixing the
+    // two up front (a threshold chosen in degrees, compared against a
+    // z-score) would silently miscalibrate the clue - a z-score
+    // commonly exceeds 0.5 in magnitude even for an unremarkable
+    // night, so a "0.5" threshold meant for degrees would fire on the
+    // z-score almost constantly.
+    scaleType = "zscore",
+    scaleMax = BASELINE_Z_CAP,
+    decimals,
   } = config;
 
   const devices = Object.keys(comparisonByDevice);
@@ -539,13 +574,15 @@ function renderBaselineBar(comparisonByDevice, baselineDays, config = {}) {
   }
   const rows = devices.map(device => {
     const c = comparisonByDevice[device];
-    // Clamp to +-BASELINE_Z_CAP standard deviations before mapping to
-    // the bar's width, so a rare big swing pins to the end of the bar
-    // rather than going off-scale - the person's own suggested approach.
-    const clampedZ = Math.max(-BASELINE_Z_CAP, Math.min(BASELINE_Z_CAP, c.z));
-    const pct = 50 + (clampedZ / BASELINE_Z_CAP) * 50;
-    const deltaText = c.delta > 0 ? `+${c.delta}` : `${c.delta}`;
-    const clueHtml = driftThreshold !== null ? renderDriftClue(c.z, driftThreshold, lowClue, highClue, normalClue) : "";
+    // Clamp before mapping to the bar's width, so a rare big swing
+    // pins to the end of the bar rather than going off-scale - the
+    // person's own suggested approach.
+    const driftMetric = scaleType === "fixed" ? c.delta : c.z;
+    const cap = scaleType === "fixed" ? scaleMax : BASELINE_Z_CAP;
+    const clamped = Math.max(-cap, Math.min(cap, driftMetric));
+    const pct = 50 + (clamped / cap) * 50;
+    const deltaText = c.delta > 0 ? `+${formatNum(c.delta, decimals)}` : `${formatNum(c.delta, decimals)}`;
+    const clueHtml = driftThreshold !== null ? renderDriftClue(driftMetric, driftThreshold, lowClue, highClue, normalClue) : "";
     return `
       <div class="baseline-row">
         <div class="metric-device-name">${escapeHtml(device)}</div>
@@ -555,7 +592,7 @@ function renderBaselineBar(comparisonByDevice, baselineDays, config = {}) {
         </div>
         <div class="baseline-labels">
           <span>${escapeHtml(lowLabel)}</span>
-          <span class="baseline-delta">${deltaText} ${escapeHtml(unit)} vs ${baselineDays}-day avg (${c.baseline_mean})</span>
+          <span class="baseline-delta">${deltaText} ${escapeHtml(unit)} vs ${baselineDays}-day avg (${formatNum(c.baseline_mean, decimals)})</span>
           <span>${escapeHtml(highLabel)}</span>
         </div>
         ${clueHtml}
@@ -626,7 +663,7 @@ async function renderDetailPeriod(view, period, anchorDate) {
 
   const cardsHtml = view.charts.map((c, i) => {
     const series = seriesByField[c.field];
-    const stats = computeStatsFromSeries(series, period);
+    const stats = computeStatsFromSeries(series, period, c.decimals);
     const baselineHtml = (period === "day" && c.showBaseline)
       ? renderBaselineBar(baselineByField[c.field] || {}, BASELINE_DAYS, c.baseline || {})
       : "";
@@ -670,8 +707,8 @@ async function renderDetailPeriod(view, period, anchorDate) {
     // use, so it needs buildRangeBarChart even though period === "day".
     const isRawPoints = "v" in series[devices[0]][0];
     const chart = isRawPoints
-      ? buildLineChart(canvas, series, devices)
-      : buildRangeBarChart(canvas, series, devices, period, rollingMeanByField[c.field] || {}, c.yMin);
+      ? buildLineChart(canvas, series, devices, c.decimals)
+      : buildRangeBarChart(canvas, series, devices, period, rollingMeanByField[c.field] || {}, c.yMin, c.decimals);
     activeCharts.push(chart);
   });
 
@@ -764,7 +801,7 @@ async function fetchDetailSeries(chart, period, anchorDate) {
   return api(`/vitals/range/${chart.field}?period=${period}&end_date=${anchorDate}`);
 }
 
-function buildLineChart(canvas, series, devices) {
+function buildLineChart(canvas, series, devices, decimals) {
   const datasets = devices.map((device, i) => ({
     label: device,
     // Epoch milliseconds, not the raw ISO string - lets Chart.js's
@@ -807,7 +844,10 @@ function buildLineChart(canvas, series, devices) {
           grid: { color: "#2a2d38" },
         },
         y: {
-          ticks: { color: "#8a8d99" },
+          ticks: {
+            color: "#8a8d99",
+            callback: (v) => formatNum(v, decimals),
+          },
           grid: { color: "#2a2d38" },
         },
       },
@@ -816,6 +856,7 @@ function buildLineChart(canvas, series, devices) {
         tooltip: {
           callbacks: {
             title: (items) => items.length ? new Date(items[0].parsed.x).toLocaleTimeString() : "",
+            label: (item) => `${item.dataset.label}: ${formatNum(item.parsed.y, decimals)}`,
           },
         },
       },
@@ -866,7 +907,7 @@ const medianMarkerPlugin = {
   },
 };
 
-function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}, yMin) {
+function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}, yMin, decimals) {
   // Floating bars: Chart.js draws a [min, max] pair as a bar spanning
   // that range, rather than a bar from zero - exactly the "vertical
   // range bar per period" pattern from the Zepp research (see
@@ -956,7 +997,10 @@ function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}, y
           grid: { display: false },
         },
         y: {
-          ticks: { color: "#8a8d99" },
+          ticks: {
+            color: "#8a8d99",
+            callback: (v) => formatNum(v, decimals),
+          },
           grid: { color: "#2a2d38" },
           // A field like SpO2 naturally lives in a narrow high range
           // (mid-90s to 100%) - auto-scaling to include 0 (or even a
@@ -985,14 +1029,20 @@ function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}, y
             label: (item) => {
               if (item.dataset.raw) {
                 const real = item.dataset.raw[item.dataIndex];
-                return real ? `${item.dataset.label}: ${real[0]}\u2013${real[1]}` : "";
+                return real ? `${item.dataset.label}: ${formatNum(real[0], decimals)}\u2013${formatNum(real[1], decimals)}` : "";
               }
               // The rolling-mean overlay dataset doesn't carry a `raw`
               // array (that's specific to the padded-bar workaround
               // above) - fall back to the plotted value directly,
-              // which for this dataset IS the real value.
+              // which for this dataset IS the real value. Defaults to
+              // 1 decimal specifically HERE (decimals ?? 1, not just
+              // decimals) to preserve this tooltip's original behavior
+              // for every field that doesn't pass a decimals config -
+              // it always rounded to 1 decimal before this parameter
+              // existed, and removing that for non-temperature fields
+              // would be an unrelated regression, not the requested fix.
               const v = item.parsed.y;
-              return v === null || v === undefined ? "" : `${item.dataset.label}: ${Math.round(v * 10) / 10}`;
+              return v === null || v === undefined ? "" : `${item.dataset.label}: ${formatNum(v, decimals ?? 1)}`;
             },
           },
         },
@@ -1063,6 +1113,21 @@ function buildDifferentialChart(canvas, series, devices, config) {
     };
   });
 
+  // The y-axis needs a fixed enough reference frame that the band
+  // coloring stays meaningful across different weeks - if left fully
+  // auto-scaled, a week where every delta happens to sit near 0 would
+  // shrink the axis down to fit that narrow range, and a tiny,
+  // unremarkable blip would look just as visually dramatic as a real
+  // swing looks on some OTHER week's differently-scaled axis. Always
+  // show at least the full range out to the outermost band's
+  // threshold (so "how close is this to Significant" stays visually
+  // legible even on a calm week), but extend further with a little
+  // headroom if an actual delta genuinely exceeds that, so a real
+  // outlier doesn't get clipped at the edge instead of shown.
+  const outermostThreshold = config.bands[config.bands.length - 1].threshold;
+  const maxAbsDelta = Math.max(0, ...devices.flatMap(d => series[d].map(p => Math.abs(p.delta))));
+  const axisBound = Math.max(outermostThreshold, maxAbsDelta * 1.1);
+
   return new Chart(canvas, {
     type: "bar",
     data: { labels, datasets },
@@ -1075,7 +1140,9 @@ function buildDifferentialChart(canvas, series, devices, config) {
           grid: { display: false },
         },
         y: {
-          ticks: { color: "#8a8d99", callback: (v) => `${v > 0 ? "+" : ""}${v}${config.unit}` },
+          min: -axisBound,
+          max: axisBound,
+          ticks: { color: "#8a8d99", callback: (v) => `${v > 0 ? "+" : ""}${formatNum(v, config.decimals)}${config.unit}` },
           grid: { color: "#2a2d38" },
         },
       },
@@ -1087,7 +1154,8 @@ function buildDifferentialChart(canvas, series, devices, config) {
               const p = item.dataset.raw[item.dataIndex];
               if (!p) return "";
               const band = bandForDelta(p.delta, config.bands);
-              const deltaText = p.delta > 0 ? `+${p.delta}` : `${p.delta}`;
+              const deltaVal = formatNum(p.delta, config.decimals);
+              const deltaText = deltaVal > 0 ? `+${deltaVal}` : `${deltaVal}`;
               return `${item.dataset.label}: ${deltaText}${config.unit} (${band.label})`;
             },
           },

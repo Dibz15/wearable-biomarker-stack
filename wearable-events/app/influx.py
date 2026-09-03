@@ -1185,8 +1185,12 @@ def get_nightly_differential_series(field: str, user: str, start_date: date, end
                     baseline_mean = statistics.mean(baseline_values)
                     series.append({
                         "t": d_iso,
-                        "delta": round(by_date[d_iso] - baseline_mean, 2),
-                        "baseline_mean": round(baseline_mean, 2),
+                        # 1 decimal - matches _zscore_comparison's own
+                        # rounding for the same kind of value elsewhere
+                        # in this file, and what the frontend displays
+                        # everywhere temperature numbers show up.
+                        "delta": round(by_date[d_iso] - baseline_mean, 1),
+                        "baseline_mean": round(baseline_mean, 1),
                     })
             d += timedelta(days=1)
         if series:
