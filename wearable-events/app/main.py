@@ -28,6 +28,9 @@ from app.influx import (
     find_manual_events_in_range,
     find_sleep_entries_in_range,
     find_sleep_entry_by_id,
+    get_sleep_stage_breakdown,
+    get_today_steps,
+    get_today_vitals,
     list_distinct_sensor_users,
     manual_event_id,
     write_event_points,
@@ -398,6 +401,49 @@ def get_timeline(start: str | None = None, end: str | None = None, current_user:
 
     entries.sort(key=lambda e: e["timestamp"])
     return entries
+
+
+# --- today dashboard ---
+
+@app.get("/today")
+def get_today(current_user: dict = Depends(get_current_user)):
+    ''' Read-only summary for the "Today" tab: current vitals (per
+    device, for whichever fields have reported anything yet today),
+    today's step total, and last night's sleep (duration + stage
+    breakdown) if a qualifying session exists.
+
+    Deliberately a single combined endpoint rather than one call per
+    card - the frontend renders this as one dashboard, so one round
+    trip on tab load is simpler than several racing fetches, and the
+    underlying InfluxDB queries are already independent/parallelizable
+    work happening server-side regardless of how many HTTP calls the
+    client makes.
+    '''
+    username = current_user["username"]
+
+    vitals = get_today_vitals(username)
+    steps = get_today_steps(username)
+
+    sleep = None
+    session = find_last_completed_sleep_session(username)
+    if session is not None:
+        stages = get_sleep_stage_breakdown(
+            username,
+            session["start_time"],
+            session["start_time"] + timedelta(seconds=session["duration_s"]),
+        )
+        sleep = {
+            "sleep_date": session["sleep_date"],
+            "start_time": session["start_time"].isoformat(),
+            "duration_s": session["duration_s"],
+            "stages_min": stages,
+        }
+
+    return {
+        "vitals": vitals,
+        "steps": steps,
+        "sleep": sleep,
+    }
 
 
 # --- sleep ---

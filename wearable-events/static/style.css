@@ -631,3 +631,145 @@ main {
   background: var(--surface-active);
   color: var(--danger);
 }
+
+/* --- Today tab --- */
+
+.today-section-label {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 1.5rem 0 0.75rem;
+}
+
+.today-section-label:first-child {
+  margin-top: 0;
+}
+
+.sleep-summary-card {
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.sleep-summary-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.sleep-summary-duration {
+  font-size: 1.8rem;
+  font-weight: 700;
+}
+
+.sleep-summary-duration .unit {
+  font-size: 1rem;
+  font-weight: 400;
+  color: var(--muted);
+  margin-left: 0.15rem;
+}
+
+.sleep-summary-date {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* Stage proportion bar - one segment per stage, width proportional to
+   its share of the session. Colors deliberately match the palette
+   Zepp itself uses for the same four stages (see
+   wearable-events/UI_DESIGN_NOTES.md's Sleep tab notes) so anyone used
+   to that app reads this at a glance the same way. */
+.sleep-stage-bar {
+  display: flex;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  margin: 0.85rem 0 0.6rem;
+  background: var(--surface-active);
+}
+
+.sleep-stage-seg.deep { background: #7c6ce8; }
+.sleep-stage-seg.light { background: #6ea8fe; }
+.sleep-stage-seg.rem { background: #4fd8b8; }
+.sleep-stage-seg.awake { background: #e88a8a; }
+
+.sleep-stage-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.9rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.sleep-stage-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.sleep-stage-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.75rem;
+}
+
+.metric-card {
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 0.85rem 1rem;
+}
+
+.metric-card-label {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-bottom: 0.3rem;
+}
+
+.metric-device-row + .metric-device-row {
+  margin-top: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--surface-active);
+}
+
+.metric-device-name {
+  color: var(--muted);
+  font-size: 0.75rem;
+  margin-bottom: 0.1rem;
+}
+
+.metric-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+
+.metric-value .unit {
+  font-size: 0.85rem;
+  font-weight: 400;
+  color: var(--muted);
+  margin-left: 0.1rem;
+}
+
+.metric-sub {
+  color: var(--muted);
+  font-size: 0.75rem;
+  margin-top: 0.15rem;
+}
+
+.metric-card-empty {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.steps-card {
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 1rem;
+  margin-bottom: 0.75rem;
+}

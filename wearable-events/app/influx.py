@@ -485,6 +485,197 @@ def find_manual_events_in_range(user: str, start: datetime, end: datetime) -> li
     ]
 
 
+def _local_today_bounds() -> tuple[datetime, datetime]:
+    ''' Start/end of "today" (midnight to midnight) in the configured
+    local timezone (TZ_NAME) - not UTC's calendar day, for the same
+    reason find_last_completed_sleep_session() resolves sleep_date
+    locally: a person in a timezone ahead of UTC would otherwise see
+    "today" flip over hours before their own local midnight.
+    '''
+    now_local = datetime.now(ZoneInfo(TZ_NAME))
+    start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_local = start_local + timedelta(days=1)
+    return start_local, end_local
+
+
+def _device_stat_by_field(field: str, user: str, start: datetime, end: datetime, stat: str) -> dict[str, float]:
+    ''' One reducer (stat: "last"/"mean"/"min"/"max") for one field,
+    grouped by device, within [start, end). Returns {device_name: value}.
+
+    Deliberately one simple query per (field, stat) pair rather than a
+    cleverer combined Flux query (e.g. multiple yield() calls in one
+    script) - this app's existing InfluxDB functions are all written
+    this way (see find_last_completed_sleep_session, list_distinct_
+    sensor_users above), favoring obviously-correct simple queries over
+    fewer-but-trickier round trips. Personal-use traffic volume makes
+    that the right tradeoff here too.
+    '''
+    if stat not in ("last", "mean", "min", "max"):
+        raise ValueError(f"unsupported stat: {stat!r}")
+
+    client = get_client()
+    query_api = client.query_api()
+
+    start_iso = start.astimezone(timezone.utc).isoformat()
+    stop_iso = end.astimezone(timezone.utc).isoformat()
+
+    flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: {start_iso}, stop: {stop_iso})
+      |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+      |> filter(fn: (r) => r.user == "{user}")
+      |> filter(fn: (r) => r._field == "{field}")
+      |> group(columns: ["device"])
+      |> {stat}()
+    '''
+
+    try:
+        tables = query_api.query(flux)
+    except Exception as e:
+        logger.warning(f"Failed to query {stat}({field}) for user={user}: {e}")
+        return {}
+
+    result = {}
+    for table in tables:
+        for record in table.records:
+            device = record.values.get("device")
+            value = record.get_value()
+            if device is not None and value is not None:
+                result[device] = value
+    return result
+
+
+def get_today_vitals(user: str) -> dict[str, dict]:
+    ''' Today's (local calendar day) vitals summary, per device, for
+    every field both parsers share a common name for (see the shared-
+    field-name design used throughout parser/activefit - this is
+    exactly what makes a single query work unmodified across whichever
+    devices happen to be reporting, ring or watch or both).
+
+    Returns:
+        {
+          "heart_rate": {"<device>": {"last": .., "avg": .., "min": .., "max": ..}, ...},
+          "hrv": {"<device>": {"last": ..}, ...},           # last only - a single
+          "stress": {"<device>": {"last": .., "avg": ..}, ...},  # reading isn't
+          "spo2": {"<device>": {"last": .., "min": .., "max": ..}, ...},  # usefully
+          "temperature": {"<device>": {"last": ..}, ...},    # averaged/ranged
+        }
+
+    A device missing from a field's dict simply hasn't reported that
+    field today - not an error, callers should treat absence as "no
+    data yet" (e.g. before the first sync of the day) rather than a
+    failure.
+    '''
+    start, end = _local_today_bounds()
+
+    # (field, which stats actually make sense for it)
+    field_stats = {
+        "heart_rate": ("last", "mean", "min", "max"),
+        "hrv": ("last",),
+        "stress": ("last", "mean"),
+        "spo2": ("last", "min", "max"),
+        "temperature": ("last",),
+    }
+
+    result: dict[str, dict] = {}
+    for field, stats in field_stats.items():
+        by_device: dict[str, dict] = {}
+        for stat in stats:
+            stat_key = "avg" if stat == "mean" else stat
+            for device, value in _device_stat_by_field(field, user, start, end, stat).items():
+                by_device.setdefault(device, {})[stat_key] = round(value, 1)
+        result[field] = by_device
+
+    return result
+
+
+def get_today_steps(user: str) -> dict[str, int]:
+    ''' Today's (local calendar day) total steps per device - a sum,
+    not last/mean/etc., since steps is a per-sample count that needs
+    adding up across the day rather than reduced to one representative
+    reading.
+    '''
+    start, end = _local_today_bounds()
+    client = get_client()
+    query_api = client.query_api()
+
+    start_iso = start.astimezone(timezone.utc).isoformat()
+    stop_iso = end.astimezone(timezone.utc).isoformat()
+
+    flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: {start_iso}, stop: {stop_iso})
+      |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+      |> filter(fn: (r) => r.user == "{user}")
+      |> filter(fn: (r) => r._field == "steps")
+      |> group(columns: ["device"])
+      |> sum()
+    '''
+
+    try:
+        tables = query_api.query(flux)
+    except Exception as e:
+        logger.warning(f"Failed to query today's steps for user={user}: {e}")
+        return {}
+
+    result = {}
+    for table in tables:
+        for record in table.records:
+            device = record.values.get("device")
+            value = record.get_value()
+            if device is not None and value is not None:
+                result[device] = int(value)
+    return result
+
+
+def get_sleep_stage_breakdown(user: str, session_start: datetime, session_end: datetime) -> dict[str, int]:
+    ''' Minutes spent in each sleep stage (light/deep/rem/awake) for one
+    specific sleep session, identified by its own [start, end) window -
+    NOT a lookback query, the caller (typically find_last_completed_
+    sleep_session's result) already knows exactly which session.
+
+    Sums sleep_stage_duration_s (already extracted per stage segment,
+    see parser/activefit and parser/colmi's sleep stage extraction)
+    grouped by the sleep_stage tag, converted to whole minutes.
+    Deliberately does NOT filter by device - a single sleep session
+    belongs to one device by construction (whichever one was worn that
+    night), so grouping by sleep_stage alone is sufficient and avoids
+    an empty result if the device tag's exact string ever shifts
+    between sync and query (e.g. a device rename in Gadgetbridge).
+    '''
+    client = get_client()
+    query_api = client.query_api()
+
+    start_iso = session_start.astimezone(timezone.utc).isoformat()
+    stop_iso = session_end.astimezone(timezone.utc).isoformat()
+
+    flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: {start_iso}, stop: {stop_iso})
+      |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+      |> filter(fn: (r) => r.user == "{user}")
+      |> filter(fn: (r) => r.sample_type == "sleep_stage")
+      |> filter(fn: (r) => r._field == "sleep_stage_duration_s")
+      |> group(columns: ["sleep_stage"])
+      |> sum()
+    '''
+
+    try:
+        tables = query_api.query(flux)
+    except Exception as e:
+        logger.warning(f"Failed to query sleep stage breakdown for user={user}: {e}")
+        return {}
+
+    result = {}
+    for table in tables:
+        for record in table.records:
+            stage = record.values.get("sleep_stage")
+            value = record.get_value()
+            if stage is not None and value is not None:
+                result[stage] = round(value / 60)
+    return result
+
+
 def list_distinct_sensor_users(lookback_days: int = 365) -> list[str]:
     ''' Returns the distinct `user` tag values seen in the ring parser's
     sensor measurement over the lookback window. Used to power the

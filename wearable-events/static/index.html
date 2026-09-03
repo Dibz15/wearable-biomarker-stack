@@ -28,7 +28,8 @@
 </header>
 
 <nav class="tabs">
-  <button class="tab-btn active" data-tab="tags">Tags</button>
+  <button class="tab-btn active" data-tab="today">Today</button>
+  <button class="tab-btn" data-tab="tags">Tags</button>
   <button class="tab-btn" data-tab="sleep">Sleep</button>
   <button class="tab-btn" data-tab="calendars">Calendars</button>
   <button class="tab-btn" data-tab="timeline">Timeline</button>
@@ -37,7 +38,13 @@
 
 <main>
 
-  <section id="tab-tags" class="tab-panel active">
+  <section id="tab-today" class="tab-panel active">
+    <div id="today-content">
+      <p class="muted">Loading...</p>
+    </div>
+  </section>
+
+  <section id="tab-tags" class="tab-panel">
     <div id="tag-buttons" class="button-grid">
       <p class="muted">Loading...</p>
     </div>
