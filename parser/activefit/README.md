@@ -1,9 +1,12 @@
 # activefit parser (Amazfit Active 3 Premium)
 
-**Status: real synced data confirmed for 10 of the tables below (via
-`scripts/check_table_usage.py` against the actual paired watch).
-Semantics (units, code meanings) are still not independently verified
-- see "What's still unverified" below.**
+**Status: real synced data confirmed for all 11 tables this parser
+queries (via `scripts/check_table_usage.py` against the actual paired
+watch), including full sleep-stage decoding from
+`HUAMI_SLEEP_SESSION_SAMPLE`'s BLOB - ported directly from
+Gadgetbridge's own source, not reverse-engineered. Some field
+semantics (a few code meanings, one table's timestamp scale) are still
+unverified - see "What's still unverified" below.**
 
 This is the HUAMI_*/GENERIC_* counterpart to [`../colmi/`](../colmi/README.md),
 sharing the same device-agnostic plumbing from [`../common/`](../common)
@@ -122,30 +125,139 @@ remain unknown until independently checked against real values:
 | Question | Where |
 |---|---|
 | `GENERIC_HRV_VALUE_SAMPLE.VALUE` - same unit/algorithm as Colmi's HRV? | Both are written to the same `hrv` field for direct dashboard comparison (see the `${device}` filter in the main Grafana dashboard), but a ring and a watch may compute HRV differently (sensor placement, algorithm) - don't assume the two lines are apples-to-apples just because they're the same field name and same units aren't confirmed either |
-| `RAW_KIND` / `RAW_INTENSITY` code meanings | Stored raw (as `activity_kind` tag / `raw_intensity` field), same situation Colmi's `activity_kind` tag is in - not decoded, device-specific |
+| `RAW_KIND` / `RAW_INTENSITY` code meanings | **PARTIALLY RESOLVED** - confirmed directly from Gadgetbridge's `HuamiExtendedSampleProvider.java` source: `64`=outdoor_running, `115`=not_worn, `118`=charging, `120`=sleep (see `HUAMI_ACTIVITY_KIND_MAP`, and the `activity_kind_label` tag now added alongside the raw `activity_kind` tag for these). Real data has also shown `80`, `88`, `96`, `112` - not defined in this file, presumably from a parent/shared Huami constants class not yet pulled; these stay unmapped (raw numeric tag only) rather than guessed. `RAW_INTENSITY` itself is still undecoded for any value |
 | Do `SLEEP`, `REM_SLEEP`, `DEEP_SLEEP` actually differ? | A real Gadgetbridge bug report ([issue #4715](https://codeberg.org/Freeyourgadget/Gadgetbridge/issues/4715)) observed `REM_SLEEP` and `DEEP_SLEEP` holding **identical** values on one device - fields are named `sleep_extended_raw`/`sleep_rem_raw`/`sleep_deep_raw` deliberately, so they aren't confused with Colmi's independently-verified `sleep_stage_*` fields |
 | `TYPE_NUM` meaning on `HUAMI_STRESS_SAMPLE`/`HUAMI_SPO2_SAMPLE` | Gadgetbridge's Zepp OS feature list documents "automatic and manual" stress measurements and SpO2 monitoring, so `TYPE_NUM` is presumed to distinguish those - captured as a tag (`stress_type_num`/`spo2_type_num`) rather than decoded, so it's filterable in Grafana once confirmed without a parser change |
 | `GENERIC_TEMPERATURE_SAMPLE.TEMPERATURE_TYPE`/`TEMPERATURE_LOCATION` codes | Captured as tags, same as Colmi's own (also-unverified) temperature type/location codes - not decoded for either device |
 | `HUAMI_ACTIVITY_SAMPLE` (fallback table) timestamp scale | Assumed to share `HUAMI_EXTENDED_ACTIVITY_SAMPLE`'s seconds scale (same older lineage), but this device doesn't populate that table, so it's unconfirmed |
+| `HUAMI_SLEEP_SESSION_SAMPLE`'s outer SQL `TIMESTAMP` column scale | **RESOLVED** (Sept 2026, via `scripts/check_table_usage.py` against real data): confirmed **milliseconds** - `HUAMI_SLEEP_SESSION_TIMESTAMPS_ARE_MS` now defaults `Y`. Distinct from the blob's own internal timestamps, which are seconds (see below) - same table, two different timestamp representations at different scales, confirmed independently of each other |
+| The unlabeled/unknown byte regions in the sleep session BLOB (offsets 0x0d-0x14, 0x17-0x53, the two single "always 1?" bytes at 0x08/0x09) | Not extracted - Gadgetbridge's own source doesn't use them either (per the ported code), so their meaning is unknown even to Gadgetbridge's maintainers, not just to this parser |
 
-## Not yet extracted
+## Sleep-stage decoding (HUAMI_SLEEP_SESSION_SAMPLE)
 
-- **Sleep sessions (per-night, stage-level like Colmi's).**
-  `HUAMI_SLEEP_SESSION_SAMPLE` now has **confirmed real data**, but
-  it's a `DATA` BLOB column, not queryable rows - decoding that format
-  is real reverse-engineering work (inspecting raw bytes, likely
-  cross-referencing Gadgetbridge's own Java source for how it's
-  written) that hasn't been started. The `SLEEP`/`REM_SLEEP`/`DEEP_SLEEP`
-  columns on the activity table and the respiratory-rate table remain
-  the only sleep-related data currently extracted. Worth revisiting
-  now that there's a real BLOB sample to inspect, if useful enough to
-  be worth the effort.
+**This is the real source of accurate sleep-stage data for this
+device** - confirmed by comparing Gadgetbridge's own sleep graph
+against the watch's display and the Zepp app, all agreeing, while
+`HUAMI_EXTENDED_ACTIVITY_SAMPLE`'s `sleep_extended_raw`/`sleep_rem_raw`/
+`sleep_deep_raw` columns were independently shown (via a live query
+spanning a full night) to stay completely frozen for 9+ hours straight
+- physiologically impossible for real stage tracking. Those columns
+are kept (see the table above) since they're free and harmless, but
+they are NOT the real signal.
+
+The BLOB's byte layout is **not reverse-engineered** - it's ported
+directly from Gadgetbridge's own `HuamiSleepSessionSampleProvider.java`
+(fetched from `master`, September 2026), the same code that produces
+the sleep graph confirmed accurate above. `decode_sleep_session_blob()`
+in `app/gadgetbridge_to_influxdb.py` has the full field-by-field byte
+offsets in its docstring. Confirmed directly from source, not inferred:
+
+- Stage type codes: `4`=light, `5`=deep, `8`=rem, `7`=awake
+- The blob's internal timestamps (`timestampSession`, `timestampMidnight`)
+  are epoch **seconds** (Gadgetbridge does `new Date(x * 1000L)` on them)
+- A fixed layout: header fields, up to 100 stage slots (5 bytes each:
+  start/end in minutes-since-previous-midnight, plus type), then
+  summary totals (total REM/light/deep/wake minutes, average HR, a
+  0-100 sleep score) at fixed offsets after the stage array
+
+**Confirmed, not assumed**: the SQL table's own outer `TIMESTAMP`
+column scale (`HUAMI_SLEEP_SESSION_TIMESTAMPS_ARE_MS`) is
+**milliseconds** - checked directly via `scripts/check_table_usage.py`'s
+Scale column against real data. This is a *different* value from the
+blob's own internal timestamps (seconds, confirmed from source above)
+- the same table legitimately has two timestamp representations at two
+different scales, each independently confirmed rather than assumed to
+match the other.
+
+Extracted, per session (`sample_type: "sleep_session"`, field names
+matching Colmi's own where a direct equivalent exists):
+
+- `sleep_session_start`, `sleep_session_wakeup`, `sleep_session_duration_s`
+- `sleep_avg_hr`, `sleep_score` (Gadgetbridge's own computed 0-100 score)
+- `rem_sleep_total_duration_s`, `light_sleep_total_duration_s`,
+  `deep_sleep_total_duration_s`, `awake_sleep_total_duration_s`
+
+And per stage transition (`sample_type: "sleep_stage"`), using the
+**exact same pattern** as Colmi's own stage timeline extraction (start/
+end active-window markers plus dense per-minute points) - so the
+existing Sleep Stage Timeline Grafana panel works for both devices
+without modification:
+
+- `sleep_stage_duration_s`, `{stage}_sleep_duration_s`,
+  `sleep_stage_active`, `sleep_stage_now`; tags `sleep_stage`,
+  `sleep_stage_raw`
+
+## activity_kind decoding
+
+Confirmed directly from `HuamiExtendedSampleProvider.java` (the actual
+class backing this table): `64`=outdoor_running, `115`=not_worn,
+`118`=charging, `120`=sleep. Real observed data matches this cleanly -
+e.g. `118` (charging) was the one code where `heart_rate` was
+completely absent (not zero - missing) across every sample, which
+makes sense with no wrist contact while on the charger. `80`, `88`,
+`96`, `112` also show up in real data but aren't defined in this file -
+presumably a parent/shared Huami constants class not yet pulled - the
+`activity_kind_label` tag becomes `"unknown"` for these rather than
+being omitted (see "Tag consistency" below for why that matters), and
+the raw numeric `activity_kind` tag is always there regardless either
+way.
+
+## Tag consistency: always present, never conditionally omitted
+
+Two real bugs so far came from the same root cause: a tag included on
+some points but entirely absent on others (as opposed to present with
+a different value everywhere) - to InfluxDB, that's a *different
+series*, not a different value of the same series, which silently
+fragments Grafana panels into extra, meaningless-looking series. Fixed
+both the same way, and it's now the standing rule for every tag this
+parser adds:
+
+- `HUAMI_STRESS_SAMPLE`/`HUAMI_SPO2_SAMPLE`'s `TYPE_NUM` is `NULL` for
+  some real rows (the earliest couple hours of a real export) -
+  `stress_type_num`/`spo2_type_num` now becomes the string `"unknown"`
+  instead of omitting the tag.
+- `activity_kind_label` was only being added when `activity_kind`
+  matched a confirmed code - now always present, `"unknown"` otherwise.
+
+If you add a new tag to this parser, give it an explicit sentinel
+value for the "don't know"/`NULL` case rather than conditionally
+including the tag - confirmed directly against the real `influxdb_client`
+library (not assumed) that `Point.tag(key, None)` silently drops the
+tag from the line protocol entirely, which is what causes this.
+
+**Why `sleep_extended_raw`/`sleep_rem_raw`/`sleep_deep_raw` and the
+undifferentiated `activity_kind=120` aren't worth chasing further for
+stage detail**: the same source file's `postProcess()` method confirms
+`TYPE_CUSTOM_DEEP_SLEEP`/`REM_SLEEP`/`AWAKE_SLEEP` (121/122/123) are
+assigned by Gadgetbridge itself, purely in-memory at read/display time,
+by overlaying `HuamiSleepSessionSampleProvider`'s already-decoded
+stages back onto activity samples for rendering - never written back
+to the `RAW_KIND` column in SQLite. A real export can only ever
+contain `120` here, never 121-123. The same method also shows
+Gadgetbridge's own threshold-based fallback for the raw sleep byte
+columns (`sample.getRemSleep() > 55`, the one issue #4715 called
+"poorly" accurate) only runs when sleep-session data is *unavailable* -
+since this device has working `HUAMI_SLEEP_SESSION_SAMPLE` data, that
+fallback path never executes here either. Both are now confirmed
+vestigial for this device, not just suspected from the frozen-all-
+night observation.
+
+## Workout/exercise summaries - not yet inventoried
+
+`HuamiActivitySummaryParser.java` (also pulled from source, though not
+wired into the parser) parses a completely separate, richer data
+source: structured workout summaries (GPS track, pace, cadence, HR
+zones, swim stroke data, etc.) for actual exercise sessions, backed by
+`BaseActivitySummary` - not any of the `HUAMI_*`/`GENERIC_*`/`XIAOMI_*`
+tables this parser currently scans for. Worth investigating if
+structured workout data (as opposed to the continuous background
+activity stream already extracted) becomes something worth pulling in.
 
 ## What's extracted
 
 | Data | Table | Fields/tags written |
 |---|---|---|
-| Activity | `HUAMI_EXTENDED_ACTIVITY_SAMPLE` (falls back to `HUAMI_ACTIVITY_SAMPLE`) | `steps`, `heart_rate`, `raw_intensity`, `sleep_extended_raw`, `sleep_rem_raw`, `sleep_deep_raw`; tag `activity_kind` |
+| Activity | `HUAMI_EXTENDED_ACTIVITY_SAMPLE` (falls back to `HUAMI_ACTIVITY_SAMPLE`) | `steps`, `heart_rate`, `raw_intensity`, `sleep_extended_raw`, `sleep_rem_raw`, `sleep_deep_raw`; tags `activity_kind` (raw numeric), `activity_kind_label` (decoded for confirmed codes, `"unknown"` otherwise - always present, never omitted, to avoid the same tag-presence series fragmentation described below) |
 | HRV | `GENERIC_HRV_VALUE_SAMPLE` | `hrv` (same field name as Colmi, for direct comparison) |
 | Temperature | `GENERIC_TEMPERATURE_SAMPLE` | `temperature`; tags `temperature_type`, `temperature_location` (same field/tag names as Colmi) |
 | Resting HR | `HUAMI_HEART_RATE_RESTING_SAMPLE` | `resting_heart_rate` |
@@ -155,6 +267,7 @@ remain unknown until independently checked against real values:
 | SpO2 | `HUAMI_SPO2_SAMPLE` | `spo2`; tag `spo2_type_num` |
 | Sleep respiratory rate | `HUAMI_SLEEP_RESPIRATORY_RATE_SAMPLE` | `sleep_respiratory_rate` |
 | PAI | `HUAMI_PAI_SAMPLE` | `pai_low`, `pai_moderate`, `pai_high`, `pai_time_low_min`, `pai_time_moderate_min`, `pai_time_high_min`, `pai_today`, `pai_total` |
+| Sleep sessions + stages | `HUAMI_SLEEP_SESSION_SAMPLE` | see "Sleep-stage decoding" above |
 
 ## ACTION NEEDED: the HRV alert rule is now under-scoped, not just cautious
 

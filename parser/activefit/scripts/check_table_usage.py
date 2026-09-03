@@ -19,6 +19,8 @@ set in the running container, so no extra config needed).
 import os
 import shutil
 import sys
+import time
+from datetime import datetime, timezone
 
 # /app/common holds the shared webdav/db helpers (see Dockerfile: COPY
 # common /app/common), but this script itself lives in /scripts (a
@@ -91,6 +93,32 @@ ALREADY_IMPLEMENTED = {
 }
 
 
+def classify_timestamp_scale(value):
+    ''' Guesses whether a raw TIMESTAMP value is seconds- or
+    milliseconds-since-epoch by magnitude, comparing against plausible
+    "recent" ranges for each unit (roughly 2020-2033). This exists
+    because a per-table timestamp-unit mismatch is exactly the kind of
+    bug that silently filters an entire table's rows out of every
+    query (a WHERE TIMESTAMP >= <bound computed in the wrong unit>
+    clause can end up always-false for that table specifically, while
+    every other table in the same run works fine) - the same class of
+    bug COLMI_TIMESTAMPS_ARE_MS turned out to be for Colmi, and DURATION
+    units were, twice. Catching this here, on the raw values directly,
+    is far more direct than inferring it from query results.
+    '''
+    if value is None:
+        return "?"
+    now_s = time.time()
+    now_ms = now_s * 1000
+    # +/- ~7 years around "now" in each unit
+    window_s = 7 * 365 * 86400
+    if abs(value - now_s) < window_s:
+        return "seconds"
+    if abs(value - now_ms) < window_s * 1000:
+        return "milliseconds"
+    return "UNRECOGNIZED"
+
+
 def main():
     if not WEBDAV_URL:
         print("WEBDAV_URL not set in environment", file=sys.stderr)
@@ -107,38 +135,57 @@ def main():
     results = []
     for table in CANDIDATE_TABLES:
         try:
-            cur.execute(f"SELECT COUNT(*) FROM {table}")
-            count = cur.fetchone()[0]
+            cur.execute(f"SELECT COUNT(*), MIN(TIMESTAMP), MAX(TIMESTAMP) FROM {table}")
+            count, min_ts, max_ts = cur.fetchone()
         except Exception as e:
-            count = None
+            count, min_ts, max_ts = None, None, None
             print(f"  (skipped {table}: {e})", file=sys.stderr)
-        results.append((table, count))
+        results.append((table, count, min_ts, max_ts))
 
     conn.close()
     shutil.rmtree(tempdir, ignore_errors=True)
 
     results.sort(key=lambda r: (r[1] is None, -(r[1] or 0)))
 
-    print(f"\n{'Table':45} {'Rows':>8}  Status")
-    print("-" * 70)
-    for table, count in results:
+    print(f"\n{'Table':45} {'Rows':>8}  {'Scale':12} Status")
+    print("-" * 95)
+    for table, count, min_ts, max_ts in results:
         if count is None:
             status = "MISSING/ERROR"
+            scale = ""
         elif count == 0:
             status = ""
-        elif table in ALREADY_IMPLEMENTED:
-            status = "<- already extracted"
+            scale = ""
         else:
-            status = "<- NOT YET EXTRACTED, has data!"
+            scale = classify_timestamp_scale(max_ts)
+            already = table in ALREADY_IMPLEMENTED
+            if already and scale == "seconds":
+                status = "<- extracted, but scale looks like SECONDS - check HUAMI_TIMESTAMPS_ARE_MS handling for this table specifically"
+            elif already:
+                status = "<- already extracted"
+            else:
+                status = "<- NOT YET EXTRACTED, has data!"
         count_str = "-" if count is None else str(count)
-        print(f"{table:45} {count_str:>8}  {status}")
+        print(f"{table:45} {count_str:>8}  {scale:12} {status}")
 
     print()
-    nonzero_new = [t for t, c in results if c and c > 0 and t not in ALREADY_IMPLEMENTED]
+    nonzero_new = [t for t, c, _, _ in results if c and c > 0 and t not in ALREADY_IMPLEMENTED]
     if nonzero_new:
         print(f"Tables with real data NOT currently extracted: {nonzero_new}")
     else:
         print("No non-zero tables found outside what's already extracted.")
+
+    seconds_scale_implemented = [
+        t for t, c, _, mx in results
+        if c and c > 0 and t in ALREADY_IMPLEMENTED and classify_timestamp_scale(mx) == "seconds"
+    ]
+    if seconds_scale_implemented:
+        print(f"\nWARNING: these already-extracted tables have SECONDS-scale timestamps, "
+              f"but the parser currently assumes HUAMI_TIMESTAMPS_ARE_MS applies uniformly. "
+              f"A table with seconds-scale TIMESTAMP will have every row silently excluded by "
+              f"the WHERE TIMESTAMP >= <bound-in-ms> clause, even though the table has real "
+              f"data (this is very likely why rows show up here but never reach InfluxDB): "
+              f"{seconds_scale_implemented}")
 
 
 if __name__ == "__main__":
