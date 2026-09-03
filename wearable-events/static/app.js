@@ -481,9 +481,13 @@ async function renderDetailPeriod(view, period, anchorDate) {
   // with a baseline comparison (currently just Resting Heart Rate)
   // also fetch their baseline comparison alongside - a bar comparing
   // "today" against a trailing average only makes sense for a single
-  // day's value, not a week/month/year range, so it's day-only.
+  // day's value, not a week/month/year range, so it's day-only. On
+  // week/month, also fetch the 7-day rolling mean overlay - not
+  // supported (or requested) for year, since it doesn't map onto
+  // monthly bars.
   let seriesByField;
   let baselineByField = {};
+  let rollingMeanByField = {};
   try {
     seriesByField = Object.fromEntries(await Promise.all(
       view.charts.map(async c => [c.field, await fetchDetailSeries(c.field, period, anchorDate)])
@@ -492,6 +496,10 @@ async function renderDetailPeriod(view, period, anchorDate) {
       const baselineCharts = view.charts.filter(c => c.showBaseline);
       baselineByField = Object.fromEntries(await Promise.all(
         baselineCharts.map(async c => [c.field, await api(`/vitals/baseline/${c.field}?days=${BASELINE_DAYS}&date=${anchorDate}`)])
+      ));
+    } else if (period === "week" || period === "month") {
+      rollingMeanByField = Object.fromEntries(await Promise.all(
+        view.charts.map(async c => [c.field, await api(`/vitals/rolling-mean/${c.field}?period=${period}&end_date=${anchorDate}`)])
       ));
     }
   } catch (e) {
@@ -531,7 +539,7 @@ async function renderDetailPeriod(view, period, anchorDate) {
     }
     const chart = period === "day"
       ? buildLineChart(canvas, series, devices)
-      : buildRangeBarChart(canvas, series, devices, period);
+      : buildRangeBarChart(canvas, series, devices, period, rollingMeanByField[c.field] || {});
     activeCharts.push(chart);
   });
 }
@@ -663,13 +671,13 @@ function buildLineChart(canvas, series, devices) {
   });
 }
 
-function buildRangeBarChart(canvas, series, devices, period) {
+function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}) {
   // Floating bars: Chart.js draws a [min, max] pair as a bar spanning
   // that range, rather than a bar from zero - exactly the "vertical
   // range bar per period" pattern from the Zepp research (see
   // wearable-events/UI_DESIGN_NOTES.md's Weekly zoom-level notes).
   const labelFormat = period === "year"
-    ? (iso) => new Date(iso).toLocaleDateString([], { month: "short" })
+    ? (iso) => new Date(iso).toLocaleDateString([], { month: "short", year: "2-digit" })
     : (iso) => new Date(iso).toLocaleDateString([], { month: "short", day: "numeric" });
 
   // Bars are grouped by period start across devices - build one shared
@@ -679,7 +687,7 @@ function buildRangeBarChart(canvas, series, devices, period) {
   const allPeriods = [...new Set(devices.flatMap(d => series[d].map(p => p.t)))].sort();
   const labels = allPeriods.map(labelFormat);
 
-  const datasets = devices.map((device, i) => {
+  const barDatasets = devices.map((device, i) => {
     const byPeriod = Object.fromEntries(series[device].map(p => [p.t, [p.min, p.max]]));
     const rawData = allPeriods.map(t => byPeriod[t] || null);
     // A day with only a single reading (or a genuinely flat value,
@@ -705,9 +713,53 @@ function buildRangeBarChart(canvas, series, devices, period) {
     };
   });
 
+  // Median: a short horizontal dash drawn at each bar's median value -
+  // a 'line' dataset with showLine off (so only the point markers
+  // draw, no connecting line between bars) using the 'line' point
+  // style, which Chart.js renders as a short horizontal dash.
+  const medianDatasets = devices.map((device, i) => {
+    const byPeriod = Object.fromEntries(series[device].map(p => [p.t, p.median]));
+    return {
+      type: "line",
+      label: `${device} median`,
+      isOverlay: true,
+      data: allPeriods.map(t => byPeriod[t] ?? null),
+      showLine: false,
+      pointStyle: "line",
+      pointRadius: 9,
+      pointBorderColor: "#e8e9ed",
+      pointBorderWidth: 2,
+      backgroundColor: "transparent",
+    };
+  });
+
+  // 7-day rolling mean: a genuine connecting line overlaid across the
+  // whole chart - week/month only (daily-bucketed), where "7 day"
+  // aligns naturally with the bars; not requested/rendered for year
+  // (monthly-bucketed - a 7-day mean doesn't map onto a month bar).
+  const rollingDatasets = (period === "week" || period === "month")
+    ? devices.filter(d => rollingMean[d] && rollingMean[d].length).map((device) => {
+        const byDay = Object.fromEntries(rollingMean[device].map(p => [p.t, p.value]));
+        const i = devices.indexOf(device);
+        return {
+          type: "line",
+          label: `${device} 7-day avg`,
+          isOverlay: true,
+          data: allPeriods.map(t => (t in byDay ? byDay[t] : null)),
+          showLine: true,
+          borderColor: DEVICE_CHART_COLORS[i % DEVICE_CHART_COLORS.length],
+          borderWidth: 2,
+          borderDash: [4, 3],
+          pointRadius: 0,
+          backgroundColor: "transparent",
+          spanGaps: true,
+        };
+      })
+    : [];
+
   return new Chart(canvas, {
     type: "bar",
-    data: { labels, datasets },
+    data: { labels, datasets: [...barDatasets, ...medianDatasets, ...rollingDatasets] },
     options: {
       responsive: true,
       animation: false,
@@ -722,12 +774,30 @@ function buildRangeBarChart(canvas, series, devices, period) {
         },
       },
       plugins: {
-        legend: { display: devices.length > 1, labels: { color: "#e8e9ed" } },
+        legend: {
+          display: devices.length > 1,
+          labels: {
+            color: "#e8e9ed",
+            // Only the bar datasets get their own legend entry - the
+            // median dashes and rolling-mean line are visual
+            // annotations on the same device's bar, not separate
+            // series worth cluttering the legend with.
+            filter: (item, data) => !data.datasets[item.datasetIndex].isOverlay,
+          },
+        },
         tooltip: {
           callbacks: {
             label: (item) => {
-              const real = item.dataset.raw[item.dataIndex];
-              return real ? `${item.dataset.label}: ${real[0]}\u2013${real[1]}` : "";
+              if (item.dataset.raw) {
+                const real = item.dataset.raw[item.dataIndex];
+                return real ? `${item.dataset.label}: ${real[0]}\u2013${real[1]}` : "";
+              }
+              // Median / rolling-mean overlay datasets don't carry a
+              // `raw` array (that's specific to the padded-bar
+              // workaround above) - fall back to the plotted value
+              // directly, which for these datasets IS the real value.
+              const v = item.parsed.y;
+              return v === null || v === undefined ? "" : `${item.dataset.label}: ${Math.round(v * 10) / 10}`;
             },
           },
         },

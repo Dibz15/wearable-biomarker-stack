@@ -672,19 +672,29 @@ def _grouped_series(field: str, user: str, start: datetime, end: datetime) -> di
 
 
 def get_period_range_series(field: str, user: str, start: datetime, end: datetime, window: str) -> dict[str, list[dict]]:
-    ''' Per-device min/max for one field, bucketed into `window`-sized
-    periods (a Flux duration string, e.g. "1d" or "1mo") across
-    [start, end) - what the W/M/Y "range bar" charts plot (one bar per
-    period spanning that period's low-to-high), as opposed to
-    get_today_series()'s raw per-point series used for the D view.
+    ''' Per-device min/max/median for one field, bucketed into
+    `window`-sized periods (a Flux duration string, e.g. "1d" or "1mo")
+    across [start, end) - what the W/M/Y "range bar" charts plot (one
+    bar per period spanning that period's low-to-high, with the median
+    marked inside it), as opposed to get_today_series()'s raw
+    per-point series used for the D view.
 
-    Returns {"<device>": [{"t": <period start ISO8601>, "min": v, "max": v}, ...]}.
+    Returns {"<device>": [{"t": <period start ISO8601>, "min": v,
+    "max": v, "median": v}, ...]}.
 
-    Two separate aggregateWindow() queries (min, then max), zipped
+    Three separate aggregateWindow() queries (min, max, median), zipped
     together by (device, period start) - matches this file's established
     style of simple single-purpose queries over one cleverer combined
     query (see _device_stat_by_field's own docstring for the same
-    reasoning).
+    reasoning). median needs different Flux syntax from the other two:
+    plain `fn: median` doesn't work in aggregateWindow() (median()
+    lacks the `column` parameter aggregateWindow tries to pass to it -
+    confirmed via InfluxDB's own docs, not assumed), so it needs the
+    full anonymous-function form instead. Uses median()'s
+    "exact_selector" method specifically, which returns an actual
+    observed reading rather than an interpolated/averaged value -
+    right for showing "an actual recorded reading from that day", not
+    a synthetic number nobody's device ever produced.
     '''
     client = get_client()
     query_api = client.query_api()
@@ -694,22 +704,12 @@ def get_period_range_series(field: str, user: str, start: datetime, end: datetim
 
     by_device_and_time: dict[str, dict[str, dict]] = {}
 
-    for stat in ("min", "max"):
-        flux = f'''
-        from(bucket: "{INFLUX_BUCKET}")
-          |> range(start: {start_iso}, stop: {stop_iso})
-          |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
-          |> filter(fn: (r) => r.user == "{user}")
-          |> filter(fn: (r) => r._field == "{field}")
-          |> group(columns: ["device"])
-          |> aggregateWindow(every: {window}, fn: {stat}, createEmpty: false)
-        '''
+    def run_and_collect(flux: str, key: str):
         try:
             tables = query_api.query(flux)
         except Exception as e:
-            logger.warning(f"Failed to query {stat}({field}) range series for user={user}: {e}")
-            continue
-
+            logger.warning(f"Failed to query {key}({field}) range series for user={user}: {e}")
+            return
         for table in tables:
             for record in table.records:
                 device = record.values.get("device")
@@ -718,16 +718,117 @@ def get_period_range_series(field: str, user: str, start: datetime, end: datetim
                 if device is None or value is None or period_start is None:
                     continue
                 period_key = period_start.isoformat()
-                by_device_and_time.setdefault(device, {}).setdefault(period_key, {"t": period_key})[stat] = value
+                by_device_and_time.setdefault(device, {}).setdefault(period_key, {"t": period_key})[key] = value
+
+    for stat in ("min", "max"):
+        run_and_collect(f'''
+        from(bucket: "{INFLUX_BUCKET}")
+          |> range(start: {start_iso}, stop: {stop_iso})
+          |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+          |> filter(fn: (r) => r.user == "{user}")
+          |> filter(fn: (r) => r._field == "{field}")
+          |> group(columns: ["device"])
+          |> aggregateWindow(every: {window}, fn: {stat}, createEmpty: false)
+        ''', stat)
+
+    run_and_collect(f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: {start_iso}, stop: {stop_iso})
+      |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+      |> filter(fn: (r) => r.user == "{user}")
+      |> filter(fn: (r) => r._field == "{field}")
+      |> group(columns: ["device"])
+      |> aggregateWindow(
+           every: {window},
+           fn: (tables=<-, column) => tables |> median(method: "exact_selector"),
+           createEmpty: false,
+         )
+    ''', "median")
 
     result: dict[str, list[dict]] = {}
     for device, periods in by_device_and_time.items():
-        # Only keep periods where both min and max actually came back -
-        # a period missing one (shouldn't normally happen, since both
-        # queries share the same filter/window) is incomplete data,
-        # not a real zero-width range.
-        complete = [p for p in periods.values() if "min" in p and "max" in p]
+        # Only keep periods where min, max, AND median all came back -
+        # a period missing one (shouldn't normally happen, since all
+        # three queries share the same filter/window) is incomplete
+        # data, not a real zero-width range or a period with no median.
+        complete = [p for p in periods.values() if "min" in p and "max" in p and "median" in p]
         result[device] = sorted(complete, key=lambda p: p["t"])
+    return result
+
+
+def get_rolling_mean_series(field: str, user: str, start: datetime, end: datetime, window_days: int = 7) -> dict[str, list[dict]]:
+    ''' Per-device rolling `window_days`-day mean, one value per
+    calendar day in [start, end) - the trend line overlaid on the W/M
+    range-bar charts, giving a smoothed view of drift beneath the
+    day-to-day noise of individual bars' min/max/median. Only
+    meaningful at daily granularity (week/month views) - a "7-day"
+    rolling mean doesn't map cleanly onto the Year view's monthly
+    buckets, so this isn't used there.
+
+    Returns {"<device>": [{"t": <day ISO8601>, "value": v}, ...]},
+    one entry per day actually within [start, end) that has enough
+    trailing history to average - a day near the very start of a
+    person's data (before `window_days` days of history exist) uses
+    however many days ARE available rather than being dropped, the
+    same "use what's there" approach a rolling average commonly takes
+    (e.g. COVID case-tracking dashboards near the start of a series),
+    rather than requiring a full window before showing anything.
+
+    One aggregateWindow(fn: mean, every: 1d) query over an EXTENDED
+    range - starting window_days-1 days before `start` - so the very
+    first displayed day still has a genuine trailing window to average
+    over; the rolling average itself is then computed in Python from
+    those daily means.
+    '''
+    client = get_client()
+    query_api = client.query_api()
+
+    extended_start = start - timedelta(days=window_days - 1)
+    start_iso = extended_start.astimezone(timezone.utc).isoformat()
+    stop_iso = end.astimezone(timezone.utc).isoformat()
+
+    flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: {start_iso}, stop: {stop_iso})
+      |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+      |> filter(fn: (r) => r.user == "{user}")
+      |> filter(fn: (r) => r._field == "{field}")
+      |> group(columns: ["device"])
+      |> aggregateWindow(every: 1d, fn: mean, createEmpty: false)
+    '''
+
+    try:
+        tables = query_api.query(flux)
+    except Exception as e:
+        logger.warning(f"Failed to query rolling mean series for {field}, user={user}: {e}")
+        return {}
+
+    # Per-device, chronologically sorted (day, value) pairs across the
+    # EXTENDED range (including the window_days-1 lookback-only days).
+    daily_by_device: dict[str, list[tuple[str, float]]] = {}
+    for table in tables:
+        for record in table.records:
+            device = record.values.get("device")
+            value = record.get_value()
+            period_start = record.get_time()
+            if device is None or value is None or period_start is None:
+                continue
+            daily_by_device.setdefault(device, []).append((period_start.isoformat(), value))
+    for device in daily_by_device:
+        daily_by_device[device].sort(key=lambda p: p[0])
+
+    start_iso_cutoff = start.astimezone(timezone.utc).isoformat()
+    result: dict[str, list[dict]] = {}
+    for device, days in daily_by_device.items():
+        rolling: list[dict] = []
+        for i, (day_iso, _value) in enumerate(days):
+            if day_iso < start_iso_cutoff:
+                continue  # a lookback-only day, not one to actually display
+            window_slice = days[max(0, i - window_days + 1):i + 1]
+            mean_value = sum(v for _, v in window_slice) / len(window_slice)
+            rolling.append({"t": day_iso, "value": mean_value})
+        if rolling:
+            result[device] = rolling
     return result
 
 

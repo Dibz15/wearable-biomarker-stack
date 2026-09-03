@@ -2,6 +2,7 @@ import json
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -18,6 +19,7 @@ from app.config import (
     SESSION_COOKIE_SECURE,
     SESSION_MAX_AGE_DAYS,
     SYNC_INTERVAL_MINUTES,
+    TZ_NAME,
 )
 from app.ics_sync import classify_event, sync_all_calendars
 from app.influx import (
@@ -31,6 +33,7 @@ from app.influx import (
     get_baseline_comparison,
     get_nightly_baseline_comparison,
     get_period_range_series,
+    get_rolling_mean_series,
     get_sleep_stage_breakdown,
     get_today_series,
     get_today_steps,
@@ -493,14 +496,26 @@ def get_today_series_endpoint(field: str, date: str | None = None, current_user:
     return get_today_series(field, current_user["username"], _parse_optional_date(date))
 
 
+def _add_months(d: date, months: int) -> date:
+    ''' Add (or, for a negative `months`, subtract) whole calendar
+    months to a date - only ever called here with day=1 dates, so day-
+    clamping for shorter target months never actually matters, but the
+    arithmetic is written generally regardless.
+    '''
+    month_index = d.month - 1 + months
+    year = d.year + month_index // 12
+    month = month_index % 12 + 1
+    return date(year, month, 1)
+
+
 @app.get("/vitals/range/{field}")
 def get_vitals_range(field: str, period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
-    ''' Per-device min/max range bars for one field, for the W/M/Y tabs
-    on a detail view - one entry per day (week/month) or per month
-    (year), as opposed to /today/series's raw per-point series that
-    only makes sense zoomed into a single day. The window ends on
-    `end_date` (today by default) - the detail-view's back/forward
-    navigation shifts this by a whole period at a time.
+    ''' Per-device min/max/median range bars for one field, for the
+    W/M/Y tabs on a detail view - one entry per day (week/month) or
+    per month (year), as opposed to /today/series's raw per-point
+    series that only makes sense zoomed into a single day. The window
+    ends on `end_date` (today by default) - the detail-view's
+    back/forward navigation shifts this by a whole period at a time.
     '''
     if field not in TODAY_SERIES_FIELDS:
         raise HTTPException(400, f"unsupported field: {field!r}")
@@ -508,11 +523,63 @@ def get_vitals_range(field: str, period: str, end_date: str | None = None, curre
         raise HTTPException(400, f"unsupported period: {period!r} (must be one of {sorted(RANGE_PERIODS)})")
 
     spec = RANGE_PERIODS[period]
-    end, _ = local_today_bounds(_parse_optional_date(end_date))
-    end = end + timedelta(days=1)  # include all of end_date (or today)
-    start = end - timedelta(days=spec["days"])
-
+    start, end = _period_bounds(period, end_date)
     return get_period_range_series(field, current_user["username"], start, end, spec["window"])
+
+
+@app.get("/vitals/rolling-mean/{field}")
+def get_vitals_rolling_mean(field: str, period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' 7-day rolling mean overlay line for the W/M range-bar charts -
+    see get_rolling_mean_series() for why this only applies to
+    daily-bucketed periods. Year (monthly-bucketed) isn't supported
+    here - a "7-day" mean doesn't map onto monthly bars, so the
+    frontend simply doesn't request this overlay for that period.
+    '''
+    if field not in TODAY_SERIES_FIELDS:
+        raise HTTPException(400, f"unsupported field: {field!r}")
+    if period not in ("week", "month"):
+        raise HTTPException(400, f"unsupported period for a rolling mean: {period!r} (must be 'week' or 'month')")
+
+    start, end = _period_bounds(period, end_date)
+    return get_rolling_mean_series(field, current_user["username"], start, end, window_days=7)
+
+
+def _period_bounds(period: str, end_date: str | None) -> tuple[datetime, datetime]:
+    ''' [start, end) for a W/M/Y period ending on `end_date` (today by
+    default) - shared by /vitals/range and /vitals/rolling-mean so the
+    window-boundary logic (including the year period's calendar-month
+    alignment - see the comment on that branch) exists in exactly one
+    place.
+    '''
+    parsed_end_date = _parse_optional_date(end_date)
+
+    if period == "year":
+        # Deliberately NOT a rolling 365-day window here, unlike week/
+        # month below - Flux's aggregateWindow(every: 1mo) buckets
+        # align to real calendar-month boundaries (confirmed via
+        # InfluxDB's own docs), not fixed 30-day chunks. A rolling
+        # 365-day range spans 12 months plus a few extra days, so it
+        # wraps into a 13th, PARTIAL month-aligned bucket at each end -
+        # and since 365 days is close to but not exactly 12 months,
+        # those two partial buckets often land in the SAME calendar
+        # month (e.g. a few days of "this September" and a few days of
+        # "last September"), rendering as an apparently duplicate
+        # month with no way to tell them apart. Anchoring to exactly
+        # 12 full calendar months instead - from the start of the
+        # month 11 months before the anchor month through the start of
+        # the month AFTER the anchor month - always produces exactly
+        # 12 distinct (month, year) buckets, no wraparound duplicate.
+        anchor = parsed_end_date or datetime.now(ZoneInfo(TZ_NAME)).date()
+        anchor_month_start = anchor.replace(day=1)
+        start, _ = local_today_bounds(_add_months(anchor_month_start, -11))
+        end, _ = local_today_bounds(_add_months(anchor_month_start, 1))
+    else:
+        spec = RANGE_PERIODS[period]
+        end, _ = local_today_bounds(parsed_end_date)
+        end = end + timedelta(days=1)  # include all of end_date (or today)
+        start = end - timedelta(days=spec["days"])
+
+    return start, end
 
 
 BASELINE_ALLOWED_DAYS = {7, 14}
