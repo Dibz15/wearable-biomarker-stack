@@ -671,6 +671,49 @@ function buildLineChart(canvas, series, devices) {
   });
 }
 
+// Draws a short horizontal dash at each bar's median value, using the
+// bar element's OWN computed x-position and width (read after Chart.js
+// lays out the bars) rather than a second 'line'-type dataset. A
+// 'line' dataset was tried first and had two real problems: (1) by
+// default Chart.js draws the FIRST dataset in the array topmost (per
+// Chart.js's own docs), so a median dataset added after the bars
+// rendered underneath them; (2) a line-type point on a shared category
+// axis plots at the CATEGORY's center, not at the position of any one
+// grouped bar - so with two devices' bars side by side, the median dot
+// landed between them instead of over either bar. Reading the bar
+// element's real geometry after afterDatasetsDraw sidesteps both:
+// drawing happens after every dataset (always on top), and the x/width
+// come directly from wherever Chart.js actually placed that specific
+// bar, so multi-device grouping is handled correctly for free.
+const medianMarkerPlugin = {
+  id: "medianMarkers",
+  afterDatasetsDraw(chart) {
+    const { ctx } = chart;
+    const yScale = chart.scales.y;
+    chart.data.datasets.forEach((dataset, datasetIndex) => {
+      if (!dataset.median) return;
+      const meta = chart.getDatasetMeta(datasetIndex);
+      if (meta.hidden) return;
+      dataset.median.forEach((medianValue, i) => {
+        if (medianValue === null || medianValue === undefined) return;
+        const barElement = meta.data[i];
+        if (!barElement) return;
+        const yPixel = yScale.getPixelForValue(medianValue);
+        const halfWidth = barElement.width / 2;
+        const xCenter = barElement.x;
+        ctx.save();
+        ctx.strokeStyle = "#e8e9ed";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(xCenter - halfWidth, yPixel);
+        ctx.lineTo(xCenter + halfWidth, yPixel);
+        ctx.stroke();
+        ctx.restore();
+      });
+    });
+  },
+};
+
 function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}) {
   // Floating bars: Chart.js draws a [min, max] pair as a bar spanning
   // that range, rather than a bar from zero - exactly the "vertical
@@ -704,32 +747,14 @@ function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}) {
       const [min, max] = pair;
       return min === max ? [min - 0.5, max + 0.5] : pair;
     });
+    const byPeriodMedian = Object.fromEntries(series[device].map(p => [p.t, p.median]));
     return {
       label: device,
       data: paddedData,
       raw: rawData,
+      median: allPeriods.map(t => byPeriodMedian[t] ?? null),
       backgroundColor: DEVICE_CHART_COLORS[i % DEVICE_CHART_COLORS.length],
       borderRadius: 4,
-    };
-  });
-
-  // Median: a short horizontal dash drawn at each bar's median value -
-  // a 'line' dataset with showLine off (so only the point markers
-  // draw, no connecting line between bars) using the 'line' point
-  // style, which Chart.js renders as a short horizontal dash.
-  const medianDatasets = devices.map((device, i) => {
-    const byPeriod = Object.fromEntries(series[device].map(p => [p.t, p.median]));
-    return {
-      type: "line",
-      label: `${device} median`,
-      isOverlay: true,
-      data: allPeriods.map(t => byPeriod[t] ?? null),
-      showLine: false,
-      pointStyle: "line",
-      pointRadius: 9,
-      pointBorderColor: "#e8e9ed",
-      pointBorderWidth: 2,
-      backgroundColor: "transparent",
     };
   });
 
@@ -737,6 +762,9 @@ function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}) {
   // whole chart - week/month only (daily-bucketed), where "7 day"
   // aligns naturally with the bars; not requested/rendered for year
   // (monthly-bucketed - a 7-day mean doesn't map onto a month bar).
+  // order: -1 (below the bars' default of 0) so this draws LAST, i.e.
+  // on top - Chart.js's own docs describe order as a weight where
+  // lower values draw later/on top.
   const rollingDatasets = (period === "week" || period === "month")
     ? devices.filter(d => rollingMean[d] && rollingMean[d].length).map((device) => {
         const byDay = Object.fromEntries(rollingMean[device].map(p => [p.t, p.value]));
@@ -745,6 +773,7 @@ function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}) {
           type: "line",
           label: `${device} 7-day avg`,
           isOverlay: true,
+          order: -1,
           data: allPeriods.map(t => (t in byDay ? byDay[t] : null)),
           showLine: true,
           borderColor: DEVICE_CHART_COLORS[i % DEVICE_CHART_COLORS.length],
@@ -759,7 +788,8 @@ function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}) {
 
   return new Chart(canvas, {
     type: "bar",
-    data: { labels, datasets: [...barDatasets, ...medianDatasets, ...rollingDatasets] },
+    data: { labels, datasets: [...barDatasets, ...rollingDatasets] },
+    plugins: [medianMarkerPlugin],
     options: {
       responsive: true,
       animation: false,
@@ -779,9 +809,10 @@ function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}) {
           labels: {
             color: "#e8e9ed",
             // Only the bar datasets get their own legend entry - the
-            // median dashes and rolling-mean line are visual
-            // annotations on the same device's bar, not separate
-            // series worth cluttering the legend with.
+            // rolling-mean line is a visual annotation on the same
+            // device's bar, not a separate series worth cluttering the
+            // legend with (median isn't even a dataset anymore, so it
+            // never reaches the legend at all).
             filter: (item, data) => !data.datasets[item.datasetIndex].isOverlay,
           },
         },
@@ -792,10 +823,10 @@ function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}) {
                 const real = item.dataset.raw[item.dataIndex];
                 return real ? `${item.dataset.label}: ${real[0]}\u2013${real[1]}` : "";
               }
-              // Median / rolling-mean overlay datasets don't carry a
-              // `raw` array (that's specific to the padded-bar
-              // workaround above) - fall back to the plotted value
-              // directly, which for these datasets IS the real value.
+              // The rolling-mean overlay dataset doesn't carry a `raw`
+              // array (that's specific to the padded-bar workaround
+              // above) - fall back to the plotted value directly,
+              // which for this dataset IS the real value.
               const v = item.parsed.y;
               return v === null || v === undefined ? "" : `${item.dataset.label}: ${Math.round(v * 10) / 10}`;
             },

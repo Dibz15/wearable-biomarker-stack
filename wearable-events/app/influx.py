@@ -695,6 +695,16 @@ def get_period_range_series(field: str, user: str, start: datetime, end: datetim
     observed reading rather than an interpolated/averaged value -
     right for showing "an actual recorded reading from that day", not
     a synthetic number nobody's device ever produced.
+
+    All three queries explicitly set timeSrc: "_start" - confirmed via
+    InfluxDB's own docs that aggregateWindow() otherwise defaults to
+    _stop (the END of each window) as the timestamp it assigns to the
+    aggregated value. Without this, every bucket's data is labeled
+    with the FOLLOWING period's boundary - a full month off for the
+    Year view's monthly buckets (exactly the reported "August's data
+    shows up under September" bug), a subtler one-day shift for
+    week/month's daily buckets that likely went unnoticed for the same
+    reason a smaller error is easier to miss.
     '''
     client = get_client()
     query_api = client.query_api()
@@ -728,7 +738,7 @@ def get_period_range_series(field: str, user: str, start: datetime, end: datetim
           |> filter(fn: (r) => r.user == "{user}")
           |> filter(fn: (r) => r._field == "{field}")
           |> group(columns: ["device"])
-          |> aggregateWindow(every: {window}, fn: {stat}, createEmpty: false)
+          |> aggregateWindow(every: {window}, fn: {stat}, createEmpty: false, timeSrc: "_start")
         ''', stat)
 
     run_and_collect(f'''
@@ -742,6 +752,7 @@ def get_period_range_series(field: str, user: str, start: datetime, end: datetim
            every: {window},
            fn: (tables=<-, column) => tables |> median(method: "exact_selector"),
            createEmpty: false,
+           timeSrc: "_start",
          )
     ''', "median")
 
@@ -794,7 +805,7 @@ def get_rolling_mean_series(field: str, user: str, start: datetime, end: datetim
       |> filter(fn: (r) => r.user == "{user}")
       |> filter(fn: (r) => r._field == "{field}")
       |> group(columns: ["device"])
-      |> aggregateWindow(every: 1d, fn: mean, createEmpty: false)
+      |> aggregateWindow(every: 1d, fn: mean, createEmpty: false, timeSrc: "_start")
     '''
 
     try:
@@ -853,7 +864,7 @@ def _daily_values(field: str, user: str, start: datetime, end: datetime) -> dict
       |> filter(fn: (r) => r.user == "{user}")
       |> filter(fn: (r) => r._field == "{field}")
       |> group(columns: ["device"])
-      |> aggregateWindow(every: 1d, fn: mean, createEmpty: false)
+      |> aggregateWindow(every: 1d, fn: mean, createEmpty: false, timeSrc: "_start")
     '''
 
     try:
