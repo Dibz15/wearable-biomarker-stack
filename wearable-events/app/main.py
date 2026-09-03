@@ -29,6 +29,7 @@ from app.influx import (
     find_sleep_entries_in_range,
     find_sleep_entry_by_id,
     get_sleep_stage_breakdown,
+    get_today_series,
     get_today_steps,
     get_today_vitals,
     list_distinct_sensor_users,
@@ -444,6 +445,24 @@ def get_today(current_user: dict = Depends(get_current_user)):
         "steps": steps,
         "sleep": sleep,
     }
+
+
+# Only these fields are ever valid to chart - a fixed allowlist rather
+# than passing the path parameter straight into the Flux query, since
+# `field` reaches the query string directly (see get_today_series())
+# and this is a user-influenceable URL segment.
+TODAY_SERIES_FIELDS = {"heart_rate", "hrv", "stress", "spo2", "temperature"}
+
+
+@app.get("/today/series/{field}")
+def get_today_series_endpoint(field: str, current_user: dict = Depends(get_current_user)):
+    ''' Raw per-point time series for one field, today - what a detail
+    view's chart plots, as distinct from /today's reduced summary
+    stats. One entry per device that reported anything.
+    '''
+    if field not in TODAY_SERIES_FIELDS:
+        raise HTTPException(400, f"unsupported field: {field!r}")
+    return get_today_series(field, current_user["username"])
 
 
 # --- sleep ---

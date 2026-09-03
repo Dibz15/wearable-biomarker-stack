@@ -16,31 +16,50 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  padding-bottom: 2rem;
+  /* Bottom-anchored nav needs room reserved below content so the last
+     card in any tab isn't hidden behind the fixed bar. */
+  padding-bottom: calc(4.5rem + env(safe-area-inset-bottom, 0px));
 }
 
 nav.tabs {
   display: flex;
-  position: sticky;
-  top: 0;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
   background: var(--bg);
-  border-bottom: 1px solid var(--surface-active);
+  border-top: 1px solid var(--surface-active);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
   z-index: 10;
+  /* Six items is already tight on a narrow phone; scroll rather than
+     let labels wrap or overlap if a future addition pushes past what
+     fits (tabs are meant to stay few - see detail-screen below for how
+     new metric views avoid growing this list). */
+  overflow-x: auto;
 }
 
 .tab-btn {
   flex: 1;
-  padding: 1rem 0;
+  min-width: 4.2rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.6rem 0.2rem 0.5rem;
   background: none;
   border: none;
   color: var(--muted);
-  font-size: 1rem;
+  font-size: 0.68rem;
   font-weight: 600;
+}
+
+.tab-btn svg {
+  width: 22px;
+  height: 22px;
 }
 
 .tab-btn.active {
   color: var(--accent);
-  border-bottom: 2px solid var(--accent);
 }
 
 main {
@@ -51,6 +70,51 @@ main {
 
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
+
+/* --- Detail screen (drill-down from a Today card) --- */
+
+#detail-screen {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  z-index: 20;
+  overflow-y: auto;
+}
+
+.detail-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--surface-active);
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+}
+
+.detail-back-btn {
+  background: none;
+  border: none;
+  color: var(--text);
+  padding: 0.25rem;
+  display: flex;
+}
+
+.detail-back-btn svg {
+  width: 22px;
+  height: 22px;
+}
+
+#detail-title {
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.detail-content {
+  padding: 1rem;
+  max-width: 480px;
+  margin: 0 auto;
+}
 
 .button-grid {
   display: grid;
@@ -772,4 +836,57 @@ main {
   border-radius: 12px;
   padding: 1rem;
   margin-bottom: 0.75rem;
+}
+
+.metric-card-tappable {
+  cursor: pointer;
+  position: relative;
+}
+
+.metric-card-tappable:active {
+  background: var(--surface-active);
+}
+
+.metric-card-tappable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Small chevron hinting the card opens something, without adding a
+   whole icon-in-a-corner treatment to every card. */
+.metric-card-tappable .metric-card-label::after {
+  content: "\203a";
+  float: right;
+  color: var(--muted);
+}
+
+.detail-chart-card {
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 1rem 0.75rem;
+  margin-bottom: 0.75rem;
+  height: 220px;
+}
+
+.detail-stats-card {
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 0.25rem 1rem;
+}
+
+.detail-stat-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 0;
+}
+
+.detail-stat-row + .detail-stat-row {
+  border-top: 1px solid var(--surface-active);
+}
+
+.detail-stat-value {
+  font-weight: 700;
+  font-size: 1.1rem;
 }

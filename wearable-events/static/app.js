@@ -58,7 +58,7 @@ async function api(path, options = {}) {
 // --- Today tab ---
 
 const METRIC_FIELDS = [
-  { key: "heart_rate", label: "Heart Rate", unit: "bpm" },
+  { key: "heart_rate", label: "Heart Rate", unit: "bpm", hasDetail: true },
   { key: "hrv", label: "HRV", unit: "ms" },
   { key: "stress", label: "Stress", unit: "" },
   { key: "spo2", label: "SpO2", unit: "%" },
@@ -114,9 +114,12 @@ function renderSleepCard(sleep) {
 
 function renderMetricCard(field, byDevice) {
   const devices = Object.keys(byDevice);
+  const tappableAttrs = field.hasDetail ? ` data-detail-field="${field.key}" role="button" tabindex="0"` : "";
+  const cardClass = field.hasDetail ? "metric-card metric-card-tappable" : "metric-card";
+
   if (devices.length === 0) {
     return `
-      <div class="metric-card">
+      <div class="${cardClass}"${tappableAttrs}>
         <div class="metric-card-label">${field.label}</div>
         <p class="metric-card-empty">No data yet today</p>
       </div>
@@ -139,7 +142,7 @@ function renderMetricCard(field, byDevice) {
   }).join("");
 
   return `
-    <div class="metric-card">
+    <div class="${cardClass}"${tappableAttrs}>
       <div class="metric-card-label">${field.label}</div>
       ${rows}
     </div>
@@ -186,9 +189,145 @@ async function loadToday() {
       ${stepsHtml}
       <div class="metric-grid">${metricsHtml}</div>
     `;
+
+    // Wire up whichever cards have a detail view. Delegated on the
+    // container rather than one listener per card, since this whole
+    // block gets re-rendered (innerHTML replaced) every time loadToday()
+    // runs - a per-card listener would need explicit cleanup to avoid
+    // piling up duplicates across refreshes.
+    container.querySelectorAll("[data-detail-field]").forEach(el => {
+      const open = () => openMetricDetail(el.dataset.detailField, data.vitals[el.dataset.detailField] || {});
+      el.addEventListener("click", open);
+      el.addEventListener("keydown", e => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+      });
+    });
   } catch (e) {
     container.innerHTML = `<p class="status">Error loading today's data: ${escapeHtml(e.message)}</p>`;
   }
+}
+
+// --- Metric detail views (opened from a Today card, not a tab) ---
+
+let activeChart = null;
+
+function openDetailScreen(title) {
+  document.getElementById("detail-title").textContent = title;
+  document.getElementById("detail-screen").style.display = "block";
+}
+
+function closeDetailScreen() {
+  document.getElementById("detail-screen").style.display = "none";
+  if (activeChart) {
+    activeChart.destroy();
+    activeChart = null;
+  }
+}
+
+document.getElementById("detail-back-btn").addEventListener("click", closeDetailScreen);
+
+const DETAIL_VIEWS = {
+  heart_rate: { title: "Heart Rate", color: "#e88a8a" },
+};
+
+// Distinct colors per device dataset on the chart - cycles if there
+// are ever more devices than colors defined here, rather than erroring.
+const DEVICE_CHART_COLORS = ["#e88a8a", "#6ea8fe", "#4fd8b8", "#f0c674"];
+
+async function openMetricDetail(fieldKey, statsByDevice) {
+  const view = DETAIL_VIEWS[fieldKey];
+  if (!view) return; // no detail view wired up for this field yet
+
+  openDetailScreen(view.title);
+  const content = document.getElementById("detail-content");
+  content.innerHTML = `<p class="muted">Loading...</p>`;
+
+  let series;
+  try {
+    series = await api(`/today/series/${fieldKey}`);
+  } catch (e) {
+    content.innerHTML = `<p class="status">Error loading chart data: ${escapeHtml(e.message)}</p>`;
+    return;
+  }
+
+  const devices = Object.keys(series);
+  const statsHtml = devices.map(device => {
+    const stats = statsByDevice[device] || {};
+    const subParts = [];
+    if (stats.avg !== undefined) subParts.push(`avg ${stats.avg}`);
+    if (stats.min !== undefined && stats.max !== undefined) subParts.push(`min ${stats.min} \u00b7 max ${stats.max}`);
+    return `
+      <div class="detail-stat-row">
+        <span class="metric-device-name">${escapeHtml(device)}</span>
+        <span class="detail-stat-value">${stats.last !== undefined ? stats.last : "\u2013"}</span>
+        <span class="metric-sub">${subParts.join(" \u00b7 ")}</span>
+      </div>
+    `;
+  }).join("");
+
+  content.innerHTML = `
+    <div class="detail-chart-card">
+      <canvas id="detail-chart"></canvas>
+    </div>
+    <div class="detail-stats-card">${statsHtml}</div>
+  `;
+
+  if (devices.length === 0) {
+    document.getElementById("detail-chart").replaceWith(
+      Object.assign(document.createElement("p"), { className: "metric-card-empty", textContent: "No data yet today" })
+    );
+    return;
+  }
+
+  const datasets = devices.map((device, i) => ({
+    label: device,
+    // Epoch milliseconds, not the raw ISO string - lets Chart.js's
+    // 'linear' x-axis handle each device's points on their own actual
+    // timestamps (devices don't sample at identical instants) without
+    // needing a separate date-adapter library at all (Chart.js's
+    // 'time' scale requires one, e.g. chartjs-adapter-date-fns - that
+    // adds a dependency with known script-load-order fragility for no
+    // real benefit here, since a formatted tick callback on a plain
+    // numeric axis gives the same HH:MM labels with one less moving part).
+    data: series[device].map(p => ({ x: new Date(p.t).getTime(), y: p.v })),
+    borderColor: DEVICE_CHART_COLORS[i % DEVICE_CHART_COLORS.length],
+    backgroundColor: "transparent",
+    borderWidth: 2,
+    pointRadius: 0,
+    tension: 0.25,
+  }));
+
+  const ctx = document.getElementById("detail-chart");
+  activeChart = new Chart(ctx, {
+    type: "line",
+    data: { datasets },
+    options: {
+      responsive: true,
+      animation: false,
+      scales: {
+        x: {
+          type: "linear",
+          ticks: {
+            color: "#8a8d99",
+            callback: (val) => new Date(val).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          },
+          grid: { color: "#2a2d38" },
+        },
+        y: {
+          ticks: { color: "#8a8d99" },
+          grid: { color: "#2a2d38" },
+        },
+      },
+      plugins: {
+        legend: { display: devices.length > 1, labels: { color: "#e8e9ed" } },
+        tooltip: {
+          callbacks: {
+            title: (items) => items.length ? new Date(items[0].parsed.x).toLocaleTimeString() : "",
+          },
+        },
+      },
+    },
+  });
 }
 
 // --- Tags tab ---

@@ -589,6 +589,52 @@ def get_today_vitals(user: str) -> dict[str, dict]:
     return result
 
 
+def get_today_series(field: str, user: str) -> dict[str, list[dict]]:
+    ''' Raw (unaggregated) points for one field, today, per device - the
+    time series a detail-view chart plots, as opposed to
+    get_today_vitals()'s reduced last/avg/min/max summary.
+
+    Returns {"<device>": [{"t": <ISO8601>, "v": <value>}, ...], ...},
+    each device's list already sorted chronologically (Flux's default
+    order for a plain, unaggregated range query - not re-sorted here,
+    since re-sorting an already-sorted list would just be wasted work).
+    '''
+    start, end = _local_today_bounds()
+    client = get_client()
+    query_api = client.query_api()
+
+    start_iso = start.astimezone(timezone.utc).isoformat()
+    stop_iso = end.astimezone(timezone.utc).isoformat()
+
+    flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: {start_iso}, stop: {stop_iso})
+      |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+      |> filter(fn: (r) => r.user == "{user}")
+      |> filter(fn: (r) => r._field == "{field}")
+      |> group(columns: ["device"])
+    '''
+
+    try:
+        tables = query_api.query(flux)
+    except Exception as e:
+        logger.warning(f"Failed to query today's {field} series for user={user}: {e}")
+        return {}
+
+    result: dict[str, list[dict]] = {}
+    for table in tables:
+        for record in table.records:
+            device = record.values.get("device")
+            value = record.get_value()
+            if device is None or value is None:
+                continue
+            result.setdefault(device, []).append({
+                "t": record.get_time().isoformat(),
+                "v": value,
+            })
+    return result
+
+
 def get_today_steps(user: str) -> dict[str, int]:
     ''' Today's (local calendar day) total steps per device - a sum,
     not last/mean/etc., since steps is a per-sample count that needs
