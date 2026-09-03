@@ -138,6 +138,33 @@ HUAMI_TIMESTAMPS_ARE_MS = os.getenv("HUAMI_TIMESTAMPS_ARE_MS", "Y") == "Y"
 # failure shape for the same underlying class of bug).
 HUAMI_ACTIVITY_TIMESTAMPS_ARE_MS = os.getenv("HUAMI_ACTIVITY_TIMESTAMPS_ARE_MS", "N") == "Y"
 
+# CONFIRMED MILLISECONDS (Sept 2026, via scripts/check_table_usage.py's
+# Scale column against real data: a raw value of 1788430801000 only
+# decodes to a sane date - 2026-09-03T10:20:01Z - when treated as
+# milliseconds; as seconds it's out of range entirely). This is the
+# OUTER SQL TIMESTAMP column (the row's own primary-key timestamp,
+# used for the WHERE clause query bound) - a DIFFERENT value from the
+# blob's INTERNAL timestamps (timestampSession/timestampMidnight),
+# which remain confirmed SECONDS from Gadgetbridge's source itself (see
+# decode_sleep_session_blob() below - both get multiplied by 1000L to
+# build a Java Date, the standard idiom for seconds-to-milliseconds
+# conversion). These two being different units for the same table isn't
+# a contradiction: the outer TIMESTAMP column is whatever Gadgetbridge's
+# own row-writing code chose (matches the surrounding GENERIC_*/HUAMI_*
+# tables' own milliseconds convention), while the blob's internal
+# fields are raw values the WATCH itself encoded, independent of how
+# Gadgetbridge stores the row - the same kind of split HUAMI_EXTENDED_ACTIVITY_SAMPLE's
+# OWN outer TIMESTAMP column turned out to have (seconds) versus every
+# other table's outer TIMESTAMP (milliseconds) - per-table/per-context
+# verification, not a single assumption, is what actually holds up here.
+HUAMI_SLEEP_SESSION_TIMESTAMPS_ARE_MS = os.getenv("HUAMI_SLEEP_SESSION_TIMESTAMPS_ARE_MS", "Y") == "Y"
+
+# CONFIRMED directly from Gadgetbridge's own source
+# (HuamiSleepSessionSampleProvider.java, SleepStage.getType() docstring
+# and asActivityKind()) - not inferred, not guessed. See
+# decode_sleep_session_blob() for the full byte layout this came from.
+HUAMI_SLEEP_STAGE_MAP = {4: "light", 5: "deep", 8: "rem", 7: "awake"}
+
 MAX_CATCHUP_SECONDS = int(os.getenv("MAX_CATCHUP_SECONDS", str(30 * 86400)))
 CHECKPOINT_OVERLAP_SECONDS = int(os.getenv("CHECKPOINT_OVERLAP_SECONDS", "300"))
 MAX_FUTURE_TOLERANCE_SECONDS = int(os.getenv("MAX_FUTURE_TOLERANCE_SECONDS", "300"))
@@ -224,6 +251,137 @@ def compute_query_start_bound(checkpoint_ns, now_seconds, fallback_bound_seconds
     return bound_scaled
 
 
+def decode_sleep_session_blob(data: bytes):
+    ''' Decodes HUAMI_SLEEP_SESSION_SAMPLE.DATA - a fixed-layout binary
+    blob, not a general-purpose format. This is a direct Python port of
+    Gadgetbridge's own HuamiSleepSessionSampleProvider.java (fetched
+    2026-09, from master), NOT reverse-engineered from raw bytes - the
+    byte offsets, field widths, and stage type codes below are all
+    copied straight from that source, which is the same code Gadgetbridge
+    itself uses to render the sleep graph that was independently
+    confirmed (against the watch's own display and the Zepp app) to
+    show real, correct stage-by-stage data. This is why it's trusted
+    without the usual "UNVERIFIED" caveat this file gives everything
+    else - it isn't a guess.
+
+    Byte layout (offsets in decimal, from the Java source's hex literals):
+      0x00 (0):    timestampSession   uint32  epoch SECONDS (confirmed:
+                    Gadgetbridge does `new Date(timestampSession * 1000L)`)
+      0x04 (4):    timestampMidnight  uint32  epoch seconds, midnight
+                    boundary of the day in the user's timezone
+      0x08 (8):    unknown, single byte, Gadgetbridge's own code just
+                    comments "// 1" without using the value
+      0x09 (9):    unknown, single byte, same "// 1" comment
+      0x0a (10):   sleepStart         uint16  minutes-since-previous-
+                    midnight (Gadgetbridge's own docstring hedges this
+                    with a "?" - the CODE's arithmetic is unambiguous
+                    even though the comment isn't, so the code is what
+                    this follows)
+      0x0c (12):   sleepEnd           uint16  same unit as sleepStart
+      0x0d-0x14:   unused/unknown gap (7 bytes)
+      0x15 (21):   avgHr              uint8
+      0x16 (22):   score              uint8   (Gadgetbridge's own
+                    computed sleep score, 0-100)
+      0x17-0x53:   unused/unknown gap (61 bytes)
+      0x54 (84):   numStages          uint8   how many of the fixed 100
+                    stage slots below are actually populated
+      0x55 (85):   unused/unknown (1 byte)
+      0x56 (86):   stage array, exactly 100 slots x 5 bytes each (500
+                    bytes total, slots beyond numStages are unused/zero):
+                      +0 uint16  stage start (same minutes-since-
+                                 previous-midnight unit as sleepStart)
+                      +2 uint16  stage end (same unit) - NOT used by
+                                 Gadgetbridge's own display logic
+                                 (each stage's classification extends
+                                 until the NEXT stage's start, not to
+                                 its own end), kept here anyway since
+                                 it's free and may be a useful sanity
+                                 check
+                      +4 uint8   stage type: 4=light, 5=deep, 8=rem,
+                                 7=awake (any other value -> unknown)
+      0x024a (586): totalRemMinutes   uint16
+      0x024c (588): totalLightMinutes uint16
+      0x024e (590): totalDeepMinutes  uint16
+      0x0250 (592): totalWakeMinutes  uint16
+      (blob ends at 0x0252 / 594 bytes total)
+
+    Returns a dict, or None if `data` is too short to contain even the
+    fixed-size header+stage-count (0x55 bytes) - some other malformed/
+    truncated/future-format blob, logged and skipped by the caller via
+    the same graceful-degradation pattern as everything else in this
+    file, rather than raising and taking down the whole sync run.
+    '''
+    if data is None or len(data) < 0x55:
+        return None
+
+    def u8(offset):
+        return data[offset]
+
+    def u16(offset):
+        return int.from_bytes(data[offset:offset + 2], "little")
+
+    def u32(offset):
+        return int.from_bytes(data[offset:offset + 4], "little")
+
+    timestamp_session = u32(0x00)
+    timestamp_midnight = u32(0x04)
+    sleep_start_min = u16(0x0a)
+    sleep_end_min = u16(0x0c)
+    avg_hr = u8(0x15)
+    score = u8(0x16)
+    num_stages = u8(0x54)
+
+    # Defensive cap: the blob only has room for 100 stage slots (500
+    # bytes) before the summary totals begin - a numStages beyond that
+    # would read into (and misinterpret) the totals fields. Not
+    # expected from real Gadgetbridge-written data, but a firmware
+    # quirk or a genuinely different blob layout on some other device/
+    # version shouldn't be allowed to read out of bounds or corrupt
+    # the totals.
+    if num_stages > 100:
+        logger.warning(f"Sleep session blob claims {num_stages} stages (max 100 fit in the "
+                       f"fixed layout) - clamping to 100, may indicate a different blob "
+                       f"format than what this was decoded against")
+        num_stages = 100
+
+    stages = []
+    for i in range(num_stages):
+        base = 0x56 + 5 * i
+        if base + 5 > len(data):
+            logger.warning(f"Sleep session blob truncated mid-stage-array (stage {i} of "
+                           f"{num_stages}) - stopping stage extraction early for this session")
+            break
+        stage_start = u16(base)
+        stage_end = u16(base + 2)
+        stage_type = u8(base + 4)
+        stages.append((stage_start, stage_end, stage_type))
+
+    result = {
+        "timestamp_session": timestamp_session,
+        "timestamp_midnight": timestamp_midnight,
+        "sleep_start_min": sleep_start_min,
+        "sleep_end_min": sleep_end_min,
+        "avg_hr": avg_hr,
+        "score": score,
+        "stages": stages,
+        "total_rem_min": None,
+        "total_light_min": None,
+        "total_deep_min": None,
+        "total_wake_min": None,
+    }
+
+    # Summary totals are optional - only present if the blob is the
+    # full expected length. A shorter-but-still-valid-so-far blob still
+    # yields session info + stages without these.
+    if len(data) >= 0x0252:
+        result["total_rem_min"] = u16(0x024a)
+        result["total_light_min"] = u16(0x024c)
+        result["total_deep_min"] = u16(0x024e)
+        result["total_wake_min"] = u16(0x0250)
+
+    return result
+
+
 def extract_data(cur, client):
     ''' Query the database for data - see this file's module docstring
     and README.md for the unverified/best-effort status of every table
@@ -260,6 +418,9 @@ def extract_data(cur, client):
     )
     activity_query_start_bound_scaled = compute_query_start_bound(
         checkpoint_ns, now_seconds, fallback_bound_seconds, HUAMI_ACTIVITY_TIMESTAMPS_ARE_MS, "activity"
+    )
+    sleep_session_query_start_bound_scaled = compute_query_start_bound(
+        checkpoint_ns, now_seconds, fallback_bound_seconds, HUAMI_SLEEP_SESSION_TIMESTAMPS_ARE_MS, "sleep_session"
     )
 
     devices = fetch_devices(cur)
@@ -520,14 +681,132 @@ def extract_data(cur, client):
             observed.note(r[1], row_ts)
         section_counts["pai"] = len(rows)
 
-    # --- Sleep sessions: intentionally NOT attempted. HUAMI_SLEEP_SESSION_SAMPLE
-    # is confirmed to exist (TIMESTAMP, DEVICE_ID, USER_ID, DATA BLOB) but
-    # its per-night detail lives in that BLOB column, not queryable rows
-    # the way COLMI_SLEEP_STAGE_SAMPLE is - decoding that blob format is
-    # real reverse-engineering work this parser doesn't attempt yet. The
-    # SLEEP/REM_SLEEP/DEEP_SLEEP columns pulled from
-    # HUAMI_EXTENDED_ACTIVITY_SAMPLE above and the respiratory-rate table
-    # are the only sleep-related data this parser currently extracts.
+    # --- Sleep sessions, decoded from the BLOB. CONFIRMED byte layout,
+    # ported directly from Gadgetbridge's own HuamiSleepSessionSampleProvider.java
+    # (see decode_sleep_session_blob()'s docstring for the full field-by-
+    # field source). This is the REAL sleep-stage source for this device -
+    # confirmed (against the watch's own display and the Zepp app) that
+    # Gadgetbridge's sleep graph shows genuine stage transitions overnight,
+    # while HUAMI_EXTENDED_ACTIVITY_SAMPLE's sleep_extended_raw/rem/deep
+    # columns above were independently shown (via a live query spanning a
+    # full night) to stay completely frozen for 9+ hours straight -
+    # physiologically impossible for real stage tracking, so those columns
+    # are NOT the real source and this table is.
+    rows = run_query(cur, "HUAMI_SLEEP_SESSION_SAMPLE",
+        "SELECT TIMESTAMP, DEVICE_ID, DATA FROM HUAMI_SLEEP_SESSION_SAMPLE "
+        f"WHERE TIMESTAMP >= {sleep_session_query_start_bound_scaled} ORDER BY TIMESTAMP ASC")
+    session_points = 0
+    stage_points = 0
+    if rows is not None:
+        for r in rows:
+            row_ts = to_nanos(r[0], HUAMI_SLEEP_SESSION_TIMESTAMPS_ARE_MS)
+            device_id = r[1]
+            decoded = decode_sleep_session_blob(bytes(r[2]) if r[2] is not None else None)
+            if decoded is None:
+                logger.warning(f"HUAMI_SLEEP_SESSION_SAMPLE: could not decode blob for a row "
+                               f"(device_id={device_id}, timestamp={r[0]}) - too short or malformed, skipping")
+                continue
+
+            tags_base = device_tags(device_id)
+
+            # Session-start reference point, in the blob's own (confirmed
+            # seconds) internal clock - independent of whichever scale the
+            # outer TIMESTAMP column turns out to use.
+            midnight_prev = decoded["timestamp_midnight"] - 86400
+
+            # --- Session summary point. Field names deliberately mirror
+            # Colmi's own sleep_session fields (sleep_session_start,
+            # sleep_session_wakeup, sleep_session_duration_s) for direct
+            # cross-device comparison, same shared-field-name principle
+            # used throughout this parser. avg_hr/score/total_*_duration_s
+            # have no Colmi equivalent, so they're new, clearly-named fields.
+            session_start_epoch_s = midnight_prev + decoded["sleep_start_min"] * 60
+            session_end_epoch_s = midnight_prev + decoded["sleep_end_min"] * 60
+            session_fields = {
+                "sleep_session_start": session_start_epoch_s,
+                "sleep_session_wakeup": session_end_epoch_s,
+                "sleep_session_duration_s": session_end_epoch_s - session_start_epoch_s,
+                "sleep_avg_hr": decoded["avg_hr"],
+                "sleep_score": decoded["score"],
+            }
+            if decoded["total_rem_min"] is not None:
+                session_fields["rem_sleep_total_duration_s"] = decoded["total_rem_min"] * 60
+                session_fields["light_sleep_total_duration_s"] = decoded["total_light_min"] * 60
+                session_fields["deep_sleep_total_duration_s"] = decoded["total_deep_min"] * 60
+                session_fields["awake_sleep_total_duration_s"] = decoded["total_wake_min"] * 60
+            results.append({
+                "timestamp": to_nanos(session_start_epoch_s, is_ms=False),
+                "fields": session_fields,
+                "tags": {**tags_base, "sample_type": "sleep_session"}
+            })
+            observed.note(device_id, row_ts)
+            session_points += 1
+
+            # --- Per-stage timeline, same start/end-marker + dense-per-
+            # minute-point pattern as Colmi's own sleep stage extraction,
+            # so the same Grafana Sleep Stage Timeline panel works for
+            # both devices unmodified. stage.end is captured but (matching
+            # Gadgetbridge's own display logic) not used to bound this
+            # stage's active window - each stage is treated as running
+            # until the NEXT stage's start, exactly as Gadgetbridge itself
+            # does in HuamiSleepSessionSampleProvider.getSleepStages().
+            stages = decoded["stages"]
+            for i, (stage_start_min, stage_end_min, stage_type) in enumerate(stages):
+                stage_label = HUAMI_SLEEP_STAGE_MAP.get(stage_type, f"stage_{stage_type}")
+                stage_start_epoch_s = midnight_prev + stage_start_min * 60
+                # Next stage's start (or this session's own wakeup time for
+                # the last stage) - matches Gadgetbridge's own model of
+                # "each stage runs until the next one begins", not this
+                # stage's own (unused-by-Gadgetbridge) end field.
+                if i + 1 < len(stages):
+                    next_start_min = stages[i + 1][0]
+                else:
+                    next_start_min = decoded["sleep_end_min"]
+                stage_active_until_epoch_s = midnight_prev + next_start_min * 60
+                duration_s = stage_active_until_epoch_s - stage_start_epoch_s
+                if duration_s <= 0:
+                    continue
+
+                common_tags = {
+                    **tags_base,
+                    "sample_type": "sleep_stage",
+                    "sleep_stage": stage_label,
+                    "sleep_stage_raw": stage_type,
+                }
+
+                results.append({
+                    "timestamp": to_nanos(stage_start_epoch_s, is_ms=False),
+                    "fields": {
+                        "sleep_stage_duration_s": duration_s,
+                        f"{stage_label}_sleep_duration_s": duration_s,
+                        "sleep_stage_active": 1,
+                    },
+                    "tags": common_tags,
+                })
+                # End marker 1s early, same reasoning as Colmi's own sleep
+                # stage extraction: two points at the identical nanosecond
+                # (this stage's end == next stage's start) leaves sort()
+                # order undefined in a Grafana query, so end 1s early to
+                # guarantee this always sorts before the next stage's start.
+                results.append({
+                    "timestamp": to_nanos(stage_active_until_epoch_s, is_ms=False) - 1_000_000_000,
+                    "fields": {"sleep_stage_active": 0},
+                    "tags": common_tags,
+                })
+
+                minutes = duration_s // 60
+                for minute_offset in range(minutes):
+                    point_ts = to_nanos(stage_start_epoch_s, is_ms=False) + (minute_offset * 60 * 1_000_000_000)
+                    results.append({
+                        "timestamp": point_ts,
+                        "fields": {"sleep_stage_now": stage_label},
+                        "tags": common_tags,
+                    })
+                stage_points += 1
+
+    if session_points:
+        section_counts["sleep_session (HUAMI_SLEEP_SESSION_SAMPLE)"] = session_points
+        section_counts["sleep_stage (HUAMI_SLEEP_SESSION_SAMPLE)"] = stage_points
 
     now = time.time_ns()
     for device_key, row_ts in observed.observed.items():
