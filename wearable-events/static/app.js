@@ -248,6 +248,39 @@ const DETAIL_PERIODS = [
   { key: "year", label: "Y" },
 ];
 
+// Days to shift the anchor date by one prev/next step, per period -
+// matches each period's own window size (RANGE_PERIODS on the backend),
+// so "previous" moves a whole week/month/year at a time, not just a day.
+const PERIOD_SHIFT_DAYS = { day: 1, week: 7, month: 30, year: 365 };
+
+// Local-timezone-safe YYYY-MM-DD helpers. Deliberately NOT using
+// Date.toISOString() for this - it always converts to UTC first, which
+// silently shifts the date near local midnight (e.g. 11pm local on
+// Sep 3 in a timezone behind UTC becomes "Sep 4" after the UTC
+// conversion). Date's getFullYear()/getMonth()/getDate() are local-
+// timezone-aware, so building the string from those avoids that.
+function dateToISO(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function isoToDate(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(y, m - 1, d); // local midnight, not UTC
+}
+
+function todayISO() {
+  return dateToISO(new Date());
+}
+
+function shiftISODate(iso, days) {
+  const d = isoToDate(iso);
+  d.setDate(d.getDate() + days);
+  return dateToISO(d);
+}
+
 function renderPeriodButtons(activePeriod) {
   const buttons = DETAIL_PERIODS.map(p => `
     <button class="period-btn${p.key === activePeriod ? " active" : ""}" data-period="${p.key}">${p.label}</button>
@@ -255,12 +288,43 @@ function renderPeriodButtons(activePeriod) {
   return `<div class="period-switcher">${buttons}</div>`;
 }
 
+function renderDateNav(period, anchorDate) {
+  const isToday = anchorDate === todayISO();
+  let label;
+  if (period === "day") {
+    label = isToday ? "Today" : isoToDate(anchorDate).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+  } else {
+    const startISO = shiftISODate(anchorDate, -(PERIOD_SHIFT_DAYS[period] - 1));
+    const startLabel = isoToDate(startISO).toLocaleDateString([], { month: "short", day: "numeric" });
+    const endLabel = isoToDate(anchorDate).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+    label = `${startLabel} \u2013 ${endLabel}`;
+  }
+  // Navigating past today doesn't make sense (no future data) - once
+  // the anchor date IS today, "next" is disabled rather than silently
+  // returning an empty period.
+  const nextDisabled = anchorDate >= todayISO();
+  return `
+    <div class="date-nav">
+      <button class="date-nav-btn" data-nav="prev" aria-label="Previous">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <label class="date-nav-label">
+        <span>${escapeHtml(label)}</span>
+        <input type="date" class="date-nav-input" data-current-anchor="${anchorDate}" value="${anchorDate}" max="${todayISO()}">
+      </label>
+      <button class="date-nav-btn" data-nav="next" aria-label="Next"${nextDisabled ? " disabled" : ""}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
+    </div>
+  `;
+}
+
 async function openMetricDetail(viewKey) {
   const view = DETAIL_VIEWS[viewKey];
   if (!view) return; // no detail view wired up for this field yet
 
   openDetailScreen(view.title);
-  await renderDetailPeriod(view, "day");
+  await renderDetailPeriod(view, "day", todayISO());
 }
 
 function computeStatsFromSeries(series, period) {
@@ -346,10 +410,10 @@ function renderBaselineBar(comparisonByDevice, baselineDays) {
   return `<div class="baseline-card">${rows}</div>`;
 }
 
-async function renderDetailPeriod(view, period) {
+async function renderDetailPeriod(view, period, anchorDate) {
   const content = document.getElementById("detail-content");
-  content.innerHTML = renderPeriodButtons(period) + `<p class="muted">Loading...</p>`;
-  wirePeriodButtons(view, period);
+  content.innerHTML = renderPeriodButtons(period) + renderDateNav(period, anchorDate) + `<p class="muted">Loading...</p>`;
+  wireDetailControls(view, period, anchorDate);
 
   activeCharts.forEach(c => c.destroy());
   activeCharts = [];
@@ -363,17 +427,17 @@ async function renderDetailPeriod(view, period) {
   let baselineByField = {};
   try {
     seriesByField = Object.fromEntries(await Promise.all(
-      view.charts.map(async c => [c.field, await fetchDetailSeries(c.field, period)])
+      view.charts.map(async c => [c.field, await fetchDetailSeries(c.field, period, anchorDate)])
     ));
     if (period === "day") {
       const baselineCharts = view.charts.filter(c => c.showBaseline);
       baselineByField = Object.fromEntries(await Promise.all(
-        baselineCharts.map(async c => [c.field, await api(`/vitals/baseline/${c.field}?days=${BASELINE_DAYS}`)])
+        baselineCharts.map(async c => [c.field, await api(`/vitals/baseline/${c.field}?days=${BASELINE_DAYS}&date=${anchorDate}`)])
       ));
     }
   } catch (e) {
-    content.innerHTML = renderPeriodButtons(period) + `<p class="status">Error loading chart data: ${escapeHtml(e.message)}</p>`;
-    wirePeriodButtons(view, period);
+    content.innerHTML = renderPeriodButtons(period) + renderDateNav(period, anchorDate) + `<p class="status">Error loading chart data: ${escapeHtml(e.message)}</p>`;
+    wireDetailControls(view, period, anchorDate);
     return;
   }
 
@@ -393,8 +457,8 @@ async function renderDetailPeriod(view, period) {
     `;
   }).join("");
 
-  content.innerHTML = renderPeriodButtons(period) + cardsHtml;
-  wirePeriodButtons(view, period);
+  content.innerHTML = renderPeriodButtons(period) + renderDateNav(period, anchorDate) + cardsHtml;
+  wireDetailControls(view, period, anchorDate);
 
   view.charts.forEach((c, i) => {
     const series = seriesByField[c.field];
@@ -413,19 +477,72 @@ async function renderDetailPeriod(view, period) {
   });
 }
 
-function wirePeriodButtons(view, activePeriod) {
+function wireDetailControls(view, activePeriod, anchorDate) {
+  // Period switch keeps the SAME anchor date - switching from Week to
+  // Month while looking at a past date should stay in that same area
+  // of history, not snap back to today.
   document.querySelectorAll(".period-btn").forEach(btn => {
     btn.addEventListener("click", () => {
       const period = btn.dataset.period;
       if (period === activePeriod) return;
-      renderDetailPeriod(view, period);
+      renderDetailPeriod(view, period, anchorDate);
     });
   });
+
+  const prevBtn = document.querySelector('.date-nav-btn[data-nav="prev"]');
+  const nextBtn = document.querySelector('.date-nav-btn[data-nav="next"]');
+  const shift = PERIOD_SHIFT_DAYS[activePeriod];
+  if (prevBtn) {
+    prevBtn.addEventListener("click", () => {
+      renderDetailPeriod(view, activePeriod, shiftISODate(anchorDate, -shift));
+    });
+  }
+  if (nextBtn && !nextBtn.disabled) {
+    nextBtn.addEventListener("click", () => {
+      // Clamp at today - stepping forward from a date within `shift`
+      // days of today should land exactly on today, not overshoot
+      // into a meaningless future date.
+      const next = shiftISODate(anchorDate, shift);
+      renderDetailPeriod(view, activePeriod, next > todayISO() ? todayISO() : next);
+    });
+  }
+
+  const dateInput = document.querySelector(".date-nav-input");
+  const dateLabel = document.querySelector(".date-nav-label");
+  if (dateInput) {
+    dateInput.addEventListener("change", () => {
+      if (dateInput.value) renderDetailPeriod(view, activePeriod, dateInput.value);
+    });
+  }
+  if (dateLabel && dateInput) {
+    // Current Chrome only opens a date input's native picker when the
+    // small calendar-icon affordance itself is clicked, not "anywhere
+    // in the input" the way it used to - since this input is invisible
+    // (opacity: 0, covering the label), tapping the visible label text
+    // would hit the non-icon area and silently do nothing. showPicker()
+    // is the purpose-built fix: it opens the native picker regardless
+    // of where the trigger was clicked. Falls back to the invisible
+    // input's own default click-passthrough behavior (still present,
+    // still functional to whatever extent a given browser supports it)
+    // in browsers where showPicker() isn't available.
+    dateLabel.addEventListener("click", (e) => {
+      if (typeof dateInput.showPicker === "function") {
+        e.preventDefault();
+        try {
+          dateInput.showPicker();
+        } catch (err) {
+          // Rare (e.g. not called as a direct result of the user
+          // gesture in some edge case) - nothing more to do here, the
+          // person can still use the fallback click-passthrough path.
+        }
+      }
+    });
+  }
 }
 
-async function fetchDetailSeries(field, period) {
-  if (period === "day") return api(`/today/series/${field}`);
-  return api(`/vitals/range/${field}?period=${period}`);
+async function fetchDetailSeries(field, period, anchorDate) {
+  if (period === "day") return api(`/today/series/${field}?date=${anchorDate}`);
+  return api(`/vitals/range/${field}?period=${period}&end_date=${anchorDate}`);
 }
 
 function buildLineChart(canvas, series, devices) {

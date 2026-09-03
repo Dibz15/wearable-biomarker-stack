@@ -1,7 +1,7 @@
 import hashlib
 import statistics
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from influxdb_client import InfluxDBClient, Point
@@ -486,15 +486,24 @@ def find_manual_events_in_range(user: str, start: datetime, end: datetime) -> li
     ]
 
 
-def local_today_bounds() -> tuple[datetime, datetime]:
-    ''' Start/end of "today" (midnight to midnight) in the configured
-    local timezone (TZ_NAME) - not UTC's calendar day, for the same
-    reason find_last_completed_sleep_session() resolves sleep_date
-    locally: a person in a timezone ahead of UTC would otherwise see
-    "today" flip over hours before their own local midnight.
+def local_today_bounds(for_date: date | None = None) -> tuple[datetime, datetime]:
+    ''' Start/end (midnight to midnight) of one local calendar day in
+    the configured local timezone (TZ_NAME) - not UTC's calendar day,
+    for the same reason find_last_completed_sleep_session() resolves
+    sleep_date locally: a person in a timezone ahead of UTC would
+    otherwise see "today" flip over hours before their own local
+    midnight.
+
+    `for_date` defaults to today when omitted (the original single
+    purpose this function was written for), but can be any date - this
+    is what the detail-view navigation (previous/next day, jump to a
+    date) uses to compute bounds for a day other than today, without
+    every existing caller needing to change.
     '''
-    now_local = datetime.now(ZoneInfo(TZ_NAME))
-    start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    tz = ZoneInfo(TZ_NAME)
+    if for_date is None:
+        for_date = datetime.now(tz).date()
+    start_local = datetime.combine(for_date, datetime.min.time(), tzinfo=tz)
     end_local = start_local + timedelta(days=1)
     return start_local, end_local
 
@@ -590,15 +599,16 @@ def get_today_vitals(user: str) -> dict[str, dict]:
     return result
 
 
-def get_today_series(field: str, user: str) -> dict[str, list[dict]]:
-    ''' Raw (unaggregated) points for one field, today, per device - the
-    time series a detail-view chart plots, as opposed to
+def get_today_series(field: str, user: str, for_date: date | None = None) -> dict[str, list[dict]]:
+    ''' Raw (unaggregated) points for one field, for one day (today by
+    default, or `for_date` for the detail-view's day-navigation), per
+    device - the time series a detail-view chart plots, as opposed to
     get_today_vitals()'s reduced last/avg/min/max summary.
 
     Returns {"<device>": [{"t": <ISO8601>, "v": <value>}, ...], ...},
     each device's list sorted chronologically.
     '''
-    start, end = local_today_bounds()
+    start, end = local_today_bounds(for_date)
     return _grouped_series(field, user, start, end)
 
 
@@ -762,28 +772,30 @@ def _daily_values(field: str, user: str, start: datetime, end: datetime) -> dict
     return result
 
 
-def get_baseline_comparison(field: str, user: str, baseline_days: int = 7) -> dict[str, dict]:
-    ''' For one field, per device: today's value compared against a
-    trailing baseline - the mean and (sample) standard deviation of
-    daily values over the `baseline_days` days immediately BEFORE
-    today (today itself excluded, so a value is never compared against
-    a baseline that includes itself). Powers the Slower/Faster
-    z-scored comparison bar - the same "vs. your own baseline" gauge
-    concept Zepp's own Resting Heart Rate/HRV pages show (see
-    wearable-events/UI_DESIGN_NOTES.md), just computed here instead of
-    left blank the way Zepp's own version was for lack of history.
+def get_baseline_comparison(field: str, user: str, baseline_days: int = 7, for_date: date | None = None) -> dict[str, dict]:
+    ''' For one field, per device: one day's value (today by default,
+    or `for_date` for the detail-view's day-navigation) compared
+    against a trailing baseline - the mean and (sample) standard
+    deviation of daily values over the `baseline_days` days immediately
+    BEFORE that day (the day itself excluded, so a value is never
+    compared against a baseline that includes itself). Powers the
+    Slower/Faster z-scored comparison bar - the same "vs. your own
+    baseline" gauge concept Zepp's own Resting Heart Rate/HRV pages
+    show (see wearable-events/UI_DESIGN_NOTES.md), just computed here
+    instead of left blank the way Zepp's own version was for lack of
+    history.
 
     Returns {"<device>": {"today": v, "baseline_mean": m,
     "baseline_stddev": s, "z": (today-mean)/stddev, "delta": today-mean}}.
 
     A device is omitted entirely if there isn't enough data to compute
     something meaningful - fewer than 2 baseline days (a stddev needs
-    at least 2 points) or no reading at all today. This is a real
+    at least 2 points) or no reading at all that day. This is a real
     "insufficient data" case, not an error - same situation Zepp's own
     gauge shows early on, and the caller should treat it the same way
     (an empty/insufficient-data state, not a failure).
     '''
-    today_start, today_end = local_today_bounds()
+    today_start, today_end = local_today_bounds(for_date)
     baseline_start = today_start - timedelta(days=baseline_days)
 
     daily = _daily_values(field, user, baseline_start, today_start)

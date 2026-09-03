@@ -1,6 +1,6 @@
 import json
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -466,23 +466,40 @@ RANGE_PERIODS = {
 }
 
 
+def _parse_optional_date(date_str: str | None) -> date | None:
+    ''' Shared YYYY-MM-DD parsing for the three detail-view endpoints'
+    optional navigation date - None in means None out (defaults to
+    today, same as before navigation existed), a malformed string is a
+    400, never silently ignored or guessed at.
+    '''
+    if date_str is None:
+        return None
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(400, f"invalid date: {date_str!r} (expected YYYY-MM-DD)")
+
+
 @app.get("/today/series/{field}")
-def get_today_series_endpoint(field: str, current_user: dict = Depends(get_current_user)):
-    ''' Raw per-point time series for one field, today - what a detail
-    view's chart plots, as distinct from /today's reduced summary
-    stats. One entry per device that reported anything.
+def get_today_series_endpoint(field: str, date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Raw per-point time series for one field, for one day (today by
+    default, or `date` for the detail-view's day-navigation) - what a
+    detail view's chart plots, as distinct from /today's reduced
+    summary stats. One entry per device that reported anything.
     '''
     if field not in TODAY_SERIES_FIELDS:
         raise HTTPException(400, f"unsupported field: {field!r}")
-    return get_today_series(field, current_user["username"])
+    return get_today_series(field, current_user["username"], _parse_optional_date(date))
 
 
 @app.get("/vitals/range/{field}")
-def get_vitals_range(field: str, period: str, current_user: dict = Depends(get_current_user)):
+def get_vitals_range(field: str, period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
     ''' Per-device min/max range bars for one field, for the W/M/Y tabs
     on a detail view - one entry per day (week/month) or per month
     (year), as opposed to /today/series's raw per-point series that
-    only makes sense zoomed into a single day.
+    only makes sense zoomed into a single day. The window ends on
+    `end_date` (today by default) - the detail-view's back/forward
+    navigation shifts this by a whole period at a time.
     '''
     if field not in TODAY_SERIES_FIELDS:
         raise HTTPException(400, f"unsupported field: {field!r}")
@@ -490,8 +507,8 @@ def get_vitals_range(field: str, period: str, current_user: dict = Depends(get_c
         raise HTTPException(400, f"unsupported period: {period!r} (must be one of {sorted(RANGE_PERIODS)})")
 
     spec = RANGE_PERIODS[period]
-    end, _ = local_today_bounds()
-    end = end + timedelta(days=1)  # include all of today
+    end, _ = local_today_bounds(_parse_optional_date(end_date))
+    end = end + timedelta(days=1)  # include all of end_date (or today)
     start = end - timedelta(days=spec["days"])
 
     return get_period_range_series(field, current_user["username"], start, end, spec["window"])
@@ -501,18 +518,20 @@ BASELINE_ALLOWED_DAYS = {7, 14}
 
 
 @app.get("/vitals/baseline/{field}")
-def get_vitals_baseline(field: str, days: int = 7, current_user: dict = Depends(get_current_user)):
-    ''' Today's value vs. a trailing baseline (mean + stddev of the
-    `days` days before today) for one field, per device - what powers
-    the Slower/Faster comparison bar. Devices without enough history
-    yet are simply absent from the response (not an error) - the
-    caller should render that as an "insufficient data" state.
+def get_vitals_baseline(field: str, days: int = 7, date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' One day's value (today by default, or `date` for the
+    detail-view's day-navigation) vs. a trailing baseline (mean +
+    stddev of the `days` days before that day) for one field, per
+    device - what powers the Slower/Faster comparison bar. Devices
+    without enough history yet are simply absent from the response
+    (not an error) - the caller should render that as an
+    "insufficient data" state.
     '''
     if field not in TODAY_SERIES_FIELDS:
         raise HTTPException(400, f"unsupported field: {field!r}")
     if days not in BASELINE_ALLOWED_DAYS:
         raise HTTPException(400, f"unsupported days: {days!r} (must be one of {sorted(BASELINE_ALLOWED_DAYS)})")
-    return get_baseline_comparison(field, current_user["username"], baseline_days=days)
+    return get_baseline_comparison(field, current_user["username"], baseline_days=days, for_date=_parse_optional_date(date))
 
 
 # --- sleep ---
