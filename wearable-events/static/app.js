@@ -62,7 +62,7 @@ const METRIC_FIELDS = [
   { key: "hrv", label: "HRV", unit: "ms", hasDetail: true },
   { key: "stress", label: "Stress", unit: "" },
   { key: "spo2", label: "SpO2", unit: "%", hasDetail: true },
-  { key: "temperature", label: "Temperature", unit: "\u00b0" },
+  { key: "temperature", label: "Temperature", unit: "\u00b0", hasDetail: true },
 ];
 
 const SLEEP_STAGE_ORDER = ["deep", "light", "rem", "awake"];
@@ -297,6 +297,55 @@ const DETAIL_VIEWS = {
       },
     ],
   },
+  temperature: {
+    title: "Temperature",
+    // No Year here, unlike every other view - deliberately, matching
+    // Zepp's own temperature page. Skin temperature is a relative
+    // marker that swings with environment, meals, and exercise (its
+    // own in-app description, per the person's research) - the whole
+    // "differential from recent baseline" concept below is inherently
+    // a short-window comparison, and a year of daily deltas against a
+    // rolling 7-day baseline would just be noise, not signal.
+    periods: ["day", "week", "month"],
+    charts: [
+      { field: "temperature", label: "Temperature" },
+    ],
+    // A second, PARALLEL section (not just another entry in `charts`)
+    // - Day shows a single point-in-time comparison (reusing the same
+    // baseline bar HRV/SpO2 already use), but Week/Month show a whole
+    // TREND of past deltas, a genuinely different thing the regular
+    // per-chart pipeline (fetch raw values, render a chart) doesn't
+    // represent - see renderDetailPeriod's own comment on this.
+    differential: {
+      field: "temperature",
+      label: "Change from Baseline",
+      unit: "\u00b0",
+      baseline: {
+        lowLabel: "Cooler",
+        highLabel: "Warmer",
+        unit: "\u00b0",
+        // Unlike HRV/SpO2's threshold (a statistical z-score with no
+        // settled convention), this one is a DIRECT match to Zepp's
+        // own confirmed "optimal" band - not a guess.
+        driftThreshold: 0.5,
+        lowClue: "Cooler than your recent baseline",
+        highClue: "Warmer than your recent baseline \u2013 can precede illness, poor recovery, or reflect a warm sleep environment",
+        normalClue: "Within your optimal range",
+      },
+      // Confirmed thresholds (+-0.5 / +-1.0 / +-1.5) come from the
+      // person's own reading of the Zepp app. The band LABELS are
+      // NOT confirmed beyond "optimal" for the first tier - Zepp's own
+      // wording for the middle band wasn't legible when this was
+      // written. "Notable"/"Significant" are reasonable placeholders,
+      // not verified matches - worth revisiting if the real wording
+      // ever gets confirmed.
+      bands: [
+        { threshold: 0.5, label: "Optimal", color: "#6ecf97" },
+        { threshold: 1.0, label: "Notable", color: "#f0c674" },
+        { threshold: 1.5, label: "Significant", color: "#e88a8a" },
+      ],
+    },
+  },
 };
 
 // Distinct colors per device dataset on the chart - cycles if there
@@ -343,8 +392,11 @@ function shiftISODate(iso, days) {
   return dateToISO(d);
 }
 
-function renderPeriodButtons(activePeriod) {
-  const buttons = DETAIL_PERIODS.map(p => `
+function renderPeriodButtons(activePeriod, availablePeriods) {
+  const periods = availablePeriods
+    ? DETAIL_PERIODS.filter(p => availablePeriods.includes(p.key))
+    : DETAIL_PERIODS;
+  const buttons = periods.map(p => `
     <button class="period-btn${p.key === activePeriod ? " active" : ""}" data-period="${p.key}">${p.label}</button>
   `).join("");
   return `<div class="period-switcher">${buttons}</div>`;
@@ -515,7 +567,7 @@ function renderBaselineBar(comparisonByDevice, baselineDays, config = {}) {
 
 async function renderDetailPeriod(view, period, anchorDate) {
   const content = document.getElementById("detail-content");
-  content.innerHTML = renderPeriodButtons(period) + renderDateNav(period, anchorDate) + `<p class="muted">Loading...</p>`;
+  content.innerHTML = renderPeriodButtons(period, view.periods) + renderDateNav(period, anchorDate) + `<p class="muted">Loading...</p>`;
   wireDetailControls(view, period, anchorDate);
 
   activeCharts.forEach(c => c.destroy());
@@ -529,9 +581,23 @@ async function renderDetailPeriod(view, period, anchorDate) {
   // week/month, also fetch the 7-day rolling mean overlay - not
   // supported (or requested) for year, since it doesn't map onto
   // monthly bars.
+  //
+  // A view's optional `differential` section (temperature so far) is
+  // fetched separately from the regular charts array, since it's a
+  // genuinely different thing per period: on Day it's the SAME single
+  // today-vs-baseline comparison /vitals/baseline already provides
+  // (reused, not refetched under a different name); on Week/Month it's
+  // a whole TREND of past deltas from a new, dedicated endpoint
+  // (/vitals/differential) - not something the existing per-chart
+  // fetch/render pipeline (keyed by field, one fetch shape per field)
+  // could represent without either fetch colliding with the raw-value
+  // chart sharing the same field, or forcing every other chart through
+  // a shape it doesn't need.
   let seriesByField;
   let baselineByField = {};
   let rollingMeanByField = {};
+  let differentialBaseline = null;
+  let differentialSeries = null;
   try {
     seriesByField = Object.fromEntries(await Promise.all(
       view.charts.map(async c => [c.field, await fetchDetailSeries(c, period, anchorDate)])
@@ -541,13 +607,19 @@ async function renderDetailPeriod(view, period, anchorDate) {
       baselineByField = Object.fromEntries(await Promise.all(
         baselineCharts.map(async c => [c.field, await api(`/vitals/baseline/${c.field}?days=${BASELINE_DAYS}&date=${anchorDate}`)])
       ));
+      if (view.differential) {
+        differentialBaseline = await api(`/vitals/baseline/${view.differential.field}?days=${BASELINE_DAYS}&date=${anchorDate}`);
+      }
     } else if (period === "week" || period === "month") {
       rollingMeanByField = Object.fromEntries(await Promise.all(
         view.charts.map(async c => [c.field, await api(`/vitals/rolling-mean/${c.field}?period=${period}&end_date=${anchorDate}`)])
       ));
+      if (view.differential) {
+        differentialSeries = await api(`/vitals/differential/${view.differential.field}?period=${period}&end_date=${anchorDate}`);
+      }
     }
   } catch (e) {
-    content.innerHTML = renderPeriodButtons(period) + renderDateNav(period, anchorDate) + `<p class="status">Error loading chart data: ${escapeHtml(e.message)}</p>`;
+    content.innerHTML = renderPeriodButtons(period, view.periods) + renderDateNav(period, anchorDate) + `<p class="status">Error loading chart data: ${escapeHtml(e.message)}</p>`;
     wireDetailControls(view, period, anchorDate);
     return;
   }
@@ -568,7 +640,17 @@ async function renderDetailPeriod(view, period, anchorDate) {
     `;
   }).join("");
 
-  content.innerHTML = renderPeriodButtons(period) + renderDateNav(period, anchorDate) + cardsHtml;
+  const differentialHtml = view.differential
+    ? `
+      <p class="today-section-label">${view.differential.label}</p>
+      ${period === "day"
+        ? renderBaselineBar(differentialBaseline || {}, BASELINE_DAYS, view.differential.baseline || {})
+        : `<div class="detail-chart-card"><canvas id="detail-diff-chart"></canvas></div>${renderBandLegend(view.differential.bands)}`
+      }
+    `
+    : "";
+
+  content.innerHTML = renderPeriodButtons(period, view.periods) + renderDateNav(period, anchorDate) + cardsHtml + differentialHtml;
   wireDetailControls(view, period, anchorDate);
 
   view.charts.forEach((c, i) => {
@@ -592,6 +674,18 @@ async function renderDetailPeriod(view, period, anchorDate) {
       : buildRangeBarChart(canvas, series, devices, period, rollingMeanByField[c.field] || {}, c.yMin);
     activeCharts.push(chart);
   });
+
+  if (view.differential && period !== "day") {
+    const diffCanvas = document.getElementById("detail-diff-chart");
+    const devices = differentialSeries ? Object.keys(differentialSeries) : [];
+    if (devices.length === 0) {
+      diffCanvas.replaceWith(Object.assign(document.createElement("p"), {
+        className: "metric-card-empty", textContent: "Not enough history yet for a trend",
+      }));
+    } else {
+      activeCharts.push(buildDifferentialChart(diffCanvas, differentialSeries, devices, view.differential));
+    }
+  }
 }
 
 function wireDetailControls(view, activePeriod, anchorDate) {
@@ -899,6 +993,102 @@ function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}, y
               // which for this dataset IS the real value.
               const v = item.parsed.y;
               return v === null || v === undefined ? "" : `${item.dataset.label}: ${Math.round(v * 10) / 10}`;
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
+// Which band a delta falls into, by absolute magnitude - bands are
+// given as an ordered list of {threshold, color, label}, checked from
+// smallest threshold up; a delta beyond every threshold uses the LAST
+// band's color (the most severe one), rather than falling through
+// uncolored.
+function bandForDelta(delta, bands) {
+  const absDelta = Math.abs(delta);
+  for (const band of bands) {
+    if (absDelta <= band.threshold) return band;
+  }
+  return bands[bands.length - 1];
+}
+
+// A small persistent color key beneath the differential trend chart -
+// without this, the only way to learn what a bar's color means is to
+// tap it and read the tooltip one bar at a time, which defeats the
+// point of a chart meant for a quick "how am I doing" glance.
+function renderBandLegend(bands) {
+  // toFixed(1) rather than the raw number - JS drops trailing zeros
+  // (1.0 stringifies as "1"), which reads as visually inconsistent
+  // sitting next to "0.5" in the same legend.
+  const fmt = (v) => v.toFixed(1);
+  const items = bands.map((band, i) => {
+    const prevThreshold = i === 0 ? null : bands[i - 1].threshold;
+    const rangeText = i === 0
+      ? `within \u00b1${fmt(band.threshold)}\u00b0`
+      : i === bands.length - 1
+      ? `beyond \u00b1${fmt(prevThreshold)}\u00b0`
+      : `\u00b1${fmt(prevThreshold)}\u2013${fmt(band.threshold)}\u00b0`;
+    return `
+      <div class="band-legend-item">
+        <span class="band-swatch" style="background: ${band.color}"></span>
+        <span>${escapeHtml(band.label)} (${rangeText})</span>
+      </div>
+    `;
+  }).join("");
+  return `<div class="band-legend">${items}</div>`;
+}
+
+function buildDifferentialChart(canvas, series, devices, config) {
+  // Deliberately colored by SEVERITY BAND, not by device the way every
+  // other chart in this app colors its bars - the whole point of this
+  // chart is "how far off is this reading", so the color needs to
+  // carry that meaning directly rather than just distinguishing which
+  // device a bar belongs to. With more than one device, bars still
+  // group side by side per day (so two devices' readings for the same
+  // night don't overlap), each independently colored by its own delta.
+  const allPeriods = [...new Set(devices.flatMap(d => series[d].map(p => p.t)))].sort();
+  const labels = allPeriods.map(iso => isoToDate(iso).toLocaleDateString([], { month: "short", day: "numeric" }));
+
+  const datasets = devices.map(device => {
+    const byPeriod = Object.fromEntries(series[device].map(p => [p.t, p]));
+    const points = allPeriods.map(t => byPeriod[t] || null);
+    return {
+      label: device,
+      data: points.map(p => (p ? p.delta : null)),
+      raw: points,
+      backgroundColor: points.map(p => (p ? bandForDelta(p.delta, config.bands).color : "transparent")),
+      borderRadius: 4,
+    };
+  });
+
+  return new Chart(canvas, {
+    type: "bar",
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      animation: false,
+      scales: {
+        x: {
+          ticks: { color: "#8a8d99", maxRotation: 0, autoSkip: true },
+          grid: { display: false },
+        },
+        y: {
+          ticks: { color: "#8a8d99", callback: (v) => `${v > 0 ? "+" : ""}${v}${config.unit}` },
+          grid: { color: "#2a2d38" },
+        },
+      },
+      plugins: {
+        legend: { display: devices.length > 1, labels: { color: "#e8e9ed" } },
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const p = item.dataset.raw[item.dataIndex];
+              if (!p) return "";
+              const band = bandForDelta(p.delta, config.bands);
+              const deltaText = p.delta > 0 ? `+${p.delta}` : `${p.delta}`;
+              return `${item.dataset.label}: ${deltaText}${config.unit} (${band.label})`;
             },
           },
         },

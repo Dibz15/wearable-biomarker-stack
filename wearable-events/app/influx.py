@@ -1025,41 +1025,56 @@ def find_sleep_sessions_in_range(user: str, start: datetime, end: datetime) -> l
     return sessions
 
 
+def _sleep_sessions_by_wake_date(user: str, start_date: date, end_date: date) -> dict[date, dict[str, dict]]:
+    ''' Per-device longest sleep session for EACH wake date in
+    [start_date, end_date) - the bulk version of what
+    _sleep_session_for_night() does for one night at a time. Fetches
+    the underlying sleep-session data ONCE for the whole range,
+    instead of once per night the way calling _sleep_session_for_night()
+    in a loop would (each of ITS calls independently re-queries an
+    overlapping search window) - that redundancy is fine for the
+    handful of nights get_nightly_baseline_comparison() needs, but
+    would multiply badly for get_nightly_differential_series(), which
+    needs a full trailing baseline for potentially dozens of displayed
+    nights (a Month view).
+
+    Resolves by WAKE-UP day (not the bedtime-day sleep_date convention
+    used elsewhere in this file - see _sleep_session_for_night()'s own
+    docstring for why that distinction matters), and keeps the LONGEST
+    session per device per night when more than one ended the same day
+    (a nap plus the main sleep) - same rules as the single-night
+    version, just applied across the whole range in one pass.
+    '''
+    tz = ZoneInfo(TZ_NAME)
+    range_start = datetime.combine(start_date, datetime.min.time(), tzinfo=tz) - timedelta(hours=36)
+    range_end = datetime.combine(end_date, datetime.min.time(), tzinfo=tz) + timedelta(hours=12)
+
+    by_date: dict[date, dict[str, dict]] = {}
+    for session in find_sleep_sessions_in_range(user, range_start, range_end):
+        wake_date = session["end_time"].date()
+        if wake_date < start_date or wake_date >= end_date:
+            continue
+        best_by_device = by_date.setdefault(wake_date, {})
+        device = session["device"]
+        if device not in best_by_device or session["duration_s"] > best_by_device[device]["duration_s"]:
+            best_by_device[device] = session
+    return by_date
+
+
 def _sleep_session_for_night(user: str, wake_date: date) -> dict[str, dict]:
     ''' Per-device sleep session that ended (woke up) on `wake_date` -
     the actual night HRV's nightly mean should be computed over,
     replacing an earlier fixed-clock-time heuristic window with each
     night's real, per-device recorded boundaries.
 
-    Searches a generous 36-hour-before to noon-of window (wide enough
-    to catch any plausible bedtime the evening/night before, without
-    needing to guess exact bed/wake hours) and keeps only sessions that
-    actually END on wake_date - i.e. resolved by WAKE-UP day, not by
-    the existing sleep_date convention used elsewhere in this file
-    (find_last_completed_sleep_session's sleep_date is the BEDTIME day,
-    since it's derived from the session's start), which would
-    incorrectly resolve to the wrong night here.
-
-    If a device recorded more than one session ending the same day (a
-    nap plus the main sleep - see parser/activefit/FIELD_RESEARCH.md's
-    still-open nap-vs-main-sleep question), the LONGEST is treated as
-    that night's main sleep. A device with no qualifying session that
-    night is simply absent from the result - no fallback window is
-    guessed for it.
+    A thin single-night wrapper around _sleep_sessions_by_wake_date()
+    (see that function for the shared search-window/nap-vs-main-sleep
+    logic) - kept as its own function since most callers only ever
+    need one night at a time, and "the single-night case" reads more
+    clearly than "the bulk function with a one-day range" at each call
+    site.
     '''
-    tz = ZoneInfo(TZ_NAME)
-    day_start = datetime.combine(wake_date, datetime.min.time(), tzinfo=tz)
-    search_start = day_start - timedelta(hours=36)
-    search_end = day_start + timedelta(hours=12)
-
-    best_by_device: dict[str, dict] = {}
-    for session in find_sleep_sessions_in_range(user, search_start, search_end):
-        if session["end_time"].date() != wake_date:
-            continue
-        device = session["device"]
-        if device not in best_by_device or session["duration_s"] > best_by_device[device]["duration_s"]:
-            best_by_device[device] = session
-    return best_by_device
+    return _sleep_sessions_by_wake_date(user, wake_date, wake_date + timedelta(days=1)).get(wake_date, {})
 
 
 def _nightly_mean_for_date(field: str, user: str, for_date: date) -> dict[str, float]:
@@ -1111,6 +1126,72 @@ def get_nightly_baseline_comparison(field: str, user: str, baseline_days: int = 
             daily.setdefault(device, []).append(v)
 
     return _zscore_comparison(today_value, daily)
+
+
+def get_nightly_differential_series(field: str, user: str, start_date: date, end_date: date, baseline_days: int = 7) -> dict[str, list[dict]]:
+    ''' Per-device, per-night DELTA from a trailing baseline_days-night
+    rolling average, for each night waking in [start_date, end_date) -
+    the "day by day, how far off your recent normal" TREND Zepp's own
+    temperature Week view shows (7 days of differential from the
+    moving average) - as distinct from get_nightly_baseline_comparison(),
+    which only ever gives ONE such comparison (today vs. baseline), not
+    a series of them. A plain delta in the field's own units (e.g. degrees),
+    not a z-score - matching what Zepp actually displays for
+    temperature, which uses fixed absolute thresholds (person-confirmed:
+    roughly +-0.5/1.0/1.5 degrees) rather than a statistical measure.
+
+    Returns {"<device>": [{"t": <wake date ISO8601>, "delta": v,
+    "baseline_mean": m}, ...]}. A night is only included once it has at
+    least 2 baseline nights behind it (same rule as the single-comparison
+    functions - a delta against fewer than 2 baseline points isn't
+    meaningful).
+
+    Needs each displayed night's own trailing baseline, so this pulls
+    in [start_date - baseline_days, end_date) of nightly values - the
+    sleep-SESSION lookup for that whole extended range is fetched ONCE
+    up front (_sleep_sessions_by_wake_date()), but each night's actual
+    field-value mean still needs its own query (one per night in the
+    extended range) - unlike get_rolling_mean_series()'s calendar-day
+    version, a real sleep session's boundaries differ night to night
+    and can't be expressed as a single batched aggregateWindow() call.
+    This means a Month view here costs roughly (30 + baseline_days)
+    queries - noticeably more than this file's other functions, and a
+    reasonable place to look first if this page ever turns out to load
+    slowly in practice; not optimized further here without evidence
+    that it actually needs to be.
+    '''
+    sessions_by_date = _sleep_sessions_by_wake_date(user, start_date - timedelta(days=baseline_days), end_date)
+
+    nightly_by_device: dict[str, dict[str, float]] = {}
+    for wake_date, sessions in sessions_by_date.items():
+        for device, session in sessions.items():
+            device_means = _device_stat_by_field(field, user, session["start_time"], session["end_time"], "mean")
+            if device in device_means:
+                nightly_by_device.setdefault(device, {})[wake_date.isoformat()] = device_means[device]
+
+    result: dict[str, list[dict]] = {}
+    for device, by_date in nightly_by_device.items():
+        series: list[dict] = []
+        d = start_date
+        while d < end_date:
+            d_iso = d.isoformat()
+            if d_iso in by_date:
+                baseline_values = [
+                    by_date[(d - timedelta(days=i)).isoformat()]
+                    for i in range(1, baseline_days + 1)
+                    if (d - timedelta(days=i)).isoformat() in by_date
+                ]
+                if len(baseline_values) >= 2:
+                    baseline_mean = statistics.mean(baseline_values)
+                    series.append({
+                        "t": d_iso,
+                        "delta": round(by_date[d_iso] - baseline_mean, 2),
+                        "baseline_mean": round(baseline_mean, 2),
+                    })
+            d += timedelta(days=1)
+        if series:
+            result[device] = series
+    return result
 
 
 def get_today_steps(user: str) -> dict[str, int]:

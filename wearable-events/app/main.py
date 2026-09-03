@@ -32,6 +32,7 @@ from app.influx import (
     find_sleep_entry_by_id,
     get_baseline_comparison,
     get_nightly_baseline_comparison,
+    get_nightly_differential_series,
     get_period_range_series,
     get_rolling_mean_series,
     get_sleep_stage_breakdown,
@@ -609,11 +610,14 @@ BASELINE_ALLOWED_DAYS = {7, 14}
 
 
 # Same night-anchored baseline as HRV, for the same reason: "today's
-# SpO2" conventionally means last night's reading, and the overnight
-# value is the one actually worth tracking drift on (a daytime SpO2
-# reading only happens when the wearer is already still, so it's
-# sparse and less representative than the night's readings anyway).
-NIGHTLY_BASELINE_FIELDS = {"hrv", "spo2"}
+# SpO2"/"today's temperature" conventionally means last night's
+# reading, and the overnight value is the one actually worth tracking
+# drift on (a daytime SpO2 reading only happens when the wearer is
+# already still, so it's sparse and less representative than the
+# night's readings anyway; daytime temperature swings with activity,
+# meals, and environment enough that only the overnight reading is a
+# stable enough baseline to be worth comparing against).
+NIGHTLY_BASELINE_FIELDS = {"hrv", "spo2", "temperature"}
 
 
 @app.get("/vitals/baseline/{field}")
@@ -639,6 +643,33 @@ def get_vitals_baseline(field: str, days: int = 7, date: str | None = None, curr
     if field in NIGHTLY_BASELINE_FIELDS:
         return get_nightly_baseline_comparison(field, current_user["username"], baseline_days=days, for_date=parsed_date)
     return get_baseline_comparison(field, current_user["username"], baseline_days=days, for_date=parsed_date)
+
+
+@app.get("/vitals/differential/{field}")
+def get_vitals_differential(field: str, period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Per-night delta from a trailing 7-night baseline, across a week
+    or month - the TREND chart for a night-anchored field (temperature
+    so far), as opposed to /vitals/baseline's single today-vs-baseline
+    comparison. Day isn't offered here on purpose - that's exactly the
+    single-point comparison /vitals/baseline already gives, not a
+    series.
+
+    Only offered for fields that actually have a nightly-baseline
+    concept in the first place (NIGHTLY_BASELINE_FIELDS) - a plain
+    calendar-day field like resting_heart_rate has no per-night value
+    this would even be a delta FROM.
+    '''
+    if field not in NIGHTLY_BASELINE_FIELDS:
+        raise HTTPException(400, f"unsupported field for a nightly differential: {field!r}")
+    if period not in ("week", "month"):
+        raise HTTPException(400, f"unsupported period: {period!r} (must be 'week' or 'month')")
+
+    spec = RANGE_PERIODS[period]
+    anchor = _parse_optional_date(end_date) or datetime.now(ZoneInfo(TZ_NAME)).date()
+    end_date_obj = anchor + timedelta(days=1)  # exclusive - include all of the anchor day
+    start_date_obj = end_date_obj - timedelta(days=spec["days"])
+
+    return get_nightly_differential_series(field, current_user["username"], start_date_obj, end_date_obj, baseline_days=7)
 
 
 # --- sleep ---
