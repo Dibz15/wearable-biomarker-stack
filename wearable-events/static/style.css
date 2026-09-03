@@ -890,3 +890,28 @@ main {
   font-weight: 700;
   font-size: 1.1rem;
 }
+
+.period-switcher {
+  display: flex;
+  background: var(--surface);
+  border-radius: 10px;
+  padding: 0.25rem;
+  margin-bottom: 1rem;
+  gap: 0.25rem;
+}
+
+.period-btn {
+  flex: 1;
+  padding: 0.5rem 0;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.period-btn.active {
+  background: var(--surface-active);
+  color: var(--accent);
+}

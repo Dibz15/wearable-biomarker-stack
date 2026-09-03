@@ -196,7 +196,7 @@ async function loadToday() {
     // runs - a per-card listener would need explicit cleanup to avoid
     // piling up duplicates across refreshes.
     container.querySelectorAll("[data-detail-field]").forEach(el => {
-      const open = () => openMetricDetail(el.dataset.detailField, data.vitals[el.dataset.detailField] || {});
+      const open = () => openMetricDetail(el.dataset.detailField);
       el.addEventListener("click", open);
       el.addEventListener("keydown", e => {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
@@ -209,7 +209,7 @@ async function loadToday() {
 
 // --- Metric detail views (opened from a Today card, not a tab) ---
 
-let activeChart = null;
+let activeCharts = [];
 
 function openDetailScreen(title) {
   document.getElementById("detail-title").textContent = title;
@@ -218,67 +218,165 @@ function openDetailScreen(title) {
 
 function closeDetailScreen() {
   document.getElementById("detail-screen").style.display = "none";
-  if (activeChart) {
-    activeChart.destroy();
-    activeChart = null;
-  }
+  activeCharts.forEach(c => c.destroy());
+  activeCharts = [];
 }
 
 document.getElementById("detail-back-btn").addEventListener("click", closeDetailScreen);
 
+// Each view can plot more than one field (e.g. Heart Rate's page also
+// shows Resting Heart Rate below it) - each entry in `charts` becomes
+// its own card.
 const DETAIL_VIEWS = {
-  heart_rate: { title: "Heart Rate", color: "#e88a8a" },
+  heart_rate: {
+    title: "Heart Rate",
+    charts: [
+      { field: "heart_rate", label: "Heart Rate" },
+      { field: "resting_heart_rate", label: "Resting Heart Rate" },
+    ],
+  },
 };
 
 // Distinct colors per device dataset on the chart - cycles if there
 // are ever more devices than colors defined here, rather than erroring.
 const DEVICE_CHART_COLORS = ["#e88a8a", "#6ea8fe", "#4fd8b8", "#f0c674"];
 
-async function openMetricDetail(fieldKey, statsByDevice) {
-  const view = DETAIL_VIEWS[fieldKey];
+const DETAIL_PERIODS = [
+  { key: "day", label: "D" },
+  { key: "week", label: "W" },
+  { key: "month", label: "M" },
+  { key: "year", label: "Y" },
+];
+
+function renderPeriodButtons(activePeriod) {
+  const buttons = DETAIL_PERIODS.map(p => `
+    <button class="period-btn${p.key === activePeriod ? " active" : ""}" data-period="${p.key}">${p.label}</button>
+  `).join("");
+  return `<div class="period-switcher">${buttons}</div>`;
+}
+
+async function openMetricDetail(viewKey) {
+  const view = DETAIL_VIEWS[viewKey];
   if (!view) return; // no detail view wired up for this field yet
 
   openDetailScreen(view.title);
-  const content = document.getElementById("detail-content");
-  content.innerHTML = `<p class="muted">Loading...</p>`;
+  await renderDetailPeriod(view, "day");
+}
 
-  let series;
-  try {
-    series = await api(`/today/series/${fieldKey}`);
-  } catch (e) {
-    content.innerHTML = `<p class="status">Error loading chart data: ${escapeHtml(e.message)}</p>`;
-    return;
+function computeStatsFromSeries(series, period) {
+  // Stats computed client-side from whatever data is already fetched
+  // for the current chart/period, rather than depending on a separate
+  // pre-fetched prop (Today's vitals summary, which doesn't cover
+  // resting_heart_rate or any non-day period anyway) - one code path
+  // that works the same way regardless of which field or period is
+  // being viewed.
+  const stats = {};
+  for (const [device, points] of Object.entries(series)) {
+    if (!points.length) continue;
+    if (period === "day") {
+      const values = points.map(p => p.v);
+      stats[device] = {
+        last: points[points.length - 1].v,
+        min: Math.min(...values),
+        max: Math.max(...values),
+      };
+    } else {
+      stats[device] = {
+        min: Math.min(...points.map(p => p.min)),
+        max: Math.max(...points.map(p => p.max)),
+      };
+    }
   }
+  return stats;
+}
 
-  const devices = Object.keys(series);
-  const statsHtml = devices.map(device => {
-    const stats = statsByDevice[device] || {};
-    const subParts = [];
-    if (stats.avg !== undefined) subParts.push(`avg ${stats.avg}`);
-    if (stats.min !== undefined && stats.max !== undefined) subParts.push(`min ${stats.min} \u00b7 max ${stats.max}`);
+function renderStatsCard(stats) {
+  const devices = Object.keys(stats);
+  if (devices.length === 0) return "";
+  const rows = devices.map(device => {
+    const s = stats[device];
+    const valueText = s.last !== undefined ? s.last : `${s.min}\u2013${s.max}`;
+    const subText = s.last !== undefined ? `min ${s.min} \u00b7 max ${s.max}` : "";
     return `
       <div class="detail-stat-row">
         <span class="metric-device-name">${escapeHtml(device)}</span>
-        <span class="detail-stat-value">${stats.last !== undefined ? stats.last : "\u2013"}</span>
-        <span class="metric-sub">${subParts.join(" \u00b7 ")}</span>
+        <span class="detail-stat-value">${valueText}</span>
+        <span class="metric-sub">${subText}</span>
       </div>
     `;
   }).join("");
+  return `<div class="detail-stats-card">${rows}</div>`;
+}
 
-  content.innerHTML = `
-    <div class="detail-chart-card">
-      <canvas id="detail-chart"></canvas>
-    </div>
-    <div class="detail-stats-card">${statsHtml}</div>
-  `;
+async function renderDetailPeriod(view, period) {
+  const content = document.getElementById("detail-content");
+  content.innerHTML = renderPeriodButtons(period) + `<p class="muted">Loading...</p>`;
+  wirePeriodButtons(view, period);
 
-  if (devices.length === 0) {
-    document.getElementById("detail-chart").replaceWith(
-      Object.assign(document.createElement("p"), { className: "metric-card-empty", textContent: "No data yet today" })
-    );
+  activeCharts.forEach(c => c.destroy());
+  activeCharts = [];
+
+  // Fetch every chart's data for this period in parallel - independent
+  // requests, no reason to serialize them.
+  let seriesByField;
+  try {
+    seriesByField = Object.fromEntries(await Promise.all(
+      view.charts.map(async c => [c.field, await fetchDetailSeries(c.field, period)])
+    ));
+  } catch (e) {
+    content.innerHTML = renderPeriodButtons(period) + `<p class="status">Error loading chart data: ${escapeHtml(e.message)}</p>`;
+    wirePeriodButtons(view, period);
     return;
   }
 
+  const cardsHtml = view.charts.map((c, i) => {
+    const series = seriesByField[c.field];
+    const stats = computeStatsFromSeries(series, period);
+    return `
+      <p class="today-section-label">${c.label}</p>
+      <div class="detail-chart-card">
+        <canvas id="detail-chart-${i}"></canvas>
+      </div>
+      ${renderStatsCard(stats)}
+    `;
+  }).join("");
+
+  content.innerHTML = renderPeriodButtons(period) + cardsHtml;
+  wirePeriodButtons(view, period);
+
+  view.charts.forEach((c, i) => {
+    const series = seriesByField[c.field];
+    const devices = Object.keys(series);
+    const canvas = document.getElementById(`detail-chart-${i}`);
+    if (devices.length === 0) {
+      canvas.replaceWith(Object.assign(document.createElement("p"), {
+        className: "metric-card-empty", textContent: "No data for this period",
+      }));
+      return;
+    }
+    const chart = period === "day"
+      ? buildLineChart(canvas, series, devices)
+      : buildRangeBarChart(canvas, series, devices, period);
+    activeCharts.push(chart);
+  });
+}
+
+function wirePeriodButtons(view, activePeriod) {
+  document.querySelectorAll(".period-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const period = btn.dataset.period;
+      if (period === activePeriod) return;
+      renderDetailPeriod(view, period);
+    });
+  });
+}
+
+async function fetchDetailSeries(field, period) {
+  if (period === "day") return api(`/today/series/${field}`);
+  return api(`/vitals/range/${field}?period=${period}`);
+}
+
+function buildLineChart(canvas, series, devices) {
   const datasets = devices.map((device, i) => ({
     label: device,
     // Epoch milliseconds, not the raw ISO string - lets Chart.js's
@@ -293,12 +391,19 @@ async function openMetricDetail(fieldKey, statsByDevice) {
     borderColor: DEVICE_CHART_COLORS[i % DEVICE_CHART_COLORS.length],
     backgroundColor: "transparent",
     borderWidth: 2,
-    pointRadius: 0,
+    // A line needs at least two points to draw anything - a
+    // continuous series like heart_rate has plenty, so hiding point
+    // markers (pointRadius: 0) keeps that chart clean. But a sparser
+    // series (resting_heart_rate is often just one reading a day)
+    // can genuinely have only a single point, where there's no line
+    // to connect AND no marker - the chart renders completely empty
+    // even though the data is there. Show a visible dot specifically
+    // for that single-point case, stay clean otherwise.
+    pointRadius: series[device].length <= 1 ? 4 : 0,
     tension: 0.25,
   }));
 
-  const ctx = document.getElementById("detail-chart");
-  activeChart = new Chart(ctx, {
+  return new Chart(canvas, {
     type: "line",
     data: { datasets },
     options: {
@@ -325,6 +430,55 @@ async function openMetricDetail(fieldKey, statsByDevice) {
             title: (items) => items.length ? new Date(items[0].parsed.x).toLocaleTimeString() : "",
           },
         },
+      },
+    },
+  });
+}
+
+function buildRangeBarChart(canvas, series, devices, period) {
+  // Floating bars: Chart.js draws a [min, max] pair as a bar spanning
+  // that range, rather than a bar from zero - exactly the "vertical
+  // range bar per period" pattern from the Zepp research (see
+  // wearable-events/UI_DESIGN_NOTES.md's Weekly zoom-level notes).
+  const labelFormat = period === "year"
+    ? (iso) => new Date(iso).toLocaleDateString([], { month: "short" })
+    : (iso) => new Date(iso).toLocaleDateString([], { month: "short", day: "numeric" });
+
+  // Bars are grouped by period start across devices - build one shared
+  // label axis from whichever device has the most periods, then look
+  // up each device's [min, max] per label (or null if that device has
+  // no data for that specific period, so bars don't misalign).
+  const allPeriods = [...new Set(devices.flatMap(d => series[d].map(p => p.t)))].sort();
+  const labels = allPeriods.map(labelFormat);
+
+  const datasets = devices.map((device, i) => {
+    const byPeriod = Object.fromEntries(series[device].map(p => [p.t, [p.min, p.max]]));
+    return {
+      label: device,
+      data: allPeriods.map(t => byPeriod[t] || null),
+      backgroundColor: DEVICE_CHART_COLORS[i % DEVICE_CHART_COLORS.length],
+      borderRadius: 4,
+    };
+  });
+
+  return new Chart(canvas, {
+    type: "bar",
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      animation: false,
+      scales: {
+        x: {
+          ticks: { color: "#8a8d99", maxRotation: 0, autoSkip: true },
+          grid: { display: false },
+        },
+        y: {
+          ticks: { color: "#8a8d99" },
+          grid: { color: "#2a2d38" },
+        },
+      },
+      plugins: {
+        legend: { display: devices.length > 1, labels: { color: "#e8e9ed" } },
       },
     },
   });

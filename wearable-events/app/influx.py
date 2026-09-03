@@ -485,7 +485,7 @@ def find_manual_events_in_range(user: str, start: datetime, end: datetime) -> li
     ]
 
 
-def _local_today_bounds() -> tuple[datetime, datetime]:
+def local_today_bounds() -> tuple[datetime, datetime]:
     ''' Start/end of "today" (midnight to midnight) in the configured
     local timezone (TZ_NAME) - not UTC's calendar day, for the same
     reason find_last_completed_sleep_session() resolves sleep_date
@@ -566,7 +566,7 @@ def get_today_vitals(user: str) -> dict[str, dict]:
     data yet" (e.g. before the first sync of the day) rather than a
     failure.
     '''
-    start, end = _local_today_bounds()
+    start, end = local_today_bounds()
 
     # (field, which stats actually make sense for it)
     field_stats = {
@@ -595,11 +595,35 @@ def get_today_series(field: str, user: str) -> dict[str, list[dict]]:
     get_today_vitals()'s reduced last/avg/min/max summary.
 
     Returns {"<device>": [{"t": <ISO8601>, "v": <value>}, ...], ...},
-    each device's list already sorted chronologically (Flux's default
-    order for a plain, unaggregated range query - not re-sorted here,
-    since re-sorting an already-sorted list would just be wasted work).
+    each device's list sorted chronologically.
     '''
-    start, end = _local_today_bounds()
+    start, end = local_today_bounds()
+    return _grouped_series(field, user, start, end)
+
+
+def _grouped_series(field: str, user: str, start: datetime, end: datetime) -> dict[str, list[dict]]:
+    ''' Shared query behind get_today_series() and the W/M/Y range
+    endpoints - one field, grouped by device, sorted chronologically,
+    over an arbitrary [start, end) window.
+
+    The explicit sort() after group() is required, not optional or
+    redundant - confirmed directly from InfluxDB's own docs ("Group
+    does not guarantee sort order. To ensure data is sorted correctly,
+    use sort() after group()."), not just inferred from the symptom.
+    Without it, points from what were originally several disjoint
+    underlying series (this data also carries activity_kind, sample_type,
+    etc. as tags - see parser/activefit - each combination is its own
+    series until an explicit group() call collapses them by device
+    alone) get merged in whatever order the query engine happened to
+    produce internally, not necessarily chronological - a line chart
+    connecting points in that non-chronological array order visually
+    looks like the reported "skip lines and a bunch of separate
+    points", since the line jumps backward and forward in time rather
+    than progressing smoothly left to right. An earlier version of
+    this function incorrectly assumed group() preserved time order
+    (see git history) - that assumption was never actually verified
+    and was wrong.
+    '''
     client = get_client()
     query_api = client.query_api()
 
@@ -613,12 +637,13 @@ def get_today_series(field: str, user: str) -> dict[str, list[dict]]:
       |> filter(fn: (r) => r.user == "{user}")
       |> filter(fn: (r) => r._field == "{field}")
       |> group(columns: ["device"])
+      |> sort(columns: ["_time"])
     '''
 
     try:
         tables = query_api.query(flux)
     except Exception as e:
-        logger.warning(f"Failed to query today's {field} series for user={user}: {e}")
+        logger.warning(f"Failed to query {field} series for user={user}: {e}")
         return {}
 
     result: dict[str, list[dict]] = {}
@@ -635,13 +660,73 @@ def get_today_series(field: str, user: str) -> dict[str, list[dict]]:
     return result
 
 
+def get_period_range_series(field: str, user: str, start: datetime, end: datetime, window: str) -> dict[str, list[dict]]:
+    ''' Per-device min/max for one field, bucketed into `window`-sized
+    periods (a Flux duration string, e.g. "1d" or "1mo") across
+    [start, end) - what the W/M/Y "range bar" charts plot (one bar per
+    period spanning that period's low-to-high), as opposed to
+    get_today_series()'s raw per-point series used for the D view.
+
+    Returns {"<device>": [{"t": <period start ISO8601>, "min": v, "max": v}, ...]}.
+
+    Two separate aggregateWindow() queries (min, then max), zipped
+    together by (device, period start) - matches this file's established
+    style of simple single-purpose queries over one cleverer combined
+    query (see _device_stat_by_field's own docstring for the same
+    reasoning).
+    '''
+    client = get_client()
+    query_api = client.query_api()
+
+    start_iso = start.astimezone(timezone.utc).isoformat()
+    stop_iso = end.astimezone(timezone.utc).isoformat()
+
+    by_device_and_time: dict[str, dict[str, dict]] = {}
+
+    for stat in ("min", "max"):
+        flux = f'''
+        from(bucket: "{INFLUX_BUCKET}")
+          |> range(start: {start_iso}, stop: {stop_iso})
+          |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+          |> filter(fn: (r) => r.user == "{user}")
+          |> filter(fn: (r) => r._field == "{field}")
+          |> group(columns: ["device"])
+          |> aggregateWindow(every: {window}, fn: {stat}, createEmpty: false)
+        '''
+        try:
+            tables = query_api.query(flux)
+        except Exception as e:
+            logger.warning(f"Failed to query {stat}({field}) range series for user={user}: {e}")
+            continue
+
+        for table in tables:
+            for record in table.records:
+                device = record.values.get("device")
+                value = record.get_value()
+                period_start = record.get_time()
+                if device is None or value is None or period_start is None:
+                    continue
+                period_key = period_start.isoformat()
+                by_device_and_time.setdefault(device, {}).setdefault(period_key, {"t": period_key})[stat] = value
+
+    result: dict[str, list[dict]] = {}
+    for device, periods in by_device_and_time.items():
+        # Only keep periods where both min and max actually came back -
+        # a period missing one (shouldn't normally happen, since both
+        # queries share the same filter/window) is incomplete data,
+        # not a real zero-width range.
+        complete = [p for p in periods.values() if "min" in p and "max" in p]
+        result[device] = sorted(complete, key=lambda p: p["t"])
+    return result
+
+
 def get_today_steps(user: str) -> dict[str, int]:
     ''' Today's (local calendar day) total steps per device - a sum,
     not last/mean/etc., since steps is a per-sample count that needs
     adding up across the day rather than reduced to one representative
     reading.
     '''
-    start, end = _local_today_bounds()
+    start, end = local_today_bounds()
     client = get_client()
     query_api = client.query_api()
 

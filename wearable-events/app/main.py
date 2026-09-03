@@ -28,11 +28,13 @@ from app.influx import (
     find_manual_events_in_range,
     find_sleep_entries_in_range,
     find_sleep_entry_by_id,
+    get_period_range_series,
     get_sleep_stage_breakdown,
     get_today_series,
     get_today_steps,
     get_today_vitals,
     list_distinct_sensor_users,
+    local_today_bounds,
     manual_event_id,
     write_event_points,
     write_sleep_point,
@@ -451,7 +453,16 @@ def get_today(current_user: dict = Depends(get_current_user)):
 # than passing the path parameter straight into the Flux query, since
 # `field` reaches the query string directly (see get_today_series())
 # and this is a user-influenceable URL segment.
-TODAY_SERIES_FIELDS = {"heart_rate", "hrv", "stress", "spo2", "temperature"}
+TODAY_SERIES_FIELDS = {"heart_rate", "hrv", "stress", "spo2", "temperature", "resting_heart_rate"}
+
+# Same allowlist reasoning as above - `period` also reaches Flux
+# (as an aggregateWindow() duration), so it's validated against a fixed
+# mapping rather than accepted as an arbitrary string.
+RANGE_PERIODS = {
+    "week": {"days": 7, "window": "1d"},
+    "month": {"days": 30, "window": "1d"},
+    "year": {"days": 365, "window": "1mo"},
+}
 
 
 @app.get("/today/series/{field}")
@@ -463,6 +474,26 @@ def get_today_series_endpoint(field: str, current_user: dict = Depends(get_curre
     if field not in TODAY_SERIES_FIELDS:
         raise HTTPException(400, f"unsupported field: {field!r}")
     return get_today_series(field, current_user["username"])
+
+
+@app.get("/vitals/range/{field}")
+def get_vitals_range(field: str, period: str, current_user: dict = Depends(get_current_user)):
+    ''' Per-device min/max range bars for one field, for the W/M/Y tabs
+    on a detail view - one entry per day (week/month) or per month
+    (year), as opposed to /today/series's raw per-point series that
+    only makes sense zoomed into a single day.
+    '''
+    if field not in TODAY_SERIES_FIELDS:
+        raise HTTPException(400, f"unsupported field: {field!r}")
+    if period not in RANGE_PERIODS:
+        raise HTTPException(400, f"unsupported period: {period!r} (must be one of {sorted(RANGE_PERIODS)})")
+
+    spec = RANGE_PERIODS[period]
+    end, _ = local_today_bounds()
+    end = end + timedelta(days=1)  # include all of today
+    start = end - timedelta(days=spec["days"])
+
+    return get_period_range_series(field, current_user["username"], start, end, spec["window"])
 
 
 # --- sleep ---
