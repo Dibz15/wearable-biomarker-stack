@@ -464,6 +464,16 @@ TODAY_SERIES_FIELDS = {"heart_rate", "hrv", "stress", "spo2", "temperature", "re
 # (as an aggregateWindow() duration), so it's validated against a fixed
 # mapping rather than accepted as an arbitrary string.
 RANGE_PERIODS = {
+    # "day" buckets a single day hourly, rather than the raw per-point
+    # series /today/series returns - for a field like spo2 that's only
+    # sampled when the wearer is still (see get_period_range_series's
+    # own callers), a continuous line would either draw misleading
+    # straight segments across long gaps or just show scattered dots;
+    # hourly bars (matching Zepp's own SpO2 day view) leave an hour
+    # with no reading as a simple gap in the bars instead. Not every
+    # chart uses this for its day view - see DETAIL_VIEWS' per-chart
+    # dayViewStyle flag on the frontend.
+    "day": {"days": 1, "window": "1h"},
     "week": {"days": 7, "window": "1d"},
     "month": {"days": 30, "window": "1d"},
     "year": {"days": 365, "window": "1mo"},
@@ -578,6 +588,19 @@ def _period_bounds(period: str, end_date: str | None) -> tuple[datetime, datetim
         end, _ = local_today_bounds(parsed_end_date)
         end = end + timedelta(days=1)  # include all of end_date (or today)
         start = end - timedelta(days=spec["days"])
+        # Known narrow limitation, not fixed here: "day" period's 1h
+        # aggregateWindow buckets align to whole-hour boundaries in
+        # absolute (epoch) time, not necessarily to this local
+        # timezone's own hour marks. For any TZ_NAME with a whole-hour
+        # UTC offset (true for most real timezones, including all of
+        # the US and most of Europe/East Asia) this makes no
+        # difference; for a fractional-hour offset (e.g. India's
+        # UTC+5:30) bucket boundaries would sit ~30-45 minutes off from
+        # this local timezone's actual hour marks. Not addressed here
+        # since it's unconfirmed to affect this deployment and no
+        # smaller than the effort already spent getting the far more
+        # consequential timeSrc/month-alignment bugs right - flagged
+        # plainly instead of silently ignored.
 
     return start, end
 
@@ -585,7 +608,12 @@ def _period_bounds(period: str, end_date: str | None) -> tuple[datetime, datetim
 BASELINE_ALLOWED_DAYS = {7, 14}
 
 
-NIGHTLY_BASELINE_FIELDS = {"hrv"}
+# Same night-anchored baseline as HRV, for the same reason: "today's
+# SpO2" conventionally means last night's reading, and the overnight
+# value is the one actually worth tracking drift on (a daytime SpO2
+# reading only happens when the wearer is already still, so it's
+# sparse and less representative than the night's readings anyway).
+NIGHTLY_BASELINE_FIELDS = {"hrv", "spo2"}
 
 
 @app.get("/vitals/baseline/{field}")

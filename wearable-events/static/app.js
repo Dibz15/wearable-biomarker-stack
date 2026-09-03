@@ -61,7 +61,7 @@ const METRIC_FIELDS = [
   { key: "heart_rate", label: "Heart Rate", unit: "bpm", hasDetail: true },
   { key: "hrv", label: "HRV", unit: "ms", hasDetail: true },
   { key: "stress", label: "Stress", unit: "" },
-  { key: "spo2", label: "SpO2", unit: "%" },
+  { key: "spo2", label: "SpO2", unit: "%", hasDetail: true },
   { key: "temperature", label: "Temperature", unit: "\u00b0" },
 ];
 
@@ -259,6 +259,44 @@ const DETAIL_VIEWS = {
       },
     ],
   },
+  spo2: {
+    title: "SpO2",
+    charts: [
+      {
+        field: "spo2",
+        label: "SpO2",
+        // SpO2 is only sampled when the wearer is already still (see
+        // RANGE_PERIODS' own comment on this) - a continuous line for
+        // the day view would draw misleading straight segments across
+        // long gaps during activity. Hourly bars (matching Zepp's own
+        // SpO2 day view) leave a quiet hour as a simple gap instead.
+        dayViewStyle: "bars",
+        // SpO2 never meaningfully varies below the 90s in a healthy
+        // reading - auto-scaling the y-axis down to 0 would compress
+        // the whole visible range into a sliver at the top of the
+        // chart. 75% floors it well below anything except a genuinely
+        // serious reading, while leaving real day-to-day variation
+        // clearly visible.
+        yMin: 75,
+        showBaseline: true,
+        baseline: {
+          lowLabel: "Lower",
+          highLabel: "Higher",
+          unit: "%",
+          // Same starting-point reasoning as HRV's threshold - not a
+          // clinically validated line, just a reasonable default.
+          // SpO2's healthy range is naturally much tighter than HRV's
+          // though, so a given z-score here reflects a smaller
+          // absolute % swing - worth keeping in mind if this ever
+          // needs retuning independently of HRV's threshold.
+          driftThreshold: 1.5,
+          lowClue: "Lower than your usual \u2013 worth keeping an eye on; can reflect poor sleep, altitude, or a respiratory issue",
+          highClue: "Higher than your recent average",
+          normalClue: "Within your normal range",
+        },
+      },
+    ],
+  },
 };
 
 // Distinct colors per device dataset on the chart - cycles if there
@@ -361,7 +399,13 @@ function computeStatsFromSeries(series, period) {
   const stats = {};
   for (const [device, points] of Object.entries(series)) {
     if (!points.length) continue;
-    if (period === "day") {
+    // Detect the actual shape rather than trusting `period === "day"` -
+    // a chart with dayViewStyle:"bars" (SpO2) fetches range-bar-shaped
+    // data ({t, min, max, median}) for its day view too, same as
+    // week/month, not the raw-point shape ({t, v}) plain "day" used to
+    // always mean.
+    const isRawPoints = "v" in points[0];
+    if (isRawPoints) {
       const values = points.map(p => p.v);
       stats[device] = {
         last: points[points.length - 1].v,
@@ -490,7 +534,7 @@ async function renderDetailPeriod(view, period, anchorDate) {
   let rollingMeanByField = {};
   try {
     seriesByField = Object.fromEntries(await Promise.all(
-      view.charts.map(async c => [c.field, await fetchDetailSeries(c.field, period, anchorDate)])
+      view.charts.map(async c => [c.field, await fetchDetailSeries(c, period, anchorDate)])
     ));
     if (period === "day") {
       const baselineCharts = view.charts.filter(c => c.showBaseline);
@@ -537,9 +581,15 @@ async function renderDetailPeriod(view, period, anchorDate) {
       }));
       return;
     }
-    const chart = period === "day"
+    // Which chart function to use follows the ACTUAL shape of what was
+    // fetched, not the period string - a chart with dayViewStyle:"bars"
+    // fetches range-bar-shaped data ({t, min, max, median}) for its day
+    // view too (via fetchDetailSeries), same shape week/month already
+    // use, so it needs buildRangeBarChart even though period === "day".
+    const isRawPoints = "v" in series[devices[0]][0];
+    const chart = isRawPoints
       ? buildLineChart(canvas, series, devices)
-      : buildRangeBarChart(canvas, series, devices, period, rollingMeanByField[c.field] || {});
+      : buildRangeBarChart(canvas, series, devices, period, rollingMeanByField[c.field] || {}, c.yMin);
     activeCharts.push(chart);
   });
 }
@@ -607,9 +657,17 @@ function wireDetailControls(view, activePeriod, anchorDate) {
   }
 }
 
-async function fetchDetailSeries(field, period, anchorDate) {
-  if (period === "day") return api(`/today/series/${field}?date=${anchorDate}`);
-  return api(`/vitals/range/${field}?period=${period}&end_date=${anchorDate}`);
+async function fetchDetailSeries(chart, period, anchorDate) {
+  // Day view fetches raw per-point data (a continuous line) UNLESS the
+  // chart specifically opts into hourly bars for its day view
+  // (dayViewStyle: "bars" - SpO2, where readings are sparse enough
+  // that a connected line would draw misleading straight segments
+  // across the gaps). Everything else (week/month/year, and any
+  // chart's default day view) already goes through /vitals/range.
+  if (period === "day" && chart.dayViewStyle !== "bars") {
+    return api(`/today/series/${chart.field}?date=${anchorDate}`);
+  }
+  return api(`/vitals/range/${chart.field}?period=${period}&end_date=${anchorDate}`);
 }
 
 function buildLineChart(canvas, series, devices) {
@@ -714,13 +772,18 @@ const medianMarkerPlugin = {
   },
 };
 
-function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}) {
+function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}, yMin) {
   // Floating bars: Chart.js draws a [min, max] pair as a bar spanning
   // that range, rather than a bar from zero - exactly the "vertical
   // range bar per period" pattern from the Zepp research (see
   // wearable-events/UI_DESIGN_NOTES.md's Weekly zoom-level notes).
+  // period === "day" only ever reaches this chart (rather than
+  // buildLineChart) when a chart opts into hourly bars for its day
+  // view (dayViewStyle: "bars"), so this branch is unambiguous.
   const labelFormat = period === "year"
     ? (iso) => new Date(iso).toLocaleDateString([], { month: "short", year: "2-digit" })
+    : period === "day"
+    ? (iso) => new Date(iso).toLocaleTimeString([], { hour: "numeric" })
     : (iso) => new Date(iso).toLocaleDateString([], { month: "short", day: "numeric" });
 
   // Bars are grouped by period start across devices - build one shared
@@ -801,6 +864,13 @@ function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}) {
         y: {
           ticks: { color: "#8a8d99" },
           grid: { color: "#2a2d38" },
+          // A field like SpO2 naturally lives in a narrow high range
+          // (mid-90s to 100%) - auto-scaling to include 0 (or even a
+          // wide default range) wastes most of the chart's height and
+          // makes real, meaningful drops hard to see. Only set when a
+          // chart's config actually specifies one (yMin) - other
+          // fields keep Chart.js's normal auto-scaling untouched.
+          min: yMin,
         },
       },
       plugins: {
