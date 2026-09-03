@@ -84,6 +84,36 @@ raising. Concretely:
 - A column mismatch logs at **WARNING** and that section is skipped -
   everything else keeps working.
 
+## RESOLVED: activity/steps/continuous HR were being silently dropped
+
+Root cause found via a live debugging session (Flux queries comparing
+InfluxDB contents against `check_table_usage.py`'s row counts):
+`HUAMI_EXTENDED_ACTIVITY_SAMPLE` uses **seconds-scale** timestamps,
+not milliseconds like every other table this parser queries. Since
+`extract_data()` used one shared, milliseconds-computed
+`WHERE TIMESTAMP >= <bound>` clause for every table, a seconds-scale
+comparison against that bound was always false - the SQL query itself
+returned zero rows for this table specifically, silently, even though
+it had 248 real rows in SQLite. Every other table (stress, SpO2,
+temperature, HRV, PAI) worked fine in the same run using the same
+(correct, for them) bound, which is exactly why this looked like a
+Grafana problem at first rather than a table-specific unit mismatch.
+
+Fixed with a separate `HUAMI_ACTIVITY_TIMESTAMPS_ARE_MS` flag
+(confirmed `N`/seconds) and a per-table bound computation
+(`compute_query_start_bound()`), independent of the general
+`HUAMI_TIMESTAMPS_ARE_MS` flag (confirmed `Y`/milliseconds, correct
+for every other table here) - see the config section in
+`app/gadgetbridge_to_influxdb.py` for the full story.
+
+**If you're deploying this fix**: the per-device checkpoint has
+already been advanced to "recent" by every other section that was
+working correctly this whole time, so simply restarting the parser
+will only capture *new* activity data going forward - it won't
+backfill the gap that built up while this was broken. Run
+`scripts/clear_checkpoint.py` and temporarily widen `QUERY_DURATION`
+to recover it - see that script's docstring for the exact steps.
+
 ## What's still unverified
 
 Schema/data existence is confirmed for the tables below, but these
@@ -91,12 +121,12 @@ remain unknown until independently checked against real values:
 
 | Question | Where |
 |---|---|
-| Timestamp unit (ms vs s) | `HUAMI_TIMESTAMPS_ARE_MS` - same style of check as `COLMI_TIMESTAMPS_ARE_MS`: watch for InfluxDB "value out of range" write errors, or implausible far-future graphed data |
 | `GENERIC_HRV_VALUE_SAMPLE.VALUE` - same unit/algorithm as Colmi's HRV? | Both are written to the same `hrv` field for direct dashboard comparison (see the `${device}` filter in the main Grafana dashboard), but a ring and a watch may compute HRV differently (sensor placement, algorithm) - don't assume the two lines are apples-to-apples just because they're the same field name and same units aren't confirmed either |
 | `RAW_KIND` / `RAW_INTENSITY` code meanings | Stored raw (as `activity_kind` tag / `raw_intensity` field), same situation Colmi's `activity_kind` tag is in - not decoded, device-specific |
 | Do `SLEEP`, `REM_SLEEP`, `DEEP_SLEEP` actually differ? | A real Gadgetbridge bug report ([issue #4715](https://codeberg.org/Freeyourgadget/Gadgetbridge/issues/4715)) observed `REM_SLEEP` and `DEEP_SLEEP` holding **identical** values on one device - fields are named `sleep_extended_raw`/`sleep_rem_raw`/`sleep_deep_raw` deliberately, so they aren't confused with Colmi's independently-verified `sleep_stage_*` fields |
 | `TYPE_NUM` meaning on `HUAMI_STRESS_SAMPLE`/`HUAMI_SPO2_SAMPLE` | Gadgetbridge's Zepp OS feature list documents "automatic and manual" stress measurements and SpO2 monitoring, so `TYPE_NUM` is presumed to distinguish those - captured as a tag (`stress_type_num`/`spo2_type_num`) rather than decoded, so it's filterable in Grafana once confirmed without a parser change |
 | `GENERIC_TEMPERATURE_SAMPLE.TEMPERATURE_TYPE`/`TEMPERATURE_LOCATION` codes | Captured as tags, same as Colmi's own (also-unverified) temperature type/location codes - not decoded for either device |
+| `HUAMI_ACTIVITY_SAMPLE` (fallback table) timestamp scale | Assumed to share `HUAMI_EXTENDED_ACTIVITY_SAMPLE`'s seconds scale (same older lineage), but this device doesn't populate that table, so it's unconfirmed |
 
 ## Not yet extracted
 

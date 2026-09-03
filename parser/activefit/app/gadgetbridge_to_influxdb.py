@@ -89,14 +89,54 @@ SLEEP_HOURS = os.getenv("SLEEP_HOURS", "0,1,2,3,4,5,6").split(",")
 REMOVE_TEMP_DB = os.getenv("REMOVE_TEMP_DB", "Y")
 GADGETBRIDGE_USER = os.getenv("GADGETBRIDGE_USER", "primary")
 
-# UNVERIFIED - research suggests HUAMI_* tables use millisecond
-# timestamps, same convention as COLMI_*, but this is NOT confirmed
-# against a real Active 3 Premium export. See colmi/app's docstring
-# for how COLMI_TIMESTAMPS_ARE_MS was actually confirmed (InfluxDB
-# "value out of range" write errors, or implausible far-future
-# graphed data, are the tell) - do the same check here once real data
-# exists before trusting this default.
+# CONFIRMED (Sept 2026, real Active 3 Premium data, via a live
+# debugging session comparing InfluxDB query results against
+# scripts/check_table_usage.py's row counts) - HUAMI_* and GENERIC_*
+# tables use MILLISECOND timestamps, EXCEPT HUAMI_EXTENDED_ACTIVITY_SAMPLE
+# specifically, which uses SECONDS (see HUAMI_ACTIVITY_TIMESTAMPS_ARE_MS
+# below). This single flag now correctly covers every OTHER table this
+# file queries (stress, SpO2, temperature, HRV, PAI, resting/max/manual
+# HR) - confirmed because all of those successfully wrote real points to
+# InfluxDB using this assumption, in the same run where the activity
+# table (using the same assumption) silently returned zero rows despite
+# having 248 real rows in SQLite.
 HUAMI_TIMESTAMPS_ARE_MS = os.getenv("HUAMI_TIMESTAMPS_ARE_MS", "Y") == "Y"
+
+# CONFIRMED SECONDS, not milliseconds - the opposite of every other
+# table this file queries. Discovered via scripts/check_table_usage.py's
+# timestamp-scale classifier: HUAMI_EXTENDED_ACTIVITY_SAMPLE had 248 real
+# rows in SQLite, but zero corresponding points ever reached InfluxDB.
+# Root cause: this file computed ONE query_start_bound_scaled (in
+# milliseconds, per HUAMI_TIMESTAMPS_ARE_MS above) and reused it for
+# every table's WHERE TIMESTAMP >= <bound> clause - but a seconds-scale
+# TIMESTAMP compared against a milliseconds-scale bound is always
+# false (the bound is ~1000x larger than any real seconds-scale value
+# could be), so the SQL query itself returned zero rows for this table
+# specifically, silently, with no error anywhere in the pipeline. Every
+# other table in the same run used the same bound correctly, which is
+# exactly why this stayed hidden - stress/SpO2/temperature/HRV/PAI all
+# worked, making it look like a Grafana problem rather than a table-
+# specific unit mismatch, until compared directly against SQLite row
+# counts. This makes sense in hindsight: HUAMI_EXTENDED_ACTIVITY_SAMPLE
+# extends the older MiBandActivitySample lineage (see Gadgetbridge PR
+# #2837), which predates the newer dedicated sample tables and likely
+# predates their millisecond convention too.
+#
+# This is deliberately a SEPARATE flag from HUAMI_TIMESTAMPS_ARE_MS,
+# not a replacement for it - every other table this file queries is
+# independently confirmed to be milliseconds (see above), so a single
+# shared flag would have been wrong for one or the other regardless of
+# which way it was set. Per-table timestamp unit flags, not a single
+# global one, is the correct model for HUAMI_*-family tables - this is
+# the same class of lesson COLMI_TIMESTAMPS_ARE_MS/DURATION-unit bugs
+# already taught for Colmi, just discovered here via a live comparison
+# against real data instead of an InfluxDB write-rejection error (the
+# failure mode is different: a wrong-direction ms-as-seconds mistake
+# overflows and gets rejected by InfluxDB loudly; this seconds-as-ms
+# mistake instead filters everything out silently upstream of any
+# write ever being attempted - worth remembering as a second, quieter
+# failure shape for the same underlying class of bug).
+HUAMI_ACTIVITY_TIMESTAMPS_ARE_MS = os.getenv("HUAMI_ACTIVITY_TIMESTAMPS_ARE_MS", "N") == "Y"
 
 MAX_CATCHUP_SECONDS = int(os.getenv("MAX_CATCHUP_SECONDS", str(30 * 86400)))
 CHECKPOINT_OVERLAP_SECONDS = int(os.getenv("CHECKPOINT_OVERLAP_SECONDS", "300"))
@@ -105,21 +145,83 @@ MAX_FUTURE_TOLERANCE_SECONDS = int(os.getenv("MAX_FUTURE_TOLERANCE_SECONDS", "30
 ### Config ends
 
 
-def to_nanos(ts):
-    if HUAMI_TIMESTAMPS_ARE_MS:
+def to_nanos(ts, is_ms=None):
+    ''' Converts a raw TIMESTAMP value to nanoseconds for InfluxDB.
+    `is_ms` defaults to HUAMI_TIMESTAMPS_ARE_MS (the common case) but
+    callers dealing with a table on a different unit - currently just
+    HUAMI_EXTENDED_ACTIVITY_SAMPLE, see HUAMI_ACTIVITY_TIMESTAMPS_ARE_MS
+    above - must pass it explicitly.
+    '''
+    if is_ms is None:
+        is_ms = HUAMI_TIMESTAMPS_ARE_MS
+    if is_ms:
         return ts * 1000000
     return ts * 1000000000
 
 
-def from_nanos(ns):
-    if HUAMI_TIMESTAMPS_ARE_MS:
+def from_nanos(ns, is_ms=None):
+    ''' Inverse of to_nanos() - see its docstring for `is_ms`. '''
+    if is_ms is None:
+        is_ms = HUAMI_TIMESTAMPS_ARE_MS
+    if is_ms:
         return ns // 1000000
     return ns // 1000000000
 
 
-def scaled_to_iso(ts_scaled) -> str:
-    seconds = ts_scaled / 1000 if HUAMI_TIMESTAMPS_ARE_MS else ts_scaled
+def scaled_to_iso(ts_scaled, is_ms=None) -> str:
+    ''' See to_nanos()'s docstring for `is_ms`. '''
+    if is_ms is None:
+        is_ms = HUAMI_TIMESTAMPS_ARE_MS
+    seconds = ts_scaled / 1000 if is_ms else ts_scaled
     return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
+
+
+def compute_query_start_bound(checkpoint_ns, now_seconds, fallback_bound_seconds, is_ms, label):
+    ''' Derives a scaled (raw-table-unit) query-start bound from the
+    already-unit-agnostic checkpoint (nanoseconds, from InfluxDB), for
+    a table using the given timestamp convention - applying the same
+    overlap-subtraction and MAX_CATCHUP_SECONDS clamping logic
+    regardless of which unit that table happens to use.
+
+    This exists as its own function (rather than inlined once in
+    extract_data() like colmi's single-scale equivalent) specifically
+    because activefit now has two different per-table scales in play -
+    see HUAMI_ACTIVITY_TIMESTAMPS_ARE_MS above - and both need this
+    exact logic, just parameterized by `is_ms`. `label` is only used
+    for clearer log lines when there's more than one bound in play in
+    the same run.
+    '''
+    if checkpoint_ns is not None:
+        checkpoint_scaled = from_nanos(checkpoint_ns, is_ms)
+        unit_multiplier = 1000 if is_ms else 1
+        overlap_scaled = CHECKPOINT_OVERLAP_SECONDS * unit_multiplier
+        resume_bound_scaled = checkpoint_scaled - overlap_scaled
+
+        min_allowed_scaled = (now_seconds - MAX_CATCHUP_SECONDS) * unit_multiplier
+
+        if resume_bound_scaled < min_allowed_scaled:
+            logger.warning(
+                f"[{label}] Checkpoint ({scaled_to_iso(checkpoint_scaled, is_ms)}) is older than "
+                f"MAX_CATCHUP_SECONDS ({MAX_CATCHUP_SECONDS}s) - clamping catch-up "
+                f"window to {scaled_to_iso(min_allowed_scaled, is_ms)}."
+            )
+            bound_scaled = min_allowed_scaled
+        else:
+            bound_scaled = resume_bound_scaled
+
+        logger.info(
+            f"[{label}] Resuming from checkpoint at {scaled_to_iso(checkpoint_scaled, is_ms)} - "
+            f"querying from {scaled_to_iso(bound_scaled, is_ms)} after "
+            f"subtracting a {CHECKPOINT_OVERLAP_SECONDS}s overlap margin"
+        )
+    else:
+        bound_scaled = fallback_bound_seconds * 1000 if is_ms else fallback_bound_seconds
+        logger.info(
+            f"[{label}] No checkpoint found - using QUERY_DURATION fallback ({QUERY_DURATION}s), "
+            f"querying from {scaled_to_iso(bound_scaled, is_ms)}"
+        )
+
+    return bound_scaled
 
 
 def extract_data(cur, client):
@@ -147,35 +249,18 @@ def extract_data(cur, client):
             )
             checkpoint_ns = None
 
-    if checkpoint_ns is not None:
-        checkpoint_scaled = from_nanos(checkpoint_ns)
-        unit_multiplier = 1000 if HUAMI_TIMESTAMPS_ARE_MS else 1
-        overlap_scaled = CHECKPOINT_OVERLAP_SECONDS * unit_multiplier
-        resume_bound_scaled = checkpoint_scaled - overlap_scaled
-
-        min_allowed_scaled = (now_seconds - MAX_CATCHUP_SECONDS) * unit_multiplier
-
-        if resume_bound_scaled < min_allowed_scaled:
-            logger.warning(
-                f"Checkpoint ({scaled_to_iso(checkpoint_scaled)}) is older than "
-                f"MAX_CATCHUP_SECONDS ({MAX_CATCHUP_SECONDS}s) - clamping catch-up "
-                f"window to {scaled_to_iso(min_allowed_scaled)}."
-            )
-            query_start_bound_scaled = min_allowed_scaled
-        else:
-            query_start_bound_scaled = resume_bound_scaled
-
-        logger.info(
-            f"Resuming from checkpoint at {scaled_to_iso(checkpoint_scaled)} - "
-            f"querying from {scaled_to_iso(query_start_bound_scaled)} after "
-            f"subtracting a {CHECKPOINT_OVERLAP_SECONDS}s overlap margin"
-        )
-    else:
-        query_start_bound_scaled = fallback_bound_seconds * 1000 if HUAMI_TIMESTAMPS_ARE_MS else fallback_bound_seconds
-        logger.info(
-            f"No checkpoint found - using QUERY_DURATION fallback ({QUERY_DURATION}s), "
-            f"querying from {scaled_to_iso(query_start_bound_scaled)}"
-        )
+    # Two bounds, not one: HUAMI_EXTENDED_ACTIVITY_SAMPLE uses a
+    # different timestamp scale (seconds) than every other table this
+    # file queries (milliseconds) - see HUAMI_ACTIVITY_TIMESTAMPS_ARE_MS's
+    # docstring in the config section above for how that was discovered.
+    # Both derive from the same underlying checkpoint_ns (already
+    # unit-agnostic, from InfluxDB), just scaled differently.
+    query_start_bound_scaled = compute_query_start_bound(
+        checkpoint_ns, now_seconds, fallback_bound_seconds, HUAMI_TIMESTAMPS_ARE_MS, "default"
+    )
+    activity_query_start_bound_scaled = compute_query_start_bound(
+        checkpoint_ns, now_seconds, fallback_bound_seconds, HUAMI_ACTIVITY_TIMESTAMPS_ARE_MS, "activity"
+    )
 
     devices = fetch_devices(cur)
     if devices is None:
@@ -192,15 +277,19 @@ def extract_data(cur, client):
     # older HUAMI_ACTIVITY_SAMPLE (no sleep columns, NOT present in the
     # schema dump this was verified against, kept only as a defensive
     # fallback for other users' older Huami devices) if the extended
-    # table doesn't exist. SLEEP/REM_SLEEP/DEEP_SLEEP columns are
-    # confirmed to exist, but a real Gadgetbridge bug report (issue
-    # #4715) observed REM_SLEEP and DEEP_SLEEP holding IDENTICAL values
-    # on one device - don't trust the REM/deep split without checking
-    # your own data.
+    # table doesn't exist. Both queried with HUAMI_ACTIVITY_TIMESTAMPS_ARE_MS
+    # (confirmed seconds, not milliseconds, for the extended table - see
+    # its docstring in the config section; the fallback table is assumed
+    # to share the same scale as part of the same older lineage, but
+    # that assumption itself is unconfirmed since this device doesn't
+    # populate it). SLEEP/REM_SLEEP/DEEP_SLEEP columns are confirmed to
+    # exist, but a real Gadgetbridge bug report (issue #4715) observed
+    # REM_SLEEP and DEEP_SLEEP holding IDENTICAL values on one device -
+    # don't trust the REM/deep split without checking your own data.
     extended_query = (
         "SELECT TIMESTAMP, DEVICE_ID, RAW_KIND, STEPS, HEART_RATE, RAW_INTENSITY, "
         "SLEEP, REM_SLEEP, DEEP_SLEEP FROM HUAMI_EXTENDED_ACTIVITY_SAMPLE "
-        f"WHERE TIMESTAMP >= {query_start_bound_scaled} ORDER BY TIMESTAMP ASC"
+        f"WHERE TIMESTAMP >= {activity_query_start_bound_scaled} ORDER BY TIMESTAMP ASC"
     )
     rows = run_query(cur, "HUAMI_EXTENDED_ACTIVITY_SAMPLE", extended_query)
     activity_table_used = "HUAMI_EXTENDED_ACTIVITY_SAMPLE"
@@ -209,14 +298,14 @@ def extract_data(cur, client):
         basic_query = (
             "SELECT TIMESTAMP, DEVICE_ID, RAW_KIND, STEPS, HEART_RATE, RAW_INTENSITY "
             "FROM HUAMI_ACTIVITY_SAMPLE "
-            f"WHERE TIMESTAMP >= {query_start_bound_scaled} ORDER BY TIMESTAMP ASC"
+            f"WHERE TIMESTAMP >= {activity_query_start_bound_scaled} ORDER BY TIMESTAMP ASC"
         )
         rows = run_query(cur, "HUAMI_ACTIVITY_SAMPLE", basic_query)
         activity_table_used = "HUAMI_ACTIVITY_SAMPLE"
 
     if rows is not None:
         for r in rows:
-            row_ts = to_nanos(r[0])
+            row_ts = to_nanos(r[0], HUAMI_ACTIVITY_TIMESTAMPS_ARE_MS)
             fields = {
                 "steps": r[3],
                 "heart_rate": r[4],
