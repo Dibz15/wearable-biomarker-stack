@@ -1027,3 +1027,15 @@ main {
   font-weight: 600;
   color: var(--text);
 }
+
+.baseline-clue {
+  margin: 0.5rem 0 0;
+  font-size: 0.8rem;
+  text-align: center;
+  color: var(--muted);
+}
+
+.baseline-clue.drift-high,
+.baseline-clue.drift-low {
+  color: var(--text);
+}

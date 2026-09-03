@@ -29,6 +29,7 @@ from app.influx import (
     find_sleep_entries_in_range,
     find_sleep_entry_by_id,
     get_baseline_comparison,
+    get_nightly_baseline_comparison,
     get_period_range_series,
     get_sleep_stage_breakdown,
     get_today_series,
@@ -517,21 +518,32 @@ def get_vitals_range(field: str, period: str, end_date: str | None = None, curre
 BASELINE_ALLOWED_DAYS = {7, 14}
 
 
+NIGHTLY_BASELINE_FIELDS = {"hrv"}
+
+
 @app.get("/vitals/baseline/{field}")
 def get_vitals_baseline(field: str, days: int = 7, date: str | None = None, current_user: dict = Depends(get_current_user)):
     ''' One day's value (today by default, or `date` for the
     detail-view's day-navigation) vs. a trailing baseline (mean +
     stddev of the `days` days before that day) for one field, per
-    device - what powers the Slower/Faster comparison bar. Devices
-    without enough history yet are simply absent from the response
-    (not an error) - the caller should render that as an
-    "insufficient data" state.
+    device - what powers the comparison bar. Devices without enough
+    history yet are simply absent from the response (not an error) -
+    the caller should render that as an "insufficient data" state.
+
+    HRV uses a night-anchored baseline (get_nightly_baseline_comparison) -
+    "today's HRV" conventionally means last night's mean, not a
+    calendar-day average, and that's the field-specific fact that
+    decides which comparison function applies, not something the
+    caller needs to specify.
     '''
     if field not in TODAY_SERIES_FIELDS:
         raise HTTPException(400, f"unsupported field: {field!r}")
     if days not in BASELINE_ALLOWED_DAYS:
         raise HTTPException(400, f"unsupported days: {days!r} (must be one of {sorted(BASELINE_ALLOWED_DAYS)})")
-    return get_baseline_comparison(field, current_user["username"], baseline_days=days, for_date=_parse_optional_date(date))
+    parsed_date = _parse_optional_date(date)
+    if field in NIGHTLY_BASELINE_FIELDS:
+        return get_nightly_baseline_comparison(field, current_user["username"], baseline_days=days, for_date=parsed_date)
+    return get_baseline_comparison(field, current_user["username"], baseline_days=days, for_date=parsed_date)
 
 
 # --- sleep ---

@@ -59,7 +59,7 @@ async function api(path, options = {}) {
 
 const METRIC_FIELDS = [
   { key: "heart_rate", label: "Heart Rate", unit: "bpm", hasDetail: true },
-  { key: "hrv", label: "HRV", unit: "ms" },
+  { key: "hrv", label: "HRV", unit: "ms", hasDetail: true },
   { key: "stress", label: "Stress", unit: "" },
   { key: "spo2", label: "SpO2", unit: "%" },
   { key: "temperature", label: "Temperature", unit: "\u00b0" },
@@ -235,6 +235,30 @@ const DETAIL_VIEWS = {
       { field: "resting_heart_rate", label: "Resting Heart Rate", showBaseline: true },
     ],
   },
+  hrv: {
+    title: "HRV",
+    charts: [
+      {
+        field: "hrv",
+        label: "HRV",
+        showBaseline: true,
+        baseline: {
+          lowLabel: "Lower",
+          highLabel: "Higher",
+          unit: "ms",
+          // 1.5 standard deviations is a reasonable-but-not-clinically-
+          // validated line for "worth noting" - there's no settled
+          // consensus on exactly how much day-to-day HRV drift signals
+          // stress specifically, so this is a starting point, easy to
+          // tune later, not a claim of medical precision.
+          driftThreshold: 1.5,
+          lowClue: "Lower than your usual \u2013 can reflect stress, poor sleep, illness, or fatigue",
+          highClue: "Higher than your usual \u2013 often a sign of good recovery",
+          normalClue: "Within your normal range",
+        },
+      },
+    ],
+  },
 };
 
 // Distinct colors per device dataset on the chart - cycles if there
@@ -375,7 +399,40 @@ function renderStatsCard(stats) {
 const BASELINE_DAYS = 7;
 const BASELINE_Z_CAP = 2;
 
-function renderBaselineBar(comparisonByDevice, baselineDays) {
+function renderDriftClue(z, threshold, lowClue, highClue, normalClue) {
+  // Only rendered when the caller opted in with a threshold - Resting
+  // Heart Rate doesn't set one, so its bar stays exactly as it was
+  // (no clue text, no behavior change) while HRV gets this extra line.
+  let text, cls;
+  if (Math.abs(z) < threshold) {
+    text = normalClue;
+    cls = "drift-normal";
+  } else if (z > 0) {
+    text = highClue;
+    cls = "drift-high";
+  } else {
+    text = lowClue;
+    cls = "drift-low";
+  }
+  if (!text) return "";
+  return `<p class="baseline-clue ${cls}">${escapeHtml(text)}</p>`;
+}
+
+function renderBaselineBar(comparisonByDevice, baselineDays, config = {}) {
+  // Defaults match Resting Heart Rate's original hardcoded behavior
+  // exactly - generalized so HRV (Lower/Higher, ms, plus a drift clue)
+  // can reuse the same rendering and z-score-capping logic rather than
+  // a near-duplicate function.
+  const {
+    lowLabel = "Slower",
+    highLabel = "Faster",
+    unit = "bpm",
+    driftThreshold = null,
+    lowClue = null,
+    highClue = null,
+    normalClue = null,
+  } = config;
+
   const devices = Object.keys(comparisonByDevice);
   if (devices.length === 0) {
     return `
@@ -392,6 +449,7 @@ function renderBaselineBar(comparisonByDevice, baselineDays) {
     const clampedZ = Math.max(-BASELINE_Z_CAP, Math.min(BASELINE_Z_CAP, c.z));
     const pct = 50 + (clampedZ / BASELINE_Z_CAP) * 50;
     const deltaText = c.delta > 0 ? `+${c.delta}` : `${c.delta}`;
+    const clueHtml = driftThreshold !== null ? renderDriftClue(c.z, driftThreshold, lowClue, highClue, normalClue) : "";
     return `
       <div class="baseline-row">
         <div class="metric-device-name">${escapeHtml(device)}</div>
@@ -400,10 +458,11 @@ function renderBaselineBar(comparisonByDevice, baselineDays) {
           <div class="baseline-marker" style="left: ${pct}%"></div>
         </div>
         <div class="baseline-labels">
-          <span>Slower</span>
-          <span class="baseline-delta">${deltaText} bpm vs ${baselineDays}-day avg (${c.baseline_mean})</span>
-          <span>Faster</span>
+          <span>${escapeHtml(lowLabel)}</span>
+          <span class="baseline-delta">${deltaText} ${escapeHtml(unit)} vs ${baselineDays}-day avg (${c.baseline_mean})</span>
+          <span>${escapeHtml(highLabel)}</span>
         </div>
+        ${clueHtml}
       </div>
     `;
   }).join("");
@@ -445,7 +504,7 @@ async function renderDetailPeriod(view, period, anchorDate) {
     const series = seriesByField[c.field];
     const stats = computeStatsFromSeries(series, period);
     const baselineHtml = (period === "day" && c.showBaseline)
-      ? renderBaselineBar(baselineByField[c.field] || {}, BASELINE_DAYS)
+      ? renderBaselineBar(baselineByField[c.field] || {}, BASELINE_DAYS, c.baseline || {})
       : "";
     return `
       <p class="today-section-label">${c.label}</p>

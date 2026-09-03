@@ -772,37 +772,28 @@ def _daily_values(field: str, user: str, start: datetime, end: datetime) -> dict
     return result
 
 
-def get_baseline_comparison(field: str, user: str, baseline_days: int = 7, for_date: date | None = None) -> dict[str, dict]:
-    ''' For one field, per device: one day's value (today by default,
-    or `for_date` for the detail-view's day-navigation) compared
-    against a trailing baseline - the mean and (sample) standard
-    deviation of daily values over the `baseline_days` days immediately
-    BEFORE that day (the day itself excluded, so a value is never
-    compared against a baseline that includes itself). Powers the
-    Slower/Faster z-scored comparison bar - the same "vs. your own
-    baseline" gauge concept Zepp's own Resting Heart Rate/HRV pages
-    show (see wearable-events/UI_DESIGN_NOTES.md), just computed here
-    instead of left blank the way Zepp's own version was for lack of
-    history.
+def _zscore_comparison(today_value: dict[str, float], daily_values: dict[str, list[float]]) -> dict[str, dict]:
+    ''' Shared z-score math behind every "today vs. trailing baseline"
+    comparison bar - given one day's value and a list of baseline
+    daily values per device, compute mean/stddev/z/delta. Extracted
+    from get_baseline_comparison() so the identical math (including
+    the zero-stddev edge case handling - see the comment below) is
+    reused by get_nightly_baseline_comparison() too, rather than two
+    near-identical copies of the same logic differing only in how
+    "one day's value" gets computed upstream.
 
     Returns {"<device>": {"today": v, "baseline_mean": m,
     "baseline_stddev": s, "z": (today-mean)/stddev, "delta": today-mean}}.
 
     A device is omitted entirely if there isn't enough data to compute
     something meaningful - fewer than 2 baseline days (a stddev needs
-    at least 2 points) or no reading at all that day. This is a real
+    at least 2 points) or no value at all for that day. This is a real
     "insufficient data" case, not an error - same situation Zepp's own
     gauge shows early on, and the caller should treat it the same way
     (an empty/insufficient-data state, not a failure).
     '''
-    today_start, today_end = local_today_bounds(for_date)
-    baseline_start = today_start - timedelta(days=baseline_days)
-
-    daily = _daily_values(field, user, baseline_start, today_start)
-    today_value = _device_stat_by_field(field, user, today_start, today_end, "last")
-
     result: dict[str, dict] = {}
-    for device, values in daily.items():
+    for device, values in daily_values.items():
         if len(values) < 2 or device not in today_value:
             continue
         mean = statistics.mean(values)
@@ -817,7 +808,7 @@ def get_baseline_comparison(field: str, user: str, baseline_days: int = 7, for_d
             # perfectly flat baseline is maximally noteworthy, not
             # "no different". Defaulting to z=0 here would put the
             # marker dead-center while the delta text correctly shows
-            # a non-zero bpm difference - a direct visual/textual
+            # a non-zero difference - a direct visual/textual
             # contradiction. Pin far beyond any real cap (the frontend
             # clamps display to +-2) so the marker lands at the
             # correct edge instead.
@@ -832,6 +823,182 @@ def get_baseline_comparison(field: str, user: str, baseline_days: int = 7, for_d
             "delta": round(delta, 1),
         }
     return result
+
+
+def get_baseline_comparison(field: str, user: str, baseline_days: int = 7, for_date: date | None = None) -> dict[str, dict]:
+    ''' For one field, per device: one day's value (today by default,
+    or `for_date` for the detail-view's day-navigation) compared
+    against a trailing baseline - the mean and (sample) standard
+    deviation of daily values over the `baseline_days` days immediately
+    BEFORE that day (the day itself excluded, so a value is never
+    compared against a baseline that includes itself). Powers the
+    Slower/Faster z-scored comparison bar - the same "vs. your own
+    baseline" gauge concept Zepp's own Resting Heart Rate/HRV pages
+    show (see wearable-events/UI_DESIGN_NOTES.md), just computed here
+    instead of left blank the way Zepp's own version was for lack of
+    history.
+
+    Uses a calendar-midnight-to-midnight day as "one day's value" -
+    the right definition for a field like resting_heart_rate. HRV uses
+    a different, night-anchored definition instead - see
+    get_nightly_baseline_comparison().
+    '''
+    today_start, today_end = local_today_bounds(for_date)
+    baseline_start = today_start - timedelta(days=baseline_days)
+
+    daily = _daily_values(field, user, baseline_start, today_start)
+    today_value = _device_stat_by_field(field, user, today_start, today_end, "last")
+    return _zscore_comparison(today_value, daily)
+
+
+def find_sleep_sessions_in_range(user: str, start: datetime, end: datetime) -> list[dict]:
+    ''' Device-recorded sleep sessions (not subjective sleep-journal
+    entries - see find_sleep_entries_in_range() for those) whose START
+    falls within [start, end), each at least MIN_SLEEP_SESSION_SECONDS
+    long. Returns one dict per session: {"device": str, "start_time":
+    datetime, "end_time": datetime, "duration_s": int}, all in the
+    local timezone.
+
+    Reads the same sample_type=="sleep_session" / sleep_session_duration_s
+    data find_last_completed_sleep_session() already relies on -
+    generalized here to a date range and every device (that function
+    only ever returns the single most recent session across all
+    devices combined). end_time is computed as start + duration_s,
+    using the point's own reliable InfluxDB timestamp for the start and
+    the already-correctly-scaled duration field - deliberately not the
+    separate raw sleep_session_wakeup field the parsers also write,
+    since that field's raw units aren't something this file has
+    established a trustworthy scaling for elsewhere, and getting that
+    wrong would silently produce a garbage timestamp rather than an
+    error.
+    '''
+    client = get_client()
+    query_api = client.query_api()
+
+    start_iso = start.astimezone(timezone.utc).isoformat()
+    stop_iso = end.astimezone(timezone.utc).isoformat()
+
+    flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: {start_iso}, stop: {stop_iso})
+      |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+      |> filter(fn: (r) => r.sample_type == "sleep_session")
+      |> filter(fn: (r) => r.user == "{user}")
+      |> filter(fn: (r) => r._field == "sleep_session_duration_s")
+      |> filter(fn: (r) => r._value >= {MIN_SLEEP_SESSION_SECONDS})
+    '''
+
+    try:
+        tables = query_api.query(flux)
+    except Exception as e:
+        logger.error(f"Failed to query sleep sessions for user={user}: {e}")
+        return []
+
+    tz = ZoneInfo(TZ_NAME)
+    sessions = []
+    for table in tables:
+        for record in table.records:
+            device = record.values.get("device")
+            start_time = record.get_time()
+            duration_s = record.get_value()
+            if device is None or start_time is None or duration_s is None:
+                continue
+            local_start = start_time.astimezone(tz)
+            sessions.append({
+                "device": device,
+                "start_time": local_start,
+                "end_time": local_start + timedelta(seconds=duration_s),
+                "duration_s": int(duration_s),
+            })
+    return sessions
+
+
+def _sleep_session_for_night(user: str, wake_date: date) -> dict[str, dict]:
+    ''' Per-device sleep session that ended (woke up) on `wake_date` -
+    the actual night HRV's nightly mean should be computed over,
+    replacing an earlier fixed-clock-time heuristic window with each
+    night's real, per-device recorded boundaries.
+
+    Searches a generous 36-hour-before to noon-of window (wide enough
+    to catch any plausible bedtime the evening/night before, without
+    needing to guess exact bed/wake hours) and keeps only sessions that
+    actually END on wake_date - i.e. resolved by WAKE-UP day, not by
+    the existing sleep_date convention used elsewhere in this file
+    (find_last_completed_sleep_session's sleep_date is the BEDTIME day,
+    since it's derived from the session's start), which would
+    incorrectly resolve to the wrong night here.
+
+    If a device recorded more than one session ending the same day (a
+    nap plus the main sleep - see parser/activefit/FIELD_RESEARCH.md's
+    still-open nap-vs-main-sleep question), the LONGEST is treated as
+    that night's main sleep. A device with no qualifying session that
+    night is simply absent from the result - no fallback window is
+    guessed for it.
+    '''
+    tz = ZoneInfo(TZ_NAME)
+    day_start = datetime.combine(wake_date, datetime.min.time(), tzinfo=tz)
+    search_start = day_start - timedelta(hours=36)
+    search_end = day_start + timedelta(hours=12)
+
+    best_by_device: dict[str, dict] = {}
+    for session in find_sleep_sessions_in_range(user, search_start, search_end):
+        if session["end_time"].date() != wake_date:
+            continue
+        device = session["device"]
+        if device not in best_by_device or session["duration_s"] > best_by_device[device]["duration_s"]:
+            best_by_device[device] = session
+    return best_by_device
+
+
+def _nightly_mean_for_date(field: str, user: str, for_date: date) -> dict[str, float]:
+    ''' Per-device mean of `field` readings during the ACTUAL sleep
+    session that ended (woke up) on `for_date` - see
+    _sleep_session_for_night() - one night's representative value for
+    a field like HRV, where "today's HRV" conventionally means last
+    night's mean, not a calendar-day average (which would dilute the
+    figure with daytime readings for a device - the Colmi ring - that
+    also samples HRV while awake). A device with no detected sleep
+    session that night is simply absent - no fallback window is used.
+    '''
+    sessions = _sleep_session_for_night(user, for_date)
+    result: dict[str, float] = {}
+    for device, session in sessions.items():
+        device_means = _device_stat_by_field(field, user, session["start_time"], session["end_time"], "mean")
+        if device in device_means:
+            result[device] = device_means[device]
+    return result
+
+
+def get_nightly_baseline_comparison(field: str, user: str, baseline_days: int = 7, for_date: date | None = None) -> dict[str, dict]:
+    ''' Same z-score-vs-trailing-baseline comparison as
+    get_baseline_comparison(), but using each day's NIGHTLY mean (the
+    mean over that night's ACTUAL recorded sleep session - see
+    _nightly_mean_for_date()) as that day's representative value,
+    instead of a calendar-midnight-to-midnight mean. Built for HRV
+    specifically.
+
+    One query per night (today's night plus each baseline night, so
+    up to baseline_days + 1 total) rather than one aggregateWindow()
+    call for the whole range - each night's window is a different,
+    data-derived span (that night's own sleep session), not a fixed
+    period Flux's aggregateWindow() offset could express in one query.
+    baseline_days is always small (7 or 14), so the extra queries cost
+    little - consistent with this file's existing preference for
+    several simple queries over one cleverer one.
+    '''
+    tz = ZoneInfo(TZ_NAME)
+    if for_date is None:
+        for_date = datetime.now(tz).date()
+
+    today_value = _nightly_mean_for_date(field, user, for_date)
+
+    daily: dict[str, list[float]] = {}
+    for i in range(1, baseline_days + 1):
+        night_values = _nightly_mean_for_date(field, user, for_date - timedelta(days=i))
+        for device, v in night_values.items():
+            daily.setdefault(device, []).append(v)
+
+    return _zscore_comparison(today_value, daily)
 
 
 def get_today_steps(user: str) -> dict[str, int]:
