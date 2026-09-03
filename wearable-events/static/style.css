@@ -915,3 +915,61 @@ main {
   background: var(--surface-active);
   color: var(--accent);
 }
+
+.baseline-card {
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.baseline-row + .baseline-row {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--surface-active);
+}
+
+.baseline-track {
+  position: relative;
+  height: 8px;
+  border-radius: 4px;
+  margin: 0.6rem 0 0.4rem;
+  /* Blue (calmer/slower) to red (elevated/faster) - reuses the same
+     accent/danger colors already used elsewhere, rather than
+     introducing a third color pairing just for this one gauge. */
+  background: linear-gradient(to right, var(--accent), var(--surface-active) 50%, var(--danger));
+}
+
+.baseline-center-tick {
+  position: absolute;
+  left: 50%;
+  top: -3px;
+  width: 2px;
+  height: 14px;
+  background: var(--muted);
+  transform: translateX(-1px);
+}
+
+.baseline-marker {
+  position: absolute;
+  top: -4px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text);
+  border: 2px solid var(--bg);
+  transform: translateX(-8px);
+}
+
+.baseline-labels {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.baseline-delta {
+  font-weight: 600;
+  color: var(--text);
+}

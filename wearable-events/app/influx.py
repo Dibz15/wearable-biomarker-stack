@@ -1,4 +1,5 @@
 import hashlib
+import statistics
 import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -717,6 +718,107 @@ def get_period_range_series(field: str, user: str, start: datetime, end: datetim
         # not a real zero-width range.
         complete = [p for p in periods.values() if "min" in p and "max" in p]
         result[device] = sorted(complete, key=lambda p: p["t"])
+    return result
+
+
+def _daily_values(field: str, user: str, start: datetime, end: datetime) -> dict[str, list[float]]:
+    ''' Per-device list of one mean value per day, over [start, end) -
+    the intermediate this file's own get_baseline_comparison() needs
+    to compute a mean/stddev ACROSS days (not across raw readings
+    within a single window, which _device_stat_by_field() already
+    does but isn't the same statistic). Timestamps are dropped - only
+    the values themselves matter for the mean/stddev calculation.
+    '''
+    client = get_client()
+    query_api = client.query_api()
+
+    start_iso = start.astimezone(timezone.utc).isoformat()
+    stop_iso = end.astimezone(timezone.utc).isoformat()
+
+    flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: {start_iso}, stop: {stop_iso})
+      |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+      |> filter(fn: (r) => r.user == "{user}")
+      |> filter(fn: (r) => r._field == "{field}")
+      |> group(columns: ["device"])
+      |> aggregateWindow(every: 1d, fn: mean, createEmpty: false)
+    '''
+
+    try:
+        tables = query_api.query(flux)
+    except Exception as e:
+        logger.warning(f"Failed to query daily {field} values for user={user}: {e}")
+        return {}
+
+    result: dict[str, list[float]] = {}
+    for table in tables:
+        for record in table.records:
+            device = record.values.get("device")
+            value = record.get_value()
+            if device is None or value is None:
+                continue
+            result.setdefault(device, []).append(value)
+    return result
+
+
+def get_baseline_comparison(field: str, user: str, baseline_days: int = 7) -> dict[str, dict]:
+    ''' For one field, per device: today's value compared against a
+    trailing baseline - the mean and (sample) standard deviation of
+    daily values over the `baseline_days` days immediately BEFORE
+    today (today itself excluded, so a value is never compared against
+    a baseline that includes itself). Powers the Slower/Faster
+    z-scored comparison bar - the same "vs. your own baseline" gauge
+    concept Zepp's own Resting Heart Rate/HRV pages show (see
+    wearable-events/UI_DESIGN_NOTES.md), just computed here instead of
+    left blank the way Zepp's own version was for lack of history.
+
+    Returns {"<device>": {"today": v, "baseline_mean": m,
+    "baseline_stddev": s, "z": (today-mean)/stddev, "delta": today-mean}}.
+
+    A device is omitted entirely if there isn't enough data to compute
+    something meaningful - fewer than 2 baseline days (a stddev needs
+    at least 2 points) or no reading at all today. This is a real
+    "insufficient data" case, not an error - same situation Zepp's own
+    gauge shows early on, and the caller should treat it the same way
+    (an empty/insufficient-data state, not a failure).
+    '''
+    today_start, today_end = local_today_bounds()
+    baseline_start = today_start - timedelta(days=baseline_days)
+
+    daily = _daily_values(field, user, baseline_start, today_start)
+    today_value = _device_stat_by_field(field, user, today_start, today_end, "last")
+
+    result: dict[str, dict] = {}
+    for device, values in daily.items():
+        if len(values) < 2 or device not in today_value:
+            continue
+        mean = statistics.mean(values)
+        stddev = statistics.stdev(values)
+        today_v = today_value[device]
+        delta = today_v - mean
+        if stddev > 0:
+            z = delta / stddev
+        elif delta != 0:
+            # Zero historical variance (every baseline day identical)
+            # but today differs anyway - any deviation from a
+            # perfectly flat baseline is maximally noteworthy, not
+            # "no different". Defaulting to z=0 here would put the
+            # marker dead-center while the delta text correctly shows
+            # a non-zero bpm difference - a direct visual/textual
+            # contradiction. Pin far beyond any real cap (the frontend
+            # clamps display to +-2) so the marker lands at the
+            # correct edge instead.
+            z = 10.0 if delta > 0 else -10.0
+        else:
+            z = 0.0
+        result[device] = {
+            "today": round(today_v, 1),
+            "baseline_mean": round(mean, 1),
+            "baseline_stddev": round(stddev, 2),
+            "z": round(z, 2),
+            "delta": round(delta, 1),
+        }
     return result
 
 

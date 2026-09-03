@@ -28,6 +28,7 @@ from app.influx import (
     find_manual_events_in_range,
     find_sleep_entries_in_range,
     find_sleep_entry_by_id,
+    get_baseline_comparison,
     get_period_range_series,
     get_sleep_stage_breakdown,
     get_today_series,
@@ -494,6 +495,24 @@ def get_vitals_range(field: str, period: str, current_user: dict = Depends(get_c
     start = end - timedelta(days=spec["days"])
 
     return get_period_range_series(field, current_user["username"], start, end, spec["window"])
+
+
+BASELINE_ALLOWED_DAYS = {7, 14}
+
+
+@app.get("/vitals/baseline/{field}")
+def get_vitals_baseline(field: str, days: int = 7, current_user: dict = Depends(get_current_user)):
+    ''' Today's value vs. a trailing baseline (mean + stddev of the
+    `days` days before today) for one field, per device - what powers
+    the Slower/Faster comparison bar. Devices without enough history
+    yet are simply absent from the response (not an error) - the
+    caller should render that as an "insufficient data" state.
+    '''
+    if field not in TODAY_SERIES_FIELDS:
+        raise HTTPException(400, f"unsupported field: {field!r}")
+    if days not in BASELINE_ALLOWED_DAYS:
+        raise HTTPException(400, f"unsupported days: {days!r} (must be one of {sorted(BASELINE_ALLOWED_DAYS)})")
+    return get_baseline_comparison(field, current_user["username"], baseline_days=days)
 
 
 # --- sleep ---

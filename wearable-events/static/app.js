@@ -232,7 +232,7 @@ const DETAIL_VIEWS = {
     title: "Heart Rate",
     charts: [
       { field: "heart_rate", label: "Heart Rate" },
-      { field: "resting_heart_rate", label: "Resting Heart Rate" },
+      { field: "resting_heart_rate", label: "Resting Heart Rate", showBaseline: true },
     ],
   },
 };
@@ -308,6 +308,44 @@ function renderStatsCard(stats) {
   return `<div class="detail-stats-card">${rows}</div>`;
 }
 
+const BASELINE_DAYS = 7;
+const BASELINE_Z_CAP = 2;
+
+function renderBaselineBar(comparisonByDevice, baselineDays) {
+  const devices = Object.keys(comparisonByDevice);
+  if (devices.length === 0) {
+    return `
+      <div class="baseline-card">
+        <p class="metric-card-empty">Not enough history yet to compare (need at least 2 days)</p>
+      </div>
+    `;
+  }
+  const rows = devices.map(device => {
+    const c = comparisonByDevice[device];
+    // Clamp to +-BASELINE_Z_CAP standard deviations before mapping to
+    // the bar's width, so a rare big swing pins to the end of the bar
+    // rather than going off-scale - the person's own suggested approach.
+    const clampedZ = Math.max(-BASELINE_Z_CAP, Math.min(BASELINE_Z_CAP, c.z));
+    const pct = 50 + (clampedZ / BASELINE_Z_CAP) * 50;
+    const deltaText = c.delta > 0 ? `+${c.delta}` : `${c.delta}`;
+    return `
+      <div class="baseline-row">
+        <div class="metric-device-name">${escapeHtml(device)}</div>
+        <div class="baseline-track">
+          <div class="baseline-center-tick"></div>
+          <div class="baseline-marker" style="left: ${pct}%"></div>
+        </div>
+        <div class="baseline-labels">
+          <span>Slower</span>
+          <span class="baseline-delta">${deltaText} bpm vs ${baselineDays}-day avg (${c.baseline_mean})</span>
+          <span>Faster</span>
+        </div>
+      </div>
+    `;
+  }).join("");
+  return `<div class="baseline-card">${rows}</div>`;
+}
+
 async function renderDetailPeriod(view, period) {
   const content = document.getElementById("detail-content");
   content.innerHTML = renderPeriodButtons(period) + `<p class="muted">Loading...</p>`;
@@ -316,13 +354,23 @@ async function renderDetailPeriod(view, period) {
   activeCharts.forEach(c => c.destroy());
   activeCharts = [];
 
-  // Fetch every chart's data for this period in parallel - independent
-  // requests, no reason to serialize them.
+  // Every chart's series fetches in parallel. On the day view, charts
+  // with a baseline comparison (currently just Resting Heart Rate)
+  // also fetch their baseline comparison alongside - a bar comparing
+  // "today" against a trailing average only makes sense for a single
+  // day's value, not a week/month/year range, so it's day-only.
   let seriesByField;
+  let baselineByField = {};
   try {
     seriesByField = Object.fromEntries(await Promise.all(
       view.charts.map(async c => [c.field, await fetchDetailSeries(c.field, period)])
     ));
+    if (period === "day") {
+      const baselineCharts = view.charts.filter(c => c.showBaseline);
+      baselineByField = Object.fromEntries(await Promise.all(
+        baselineCharts.map(async c => [c.field, await api(`/vitals/baseline/${c.field}?days=${BASELINE_DAYS}`)])
+      ));
+    }
   } catch (e) {
     content.innerHTML = renderPeriodButtons(period) + `<p class="status">Error loading chart data: ${escapeHtml(e.message)}</p>`;
     wirePeriodButtons(view, period);
@@ -332,12 +380,16 @@ async function renderDetailPeriod(view, period) {
   const cardsHtml = view.charts.map((c, i) => {
     const series = seriesByField[c.field];
     const stats = computeStatsFromSeries(series, period);
+    const baselineHtml = (period === "day" && c.showBaseline)
+      ? renderBaselineBar(baselineByField[c.field] || {}, BASELINE_DAYS)
+      : "";
     return `
       <p class="today-section-label">${c.label}</p>
       <div class="detail-chart-card">
         <canvas id="detail-chart-${i}"></canvas>
       </div>
       ${renderStatsCard(stats)}
+      ${baselineHtml}
     `;
   }).join("");
 
@@ -453,9 +505,25 @@ function buildRangeBarChart(canvas, series, devices, period) {
 
   const datasets = devices.map((device, i) => {
     const byPeriod = Object.fromEntries(series[device].map(p => [p.t, [p.min, p.max]]));
+    const rawData = allPeriods.map(t => byPeriod[t] || null);
+    // A day with only a single reading (or a genuinely flat value,
+    // e.g. resting_heart_rate is often exactly one reading/day) has
+    // min === max - a zero-height floating bar, which Chart.js simply
+    // doesn't draw anything for, the same "nothing to draw" problem
+    // the single-point line chart had. Pad the DRAWN range slightly
+    // so something is always visible, but keep the tooltip showing
+    // the real, unpadded values (see the `raw` array + tooltip
+    // callback below) rather than silently showing a fabricated wider
+    // range as if it were real data.
+    const paddedData = rawData.map(pair => {
+      if (!pair) return null;
+      const [min, max] = pair;
+      return min === max ? [min - 0.5, max + 0.5] : pair;
+    });
     return {
       label: device,
-      data: allPeriods.map(t => byPeriod[t] || null),
+      data: paddedData,
+      raw: rawData,
       backgroundColor: DEVICE_CHART_COLORS[i % DEVICE_CHART_COLORS.length],
       borderRadius: 4,
     };
@@ -479,6 +547,14 @@ function buildRangeBarChart(canvas, series, devices, period) {
       },
       plugins: {
         legend: { display: devices.length > 1, labels: { color: "#e8e9ed" } },
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const real = item.dataset.raw[item.dataIndex];
+              return real ? `${item.dataset.label}: ${real[0]}\u2013${real[1]}` : "";
+            },
+          },
+        },
       },
     },
   });
