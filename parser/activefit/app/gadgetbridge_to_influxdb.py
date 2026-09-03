@@ -173,7 +173,12 @@ HUAMI_SLEEP_STAGE_MAP = {4: "light", 5: "deep", 8: "rem", 7: "awake"}
 # values - these aren't defined in this file, so they're presumed to
 # come from a parent/shared Huami constants class (not yet pulled) and
 # are deliberately left unmapped rather than guessed. Unmapped values
-# keep showing up as their raw numeric activity_kind tag, same as before.
+# still get an explicit "unknown" activity_kind_label tag (see below)
+# rather than omitting the tag - a present-vs-absent tag key would
+# fragment InfluxDB series the same way NULL TYPE_NUM did for stress/
+# SpO2 (see that fix's comment on HUAMI_STRESS_SAMPLE's extraction) -
+# the raw numeric activity_kind tag is still there too either way, so
+# no information is lost, just consistently tagged.
 #
 # TYPE_CUSTOM_DEEP_SLEEP/REM_SLEEP/AWAKE_SLEEP (121/122/123) are
 # deliberately NOT included here even though they're defined in the
@@ -516,11 +521,9 @@ def extract_data(cur, client):
             tags = {
                 **device_tags(r[1]),
                 "activity_kind": r[2],
+                "activity_kind_label": HUAMI_ACTIVITY_KIND_MAP.get(r[2], "unknown"),
                 "sample_type": "activity"
             }
-            activity_kind_label = HUAMI_ACTIVITY_KIND_MAP.get(r[2])
-            if activity_kind_label is not None:
-                tags["activity_kind_label"] = activity_kind_label
             results.append({
                 "timestamp": row_ts,
                 "fields": fields,
@@ -628,7 +631,21 @@ def extract_data(cur, client):
     # presumed to distinguish those, but the 0/1-or-other mapping isn't
     # verified). Keeping it raw as a tag means it can still be filtered
     # on in Grafana once its meaning is confirmed, without needing a
-    # parser change to retroactively recover it. ---
+    # parser change to retroactively recover it.
+    #
+    # TYPE_NUM is NULL for some rows (observed: the earliest couple
+    # hours of a real export - likely an initial historical-backfill
+    # sync that didn't populate it, unlike regular ongoing syncs which
+    # do). A None tag VALUE and an ABSENT tag KEY are not the same
+    # thing to InfluxDB - the client silently omits a tag entirely when
+    # given None (confirmed directly: Point.tag(key, None) drops it
+    # from the line protocol), which makes "has TYPE_NUM" vs "doesn't"
+    # a structurally different series, not just a different value of
+    # the same series - fragmenting Grafana panels into extra series
+    # that don't represent anything meaningful. Same fix already used
+    # for a NULL device ALIAS in common/devices.py: normalize to an
+    # explicit sentinel string so every point shares the same tag KEY,
+    # differing only in value. ---
     rows = run_query(cur, "HUAMI_STRESS_SAMPLE",
         "SELECT TIMESTAMP, DEVICE_ID, TYPE_NUM, STRESS FROM HUAMI_STRESS_SAMPLE "
         f"WHERE TIMESTAMP >= {query_start_bound_scaled} ORDER BY TIMESTAMP ASC")
@@ -643,26 +660,29 @@ def extract_data(cur, client):
                     fields["stress_exc_sleep"] = r[3]
             except (OverflowError, OSError, ValueError):
                 pass
+            stress_type_num = "unknown" if r[2] is None else r[2]
             results.append({
                 "timestamp": row_ts,
                 "fields": fields,
-                "tags": {**device_tags(r[1]), "stress_type_num": r[2]}
+                "tags": {**device_tags(r[1]), "stress_type_num": stress_type_num}
             })
             observed.note(r[1], row_ts)
         section_counts["stress"] = len(rows)
 
     # --- SpO2. CONFIRMED table/columns, including TYPE_NUM (same
-    # automatic-vs-manual caveat as HUAMI_STRESS_SAMPLE.TYPE_NUM above). ---
+    # automatic-vs-manual caveat, and same NULL-vs-absent-tag
+    # normalization, as HUAMI_STRESS_SAMPLE.TYPE_NUM above). ---
     rows = run_query(cur, "HUAMI_SPO2_SAMPLE",
         "SELECT TIMESTAMP, DEVICE_ID, TYPE_NUM, SPO2 FROM HUAMI_SPO2_SAMPLE "
         f"WHERE TIMESTAMP >= {query_start_bound_scaled} ORDER BY TIMESTAMP ASC")
     if rows is not None:
         for r in rows:
             row_ts = to_nanos(r[0])
+            spo2_type_num = "unknown" if r[2] is None else r[2]
             results.append({
                 "timestamp": row_ts,
                 "fields": {"spo2": r[3]},
-                "tags": {**device_tags(r[1]), "spo2_type_num": r[2]}
+                "tags": {**device_tags(r[1]), "spo2_type_num": spo2_type_num}
             })
             observed.note(r[1], row_ts)
         section_counts["spo2"] = len(rows)
