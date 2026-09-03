@@ -165,6 +165,36 @@ HUAMI_SLEEP_SESSION_TIMESTAMPS_ARE_MS = os.getenv("HUAMI_SLEEP_SESSION_TIMESTAMP
 # decode_sleep_session_blob() for the full byte layout this came from.
 HUAMI_SLEEP_STAGE_MAP = {4: "light", 5: "deep", 8: "rem", 7: "awake"}
 
+# CONFIRMED directly from Gadgetbridge's own source
+# (HuamiExtendedSampleProvider.java - the actual class backing
+# HUAMI_EXTENDED_ACTIVITY_SAMPLE, fetched from master, Sept 2026).
+# PARTIAL: only the codes named as constants in this specific file are
+# included here. Real data has also shown 80, 88, 96, 112 as activity_kind
+# values - these aren't defined in this file, so they're presumed to
+# come from a parent/shared Huami constants class (not yet pulled) and
+# are deliberately left unmapped rather than guessed. Unmapped values
+# keep showing up as their raw numeric activity_kind tag, same as before.
+#
+# TYPE_CUSTOM_DEEP_SLEEP/REM_SLEEP/AWAKE_SLEEP (121/122/123) are
+# deliberately NOT included here even though they're defined in the
+# same source file - confirmed (from postProcess(), same file) that
+# Gadgetbridge assigns those ONLY in-memory at read/display time, by
+# overlaying HuamiSleepSessionSampleProvider's already-decoded stages
+# back onto activity samples purely for rendering - never writing them
+# back to the RAW_KIND column in SQLite. Real exported data can only
+# ever contain 120 (undifferentiated sleep) here, never 121-123, which
+# is exactly why real stage detail has to come from
+# HUAMI_SLEEP_SESSION_SAMPLE's BLOB (already decoded above) rather than
+# this field - now confirmed by source, not just inferred from the
+# earlier finding that these columns stay frozen all night.
+HUAMI_ACTIVITY_KIND_MAP = {
+    64: "outdoor_running",
+    115: "not_worn",
+    118: "charging",
+    120: "sleep",
+}
+
+
 MAX_CATCHUP_SECONDS = int(os.getenv("MAX_CATCHUP_SECONDS", str(30 * 86400)))
 CHECKPOINT_OVERLAP_SECONDS = int(os.getenv("CHECKPOINT_OVERLAP_SECONDS", "300"))
 MAX_FUTURE_TOLERANCE_SECONDS = int(os.getenv("MAX_FUTURE_TOLERANCE_SECONDS", "300"))
@@ -483,14 +513,18 @@ def extract_data(cur, client):
                     fields["sleep_rem_raw"] = r[7]
                 if r[8] is not None:
                     fields["sleep_deep_raw"] = r[8]
+            tags = {
+                **device_tags(r[1]),
+                "activity_kind": r[2],
+                "sample_type": "activity"
+            }
+            activity_kind_label = HUAMI_ACTIVITY_KIND_MAP.get(r[2])
+            if activity_kind_label is not None:
+                tags["activity_kind_label"] = activity_kind_label
             results.append({
                 "timestamp": row_ts,
                 "fields": fields,
-                "tags": {
-                    **device_tags(r[1]),
-                    "activity_kind": r[2],
-                    "sample_type": "activity"
-                }
+                "tags": tags
             })
             observed.note(r[1], row_ts)
         section_counts[f"activity ({activity_table_used})"] = len(rows)
