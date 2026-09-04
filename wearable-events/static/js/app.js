@@ -6,6 +6,7 @@ import { loadCalendars } from "./calendars.js";
 import { loadKeywordRules, checkReprocessOnLoad, loadTagDefManage } from "./manage.js";
 import { initTimelineControls, loadTimeline } from "./timeline.js";
 import { loadSleepHistory } from "./sleep.js";
+import { loadSleepOverview } from "./sleep-overview.js";
 
 // api() (in core.js) dispatches this instead of calling showLogin()
 // directly, to avoid a circular import between core.js and this file -
@@ -42,6 +43,7 @@ function showApp(me) {
   initTimelineControls();
   loadTimeline();
   loadSleepHistory();
+  loadSleepOverview();
 }
 
 document.getElementById("login-submit").addEventListener("click", async () => {

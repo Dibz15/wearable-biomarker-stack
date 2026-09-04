@@ -1213,3 +1213,117 @@ main {
   align-items: flex-end;
   gap: 0.1rem;
 }
+
+/* --- Sleep tab's objective-data overview --- */
+
+/* Many small adjacent segments (unlike the 4-segment proportion bar
+   this class is shared with) can visually blend together without a
+   seam - a subtle border keeps each segment distinguishable. */
+.sleep-hypnogram-bar .sleep-stage-seg {
+  border-right: 1px solid var(--bg);
+}
+.sleep-hypnogram-bar .sleep-stage-seg:last-child {
+  border-right: none;
+}
+
+.sleep-stats-row {
+  display: flex;
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 0.75rem 0.5rem;
+  margin-bottom: 0.75rem;
+  text-align: center;
+}
+
+.sleep-stat-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.sleep-stat-item + .sleep-stat-item {
+  border-left: 1px solid var(--surface-active);
+}
+
+.sleep-stat-label {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.sleep-stat-value {
+  font-weight: 700;
+  font-size: 1.1rem;
+}
+
+.sleep-quality-card {
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 0.85rem 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.sleep-quality-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.6rem 0;
+}
+
+.sleep-quality-row + .sleep-quality-row {
+  border-top: 1px solid var(--surface-active);
+}
+
+.sleep-quality-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.sleep-quality-label {
+  font-weight: 600;
+}
+
+.sleep-quality-value {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.sleep-quality-row-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.1rem;
+}
+
+.sleep-quality-tier {
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.1rem 0.5rem;
+  border-radius: 6px;
+}
+
+.sleep-quality-good {
+  color: #6ecf97;
+  background: rgba(110, 207, 151, 0.12);
+}
+
+.sleep-quality-attention {
+  color: #f0c674;
+  background: rgba(240, 198, 116, 0.12);
+}
+
+.sleep-quality-threshold {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.sleep-quality-source {
+  color: var(--muted);
+  font-size: 0.75rem;
+  margin-top: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--surface-active);
+  line-height: 1.4;
+}

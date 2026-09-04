@@ -41,6 +41,7 @@ from app.influx import (
     get_period_range_series,
     get_rolling_mean_series,
     get_sitting_minutes,
+    get_sleep_hypnogram_for_night,
     get_sleep_overview_for_night,
     get_sleep_stage_breakdown,
     get_sleep_stage_trend,
@@ -926,6 +927,19 @@ def get_sleep_overview(date: str | None = None, current_user: dict = Depends(get
     if overview is not None:
         overview["duration_goal_s"] = SLEEP_DURATION_GOAL_SECONDS
     return overview
+
+
+@app.get("/sleep/hypnogram")
+def get_sleep_hypnogram(date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' The Sleep tab's hypnogram - the ordered, individual sleep-stage
+    segments for one specific night (NOT /sleep/overview's aggregated
+    stages_min totals), the chronological sequence a real hypnogram
+    visualization needs. Same `date` (wake date) convention as
+    /sleep/overview. Returns an empty list (not an error) when no
+    sleep session is recorded for that night.
+    '''
+    wake_date = _parse_optional_date(date) or datetime.now(ZoneInfo(TZ_NAME)).date()
+    return get_sleep_hypnogram_for_night(current_user["username"], wake_date)
 
 
 @app.get("/sleep/vitals-series/{field}")

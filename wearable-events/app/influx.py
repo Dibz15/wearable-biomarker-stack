@@ -1906,6 +1906,86 @@ def get_sleep_vitals_series(field: str, user: str, wake_date: date) -> dict[str,
     return {device: series[device]} if device in series else {}
 
 
+def _sleep_stage_timeline(user: str, session_start: datetime, session_end: datetime, device: str | None = None) -> list[dict]:
+    ''' Ordered, individual stage SEGMENTS during one sleep session -
+    NOT the aggregated per-stage-type minute totals
+    get_sleep_stage_breakdown() returns. This is what a true hypnogram
+    visualization needs (Zepp's own "horizontal timeline of colored
+    blocks across the night" - see UI_DESIGN_NOTES.md's "Sleep tab"
+    entry, which confirms this is exactly what this app's own stage
+    extraction already produces) - the CHRONOLOGICAL SEQUENCE of which
+    stage was active when, not just how many total minutes were spent
+    in each stage type overall.
+
+    Reads the same sleep_stage_duration_s points get_sleep_stage_breakdown()
+    sums, but keeps each one as its own row instead of grouping+summing
+    by stage - same underlying data, different shape for a different
+    purpose. Same optional device-filtering as that function, same
+    reasoning (see its own docstring) - and doubly important here,
+    since segments from two different devices sorted together purely
+    by time would interleave into a nonsensical, non-chronological-per-
+    device timeline, not just double-count a total the way an
+    unfiltered sum would.
+
+    Returns a chronologically-sorted list of {"stage": str,
+    "start": <ISO8601>, "duration_min": int}.
+    '''
+    client = get_client()
+    query_api = client.query_api()
+
+    start_iso = session_start.astimezone(timezone.utc).isoformat()
+    stop_iso = session_end.astimezone(timezone.utc).isoformat()
+
+    device_filter = f'|> filter(fn: (r) => r.device == "{device}")\n      ' if device else ""
+
+    flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: {start_iso}, stop: {stop_iso})
+      |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+      |> filter(fn: (r) => r.user == "{user}")
+      |> filter(fn: (r) => r.sample_type == "sleep_stage")
+      |> filter(fn: (r) => r._field == "sleep_stage_duration_s")
+      {device_filter}|> sort(columns: ["_time"])
+    '''
+
+    try:
+        tables = query_api.query(flux)
+    except Exception as e:
+        logger.warning(f"Failed to query sleep stage timeline for user={user}: {e}")
+        return []
+
+    segments = []
+    for table in tables:
+        for record in table.records:
+            stage = record.values.get("sleep_stage")
+            value = record.get_value()
+            t = record.get_time()
+            if stage is not None and value is not None and t is not None:
+                segments.append({
+                    "stage": stage,
+                    "start": t.isoformat(),
+                    "duration_min": round(value / 60),
+                })
+    segments.sort(key=lambda s: s["start"])
+    return segments
+
+
+def get_sleep_hypnogram_for_night(user: str, wake_date: date) -> list[dict]:
+    ''' The Sleep tab's hypnogram data for one specific night - resolves
+    that night's actual session window (same primary-device selection
+    as the rest of this Sleep-tab family, see _primary_device_session())
+    and returns _sleep_stage_timeline()'s ordered segment list for it.
+
+    Returns an empty list (not an error) if no sleep session is
+    recorded for this night.
+    '''
+    sessions = _sleep_session_for_night(user, wake_date)
+    if not sessions:
+        return []
+    device, session = _primary_device_session(sessions)
+    return _sleep_stage_timeline(user, session["start_time"], session["end_time"], device=device)
+
+
 def get_nightly_differential_series(field: str, user: str, start_date: date, end_date: date, baseline_days: int = 7) -> dict[str, list[dict]]:
     ''' Per-device, per-night DELTA from a trailing baseline_days-night
     rolling average, for each night waking in [start_date, end_date) -
