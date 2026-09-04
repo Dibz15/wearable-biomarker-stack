@@ -683,7 +683,36 @@ const HYPNOGRAM_STAGE_ORDER_TOP_TO_BOTTOM = ["awake", "rem", "light", "deep"];
 const HYPNOGRAM_STAGE_COLORS = { deep: "#7c6ce8", light: "#6ea8fe", rem: "#4fd8b8", awake: "#e88a8a" };
 const HYPNOGRAM_STAGE_LABELS = { deep: "Deep", light: "Light", rem: "REM", awake: "Awake" };
 
-// A true hypnogram - sleep stage over time, one filled rectangle per
+// Builds a rounded-rect SVG path with SELECTIVE per-corner rounding -
+// a plain <rect rx> only supports uniform rounding on all 4 corners,
+// which is the wrong tool here: a bar whose edge connects to a
+// transition stem needs that specific corner SQUARE (see
+// buildHypnogramSVG's own comment on why), while its other corners
+// stay rounded. `corners` is {tl, tr, bl, br}, each true (rounded,
+// using radius r) or false (square, radius 0). Standard clockwise
+// rounded-rect path construction, starting just past the top-left
+// corner.
+export function roundedRectPath(x, y, w, h, r, corners) {
+  const rtl = corners.tl ? r : 0;
+  const rtr = corners.tr ? r : 0;
+  const rbr = corners.br ? r : 0;
+  const rbl = corners.bl ? r : 0;
+  const f = (n) => n.toFixed(2);
+  return [
+    `M ${f(x + rtl)} ${f(y)}`,
+    `L ${f(x + w - rtr)} ${f(y)}`,
+    rtr ? `A ${f(rtr)} ${f(rtr)} 0 0 1 ${f(x + w)} ${f(y + rtr)}` : `L ${f(x + w)} ${f(y)}`,
+    `L ${f(x + w)} ${f(y + h - rbr)}`,
+    rbr ? `A ${f(rbr)} ${f(rbr)} 0 0 1 ${f(x + w - rbr)} ${f(y + h)}` : `L ${f(x + w)} ${f(y + h)}`,
+    `L ${f(x + rbl)} ${f(y + h)}`,
+    rbl ? `A ${f(rbl)} ${f(rbl)} 0 0 1 ${f(x)} ${f(y + h - rbl)}` : `L ${f(x)} ${f(y + h)}`,
+    `L ${f(x)} ${f(y + rtl)}`,
+    rtl ? `A ${f(rtl)} ${f(rtl)} 0 0 1 ${f(x + rtl)} ${f(y)}` : `L ${f(x)} ${f(y)}`,
+    "Z",
+  ].join(" ");
+}
+
+// A true hypnogram - sleep stage over time, one filled rounded bar per
 // segment, laid out on a hand-computed SVG grid rather than a Chart.js
 // scale. Deliberately NOT built on Chart.js, after two rounds of
 // genuinely subtle Chart.js linear-scale-as-categorical-axis bugs (a
@@ -713,20 +742,85 @@ export function buildHypnogramSVG(segments, options = {}) {
   const chartHeight = height - bottomAxisHeight;
   const bandHeight = chartHeight / HYPNOGRAM_STAGE_ORDER_TOP_TO_BOTTOM.length;
 
+  // The bar itself is thinner than its own band (leaves visible
+  // breathing room above/below within each row) - this, plus rounded
+  // ends and the thin connector stems below, is what gives the
+  // "swoopy" look (Oura/Whoop-style) rather than solid stacked blocks.
+  const barFraction = 0.55;
+  const barThickness = bandHeight * barFraction;
+
+  // A small, fixed corner radius - NOT scaled to the bar's own
+  // thickness (an earlier version did this and produced corners the
+  // person found too large/heavy). Still capped by half the bar's own
+  // thickness/width so a very short or brief segment's rounding can
+  // never exceed its own rect and create a rendering artifact.
+  const cornerRadius = 4;
+
   const sessionStartMs = new Date(segments[0].start).getTime();
   const last = segments[segments.length - 1];
   const sessionEndMs = new Date(last.start).getTime() + last.duration_min * 60000;
   const totalMs = Math.max(sessionEndMs - sessionStartMs, 1); // guard against a degenerate zero-length session
 
-  const rects = segments.map(seg => {
+  // Per-segment geometry computed once, shared by both the bars and
+  // the connector stems below - x/width from real elapsed time and
+  // duration, barTop/barBottom centered within the segment's own
+  // stage band.
+  const geometry = segments.map(seg => {
     const startMs = new Date(seg.start).getTime();
     const x = labelWidth + ((startMs - sessionStartMs) / totalMs) * chartWidth;
     const w = (seg.duration_min * 60000 / totalMs) * chartWidth;
     const bandIndex = HYPNOGRAM_STAGE_ORDER_TOP_TO_BOTTOM.indexOf(seg.stage);
-    const y = bandIndex >= 0 ? bandIndex * bandHeight : 0;
-    const color = HYPNOGRAM_STAGE_COLORS[seg.stage] || "#8a8d99";
-    return `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${w.toFixed(2)}" height="${bandHeight.toFixed(2)}" fill="${color}" />`;
+    const bandCenter = bandIndex >= 0 ? bandIndex * bandHeight + bandHeight / 2 : bandHeight / 2;
+    return {
+      stage: seg.stage,
+      x, w,
+      bandIndex: bandIndex >= 0 ? bandIndex : 0,
+      barTop: bandCenter - barThickness / 2,
+      barBottom: bandCenter + barThickness / 2,
+      color: HYPNOGRAM_STAGE_COLORS[seg.stage] || "#8a8d99",
+    };
+  });
+
+  // Which corner of a bar a transition-to-a-DIFFERENT-band neighbor
+  // occupies, so that corner can be left square - a stem drawn to a
+  // bar's nominal edge only visually touches it if the bar's own fill
+  // actually extends all the way to that edge at that exact X, which
+  // a rounded corner (curving away before reaching the edge) breaks.
+  // Making the connecting corner square is what makes the stem
+  // actually look connected, not just numerically adjacent.
+  const rects = geometry.map((g, i) => {
+    const prev = geometry[i - 1];
+    const next = geometry[i + 1];
+    const corners = { tl: true, tr: true, bl: true, br: true };
+    if (prev && prev.bandIndex !== g.bandIndex) {
+      // prev sits above (smaller bandIndex) -> stem lands on g's TOP-LEFT;
+      // prev sits below -> stem lands on g's BOTTOM-LEFT.
+      if (prev.bandIndex < g.bandIndex) corners.tl = false;
+      else corners.bl = false;
+    }
+    if (next && next.bandIndex !== g.bandIndex) {
+      if (next.bandIndex < g.bandIndex) corners.tr = false;
+      else corners.br = false;
+    }
+    const r = Math.max(0, Math.min(cornerRadius, barThickness / 2, g.w / 2));
+    const d = roundedRectPath(g.x, g.barTop, g.w, barThickness, r, corners);
+    return `<path d="${d}" fill="${g.color}" />`;
   }).join("");
+
+  // Thin vertical stems bridging each transition - drawn UNDERNEATH
+  // the bars (before them in the markup) so each bar's own square
+  // connecting corner sits flush against the stem with no gap.
+  const connectors = [];
+  for (let i = 0; i < geometry.length - 1; i++) {
+    const a = geometry[i];
+    const b = geometry[i + 1];
+    if (a.bandIndex === b.bandIndex) continue; // same row, no vertical connector needed
+    const x = b.x; // == a.x + a.w, the exact boundary between the two segments
+    const [y1, y2] = a.bandIndex < b.bandIndex
+      ? [a.barBottom, b.barTop]   // b is a LOWER row (deeper stage) than a
+      : [a.barTop, b.barBottom];  // b is a HIGHER row (lighter stage) than a
+    connectors.push(`<line x1="${x.toFixed(2)}" y1="${y1.toFixed(2)}" x2="${x.toFixed(2)}" y2="${y2.toFixed(2)}" stroke="#4a4d5a" stroke-width="1" />`);
+  }
 
   const gridLines = HYPNOGRAM_STAGE_ORDER_TOP_TO_BOTTOM.map((_, i) => {
     const y = i * bandHeight;
@@ -756,6 +850,7 @@ export function buildHypnogramSVG(segments, options = {}) {
   return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" xmlns="http://www.w3.org/2000/svg" font-family="inherit">
     ${gridLines}
     ${bottomLine}
+    ${connectors.join("")}
     ${rects}
     ${yLabels}
     ${xLabels}
