@@ -58,9 +58,9 @@ function renderHypnogram(segments) {
   `;
 }
 
-function renderQualityMetricRow(label, valueText, meetsThreshold, thresholdText) {
+function renderQualityMetricRow(label, valueText, meetsThreshold, thresholdText, notMetLabel) {
   const tierClass = meetsThreshold === null ? "" : meetsThreshold ? "sleep-quality-good" : "sleep-quality-attention";
-  const tierLabel = meetsThreshold === null ? "" : meetsThreshold ? "Meets guideline" : "Below guideline";
+  const tierLabel = meetsThreshold === null ? "" : meetsThreshold ? "Meets guideline" : notMetLabel;
   return `
     <div class="sleep-quality-row">
       <div class="sleep-quality-row-main">
@@ -86,23 +86,35 @@ function renderSleepQuality(quality) {
   const bracketLabel = { young_adult: "young adult", adult: "adult", older_adult: "older adult" }[quality.age_bracket] || quality.age_bracket;
 
   const rows = [
+    // Efficiency is a >=-type guideline (higher is better) - not
+    // meeting it means the value fell BELOW the threshold, so "Below
+    // guideline" is the correct direction here.
     renderQualityMetricRow(
       "Sleep Efficiency",
       quality.efficiency_pct !== null ? `${quality.efficiency_pct}%` : "\u2013",
       quality.efficiency_meets_threshold,
-      "Guideline: \u226585%"
+      "Guideline: \u226585%",
+      "Below guideline"
     ),
+    // WASO and Awakenings are <=-type guidelines (lower is better) -
+    // not meeting them means the value came in ABOVE the threshold,
+    // the opposite direction from efficiency. Real bug fixed here:
+    // this used to say "Below guideline" for these two as well, which
+    // is backwards - too much wake time or too many awakenings is
+    // "above", not "below", the published guideline.
     renderQualityMetricRow(
       "Wake After Sleep Onset",
       `${quality.waso_min}m`,
       quality.waso_meets_threshold,
-      `Guideline: <${quality.age_bracket === "older_adult" ? 30 : 20}m`
+      `Guideline: <${quality.age_bracket === "older_adult" ? 30 : 20}m`,
+      "Above guideline"
     ),
     renderQualityMetricRow(
       "Awakenings (\u22655min)",
       `${quality.awakenings_5min}`,
       quality.awakenings_meets_threshold,
-      `Guideline: \u2264${quality.age_bracket === "older_adult" ? 2 : 1}`
+      `Guideline: \u2264${quality.age_bracket === "older_adult" ? 2 : 1}`,
+      "Above guideline"
     ),
   ].join("");
 
