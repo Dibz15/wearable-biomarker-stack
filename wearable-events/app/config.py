@@ -66,6 +66,41 @@ MAX_SLEEP_SESSION_SECONDS = int(os.getenv("MAX_SLEEP_SESSION_SECONDS", str(24 * 
 # "right" amount - override via env var for a personal target.
 SLEEP_DURATION_GOAL_SECONDS = int(os.getenv("SLEEP_DURATION_GOAL_SECONDS", str(8 * 3600)))
 
+# Age bracket for the Sleep Quality panel's published thresholds below -
+# not auto-detected (no birthdate is tracked anywhere in this app),
+# env-configurable per person. "adult" (26-64) is the broadest,
+# most-generally-applicable bracket, used as the default.
+SLEEP_QUALITY_AGE_BRACKET = os.getenv("SLEEP_QUALITY_AGE_BRACKET", "adult")
+
+# Published "appropriate" thresholds for the 3 sleep-continuity metrics
+# this app can actually compute (efficiency, WASO, awakenings>5min) -
+# NOT a composite score, deliberately (see FIELD_RESEARCH.md's "Sleep
+# Score" entry for why: the industry's own standards body, ANSI/CTA/
+# NSF-2110, states no standardized composite-scoring formula exists,
+# and recommends showing individual cited metrics over one opaque
+# number). Source: Ohayon et al. 2017 (National Sleep Foundation Sleep
+# Quality Consensus Panel, Sleep Health 3(1):6-19), Table 1 as
+# reproduced in ANSI/CTA/NSF-2110 (June 2024). A 4th consensus metric,
+# sleep latency, is deliberately excluded - not a threshold gap, a
+# data gap: this app has no "got into bed" timestamp separate from
+# sleep onset to measure latency from (see FIELD_RESEARCH.md's "time
+# in bed" future-feature note).
+#
+# Only the "appropriate" bound is encoded for waso/awakenings - the
+# source table gives an inappropriate bound too for some metrics, but
+# not consistently across all three for every age bracket, and this
+# file would rather state one number with real confidence than three
+# with mixed confidence. efficiency_poor_pct is the one exception:
+# <75% is independently corroborated across multiple citations of the
+# same underlying panel (not just this one table), not just this
+# table's own number, so it's included where the other "poor" bounds
+# are not.
+SLEEP_QUALITY_THRESHOLDS = {
+    "young_adult": {"waso_appropriate_max_min": 20, "awakenings_appropriate_max": 1, "efficiency_appropriate_min_pct": 85, "efficiency_poor_max_pct": 75},
+    "adult": {"waso_appropriate_max_min": 20, "awakenings_appropriate_max": 1, "efficiency_appropriate_min_pct": 85, "efficiency_poor_max_pct": 75},
+    "older_adult": {"waso_appropriate_max_min": 30, "awakenings_appropriate_max": 2, "efficiency_appropriate_min_pct": 85, "efficiency_poor_max_pct": 75},
+}
+
 # --- Activity session detection (Activity page) ---
 # An "active minute" (steps > 0 OR raw_intensity >= this) is the
 # trigger for both Stand-hour crediting and derived activity-session

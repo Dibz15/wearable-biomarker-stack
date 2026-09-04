@@ -21,6 +21,8 @@ from app.config import (
     SESSION_GAP_MINUTES,
     SESSION_MIN_DURATION_MINUTES,
     SLEEP_MEASUREMENT,
+    SLEEP_QUALITY_AGE_BRACKET,
+    SLEEP_QUALITY_THRESHOLDS,
     STAND_INTENSITY_THRESHOLD,
     TZ_NAME,
 )
@@ -1789,6 +1791,10 @@ def get_sleep_overview_for_night(user: str, wake_date: date) -> dict | None:
     hr_means = _device_stat_by_field("heart_rate", user, start, end, "mean")
     resp_means = _device_stat_by_field("sleep_respiratory_rate", user, start, end, "mean")
 
+    quality = get_sleep_quality_indicators(
+        user, start, end, session["duration_s"], stages.get("awake", 0), device=device
+    )
+
     return {
         "device": device,
         "start_time": start.isoformat(),
@@ -1798,6 +1804,7 @@ def get_sleep_overview_for_night(user: str, wake_date: date) -> dict | None:
         "wake_events": wake_events,
         "avg_heart_rate": round(hr_means[device], 1) if device in hr_means else None,
         "avg_respiratory_rate": round(resp_means[device], 1) if device in resp_means else None,
+        "sleep_quality": quality,
     }
 
 
@@ -2071,7 +2078,7 @@ def get_sleep_stage_breakdown(user: str, session_start: datetime, session_end: d
     return result
 
 
-def count_wake_events(user: str, session_start: datetime, session_end: datetime, device: str | None = None) -> int:
+def count_wake_events(user: str, session_start: datetime, session_end: datetime, device: str | None = None, min_duration_s: int | None = None) -> int:
     ''' Count of distinct awake-stage SEGMENTS during one sleep session -
     genuinely different information from get_sleep_stage_breakdown()'s
     duration sum: three separate 2-minute wake-ups and one continuous
@@ -2091,6 +2098,14 @@ def count_wake_events(user: str, session_start: datetime, session_end: datetime,
     reasoning: without it, this would silently sum wake-event counts
     across multiple devices with stage data for the same night rather
     than counting one device's own.
+
+    `min_duration_s`, if given, only counts segments AT LEAST this
+    long - added for the literature-backed Sleep Quality panel's
+    "awakenings >5 minutes" metric (Ohayon et al. 2017's own
+    definition specifically excludes brief stirrings under 5 minutes,
+    not any detected awake segment). Default None preserves the
+    original "every awake segment, any length" behavior every existing
+    caller (the Sleep Metrics card's own wake-event count) still wants.
     '''
     client = get_client()
     query_api = client.query_api()
@@ -2099,6 +2114,7 @@ def count_wake_events(user: str, session_start: datetime, session_end: datetime,
     stop_iso = session_end.astimezone(timezone.utc).isoformat()
 
     device_filter = f'|> filter(fn: (r) => r.device == "{device}")\n      ' if device else ""
+    duration_filter = f'|> filter(fn: (r) => r._value >= {min_duration_s})\n      ' if min_duration_s else ""
 
     flux = f'''
     from(bucket: "{INFLUX_BUCKET}")
@@ -2108,7 +2124,7 @@ def count_wake_events(user: str, session_start: datetime, session_end: datetime,
       |> filter(fn: (r) => r.sample_type == "sleep_stage")
       |> filter(fn: (r) => r.sleep_stage == "awake")
       |> filter(fn: (r) => r._field == "sleep_stage_duration_s")
-      {device_filter}|> count()
+      {device_filter}{duration_filter}|> count()
     '''
 
     try:
@@ -2124,6 +2140,60 @@ def count_wake_events(user: str, session_start: datetime, session_end: datetime,
             if value is not None:
                 total += value
     return total
+
+
+def get_sleep_quality_indicators(user: str, session_start: datetime, session_end: datetime, duration_s: int, awake_minutes: int, device: str | None = None) -> dict:
+    ''' The literature-backed Sleep Quality panel's 3 computable metrics
+    (sleep efficiency, WASO, awakenings >5min), each compared against
+    Ohayon et al. 2017's published "appropriate" thresholds for the
+    configured age bracket - see SLEEP_QUALITY_THRESHOLDS' own
+    docstring in config.py for full sourcing, and FIELD_RESEARCH.md's
+    "Sleep Score" entry for why this is 3 metrics shown individually
+    rather than one blended Zepp-style score.
+
+    Takes duration_s and awake_minutes as already-known inputs (from
+    get_sleep_overview_for_night's own session/stage data) rather than
+    re-querying them - this function's own job is the one new query
+    it actually needs (the awakenings>5min count) plus the threshold
+    comparison arithmetic, not re-deriving data the caller already has.
+
+    Sleep efficiency here is duration-based ((duration_s - awake
+    seconds) / duration_s), using session duration as a "time in bed"
+    proxy - NOT the strict clinical definition, which uses true time
+    in bed (including any pre-sleep-onset period) as the denominator.
+    This app has no separately-tracked "got into bed" timestamp to use
+    instead (see FIELD_RESEARCH.md's "time in bed" future-feature
+    note) - stated here so this isn't silently conflated with a
+    clinical-grade efficiency figure if ever compared against one.
+
+    Returns a dict with each metric's raw value, whether it meets the
+    published "appropriate" threshold, and (efficiency only, the one
+    metric with an independently-corroborated "poor" bound too - see
+    config.py) whether it falls below the "poor" cutoff. Also returns
+    the age_bracket used and a source citation string, so the frontend
+    can display these thresholds as genuinely attributed, not just
+    asserted.
+    '''
+    thresholds = SLEEP_QUALITY_THRESHOLDS.get(SLEEP_QUALITY_AGE_BRACKET, SLEEP_QUALITY_THRESHOLDS["adult"])
+
+    efficiency_pct = round((duration_s - awake_minutes * 60) / duration_s * 100, 1) if duration_s else None
+    awakenings_5min = count_wake_events(user, session_start, session_end, device=device, min_duration_s=300)
+
+    return {
+        "efficiency_pct": efficiency_pct,
+        "efficiency_meets_threshold": (
+            efficiency_pct >= thresholds["efficiency_appropriate_min_pct"] if efficiency_pct is not None else None
+        ),
+        "efficiency_poor": (
+            efficiency_pct < thresholds["efficiency_poor_max_pct"] if efficiency_pct is not None else None
+        ),
+        "waso_min": awake_minutes,
+        "waso_meets_threshold": awake_minutes <= thresholds["waso_appropriate_max_min"],
+        "awakenings_5min": awakenings_5min,
+        "awakenings_meets_threshold": awakenings_5min <= thresholds["awakenings_appropriate_max"],
+        "age_bracket": SLEEP_QUALITY_AGE_BRACKET,
+        "source": "Ohayon et al. 2017, National Sleep Foundation Sleep Quality Consensus Panel (Sleep Health 3(1):6-19)",
+    }
 
 
 def list_distinct_sensor_users(lookback_days: int = 365) -> list[str]:
