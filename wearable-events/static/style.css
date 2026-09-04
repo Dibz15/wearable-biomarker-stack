@@ -1115,3 +1115,101 @@ main {
 .manual-reading-row + .manual-reading-row {
   border-top: 1px solid var(--surface-active);
 }
+
+/* --- Activity page + Today tab's Activity card --- */
+
+.activity-card {
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.activity-card-stats {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 0.5rem;
+}
+
+.activity-card-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.activity-card-stat-value {
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.activity-card-stat-label {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.activity-stats-row {
+  display: flex;
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 0.75rem 0.5rem;
+  margin-bottom: 0.75rem;
+  text-align: center;
+}
+
+.activity-stat-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.activity-stat-item + .activity-stat-item {
+  border-left: 1px solid var(--surface-active);
+}
+
+.activity-stat-label {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.activity-stat-value {
+  font-weight: 700;
+  font-size: 1.1rem;
+}
+
+.activity-session-list {
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 0.25rem 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.activity-session-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.65rem 0;
+}
+
+.activity-session-row + .activity-session-row {
+  border-top: 1px solid var(--surface-active);
+}
+
+.activity-session-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.activity-session-label {
+  font-weight: 700;
+}
+
+.activity-session-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.1rem;
+}

@@ -449,7 +449,13 @@ export function buildTieredBarChart(canvas, series, devices, config) {
         },
         y: {
           min: 0,
-          max: 100,
+          // No implicit default - every caller states its own scale
+          // explicitly (Stress: 100, its own fixed 0-100 tier scale;
+          // Activity's raw intensity: 255, its confirmed real range).
+          // config.yMax === null means "no fixed ceiling, auto-scale
+          // to the data" (Activity's Steps chart, which has no fixed
+          // upper bound the way a percentage-based metric does).
+          max: config.yMax === null ? undefined : config.yMax,
           ticks: { color: "#8a8d99" },
           grid: { color: "#2a2d38" },
         },
@@ -516,6 +522,148 @@ export function buildTierPieChart(canvas, points, config) {
             label: (item) => {
               const pct = Math.round((item.parsed / total) * 100);
               return `${item.label}: ${pct}%`;
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
+// x-axis label for one bucket, per the granularity the caller is
+// plotting - shared by buildStackedMinutesChart and
+// buildActivityTimeChart, the two Activity-page charts that plot
+// per-bucket data over either a day (hourly buckets), a week/month
+// (daily buckets), or a year (monthly buckets).
+function formatBucketLabel(iso, format) {
+  const d = new Date(iso);
+  if (format === "hour") return d.toLocaleTimeString([], { hour: "numeric" });
+  if (format === "month") return d.toLocaleDateString([], { month: "short" });
+  return d.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+// Sitting vs. active minutes, stacked per bucket - the Activity page's
+// day-view hourly comparison chart (bucket = hour) and its Week/Month/
+// Year "sitting vs standing" chart (bucket = day or month), sharing
+// this one function since both are the exact same shape
+// (get_hourly_activity_breakdown / get_activity_time_range_series both
+// return {sitting_minutes, active_minutes} per bucket) - only the
+// label format differs, passed in via config.labelFormat rather than
+// needing two near-identical functions.
+//
+// Each device gets its OWN stack (Chart.js's `stack` property keyed
+// by device name), so multiple devices render as separate stacked
+// bar pairs side by side per bucket rather than merging their minutes
+// together - correct behavior even though a single device is the
+// realistic case for this app right now.
+export function buildStackedMinutesChart(canvas, series, devices, config) {
+  const allTimes = [...new Set(devices.flatMap(d => series[d].map(p => p.t)))].sort();
+  const labels = allTimes.map(iso => formatBucketLabel(iso, config.labelFormat));
+
+  const sittingColor = config.sittingColor || "#6ea8fe";
+  const activeColor = config.activeColor || "#f0c674";
+
+  const datasets = [];
+  devices.forEach(device => {
+    const byTime = Object.fromEntries(series[device].map(p => [p.t, p]));
+    datasets.push({
+      label: devices.length > 1 ? `${device} \u2013 Sitting` : "Sitting",
+      data: allTimes.map(t => (t in byTime ? byTime[t].sitting_minutes : null)),
+      backgroundColor: sittingColor,
+      stack: device,
+      borderRadius: 2,
+    });
+    datasets.push({
+      label: devices.length > 1 ? `${device} \u2013 Active` : "Active",
+      data: allTimes.map(t => (t in byTime ? byTime[t].active_minutes : null)),
+      backgroundColor: activeColor,
+      stack: device,
+      borderRadius: 2,
+    });
+  });
+
+  return new Chart(canvas, {
+    type: "bar",
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      animation: false,
+      scales: {
+        x: {
+          stacked: true,
+          ticks: { color: "#8a8d99", maxRotation: 0, autoSkip: true, autoSkipPadding: 16 },
+          grid: { display: false },
+        },
+        y: {
+          stacked: true,
+          min: 0,
+          ticks: { color: "#8a8d99" },
+          grid: { color: "#2a2d38" },
+          title: { display: true, text: "minutes", color: "#8a8d99" },
+        },
+      },
+      plugins: {
+        legend: { display: true, labels: { color: "#e8e9ed" } },
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const v = item.parsed.y;
+              if (v === null || v === undefined) return "";
+              return `${item.dataset.label}: ${v} min`;
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
+// Total active minutes per bucket - the Activity page's Week/Month/
+// Year "total activity time" chart, plotted alongside steps. Same
+// per-bucket data as buildStackedMinutesChart (in fact the identical
+// API response - this just plots active_minutes alone, unstacked,
+// since "how much total activity time" doesn't need the sitting
+// breakdown a device-name/day view already provides elsewhere).
+export function buildActivityTimeChart(canvas, series, devices, config) {
+  const allTimes = [...new Set(devices.flatMap(d => series[d].map(p => p.t)))].sort();
+  const labels = allTimes.map(iso => formatBucketLabel(iso, config.labelFormat));
+
+  const datasets = devices.map((device, i) => {
+    const byTime = Object.fromEntries(series[device].map(p => [p.t, p]));
+    return {
+      label: device,
+      data: allTimes.map(t => (t in byTime ? byTime[t].active_minutes : null)),
+      backgroundColor: DEVICE_CHART_COLORS[i % DEVICE_CHART_COLORS.length],
+      borderRadius: 2,
+    };
+  });
+
+  return new Chart(canvas, {
+    type: "bar",
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      animation: false,
+      scales: {
+        x: {
+          ticks: { color: "#8a8d99", maxRotation: 0, autoSkip: true, autoSkipPadding: 16 },
+          grid: { display: false },
+        },
+        y: {
+          min: 0,
+          ticks: { color: "#8a8d99" },
+          grid: { color: "#2a2d38" },
+          title: { display: true, text: "active minutes", color: "#8a8d99" },
+        },
+      },
+      plugins: {
+        legend: { display: devices.length > 1, labels: { color: "#e8e9ed" } },
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const v = item.parsed.y;
+              if (v === null || v === undefined) return "";
+              return `${item.dataset.label}: ${v} min`;
             },
           },
         },

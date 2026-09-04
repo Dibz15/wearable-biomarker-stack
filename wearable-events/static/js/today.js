@@ -1,6 +1,7 @@
 // --- Today tab ---
 import { escapeHtml, api, todayISO, shiftISODate } from "./core.js";
 import { openMetricDetail, renderDateNav } from "./metric-detail.js";
+import { openActivityDetail, formatMinutes } from "./activity.js";
 
 const METRIC_FIELDS = [
   { key: "heart_rate", label: "Heart Rate", unit: "bpm", hasDetail: true },
@@ -94,25 +95,66 @@ function renderMetricCard(field, byDevice) {
   `;
 }
 
-function renderStepsCard(steps) {
-  const devices = Object.keys(steps);
-  if (devices.length === 0) {
+// Sum of active_minutes across every hour in the day's hourly
+// breakdown - not its own backend endpoint, since the Today card
+// needs the same underlying per-hour data the Activity page's own
+// hourly chart already fetches, just totaled rather than plotted per
+// hour.
+function sumActiveMinutes(hourlyBreakdown, device) {
+  const hours = hourlyBreakdown[device] || [];
+  return hours.reduce((sum, h) => sum + (h.active_minutes || 0), 0);
+}
+
+// Replaces the old Steps-only card - Steps is now one of four quick
+// stats here (step count, active minutes, hours stood, sitting time)
+// rather than its own separate card, per the Activity page reframing.
+// Wide enough for all four side by side, matching how the Steps card
+// already had the width to spare.
+function renderActivityCard(steps, sittingMinutes, stoodHours, hourlyBreakdown) {
+  const devices = new Set([
+    ...Object.keys(steps), ...Object.keys(sittingMinutes),
+    ...Object.keys(stoodHours), ...Object.keys(hourlyBreakdown),
+  ]);
+  if (devices.size === 0) {
     return `
-      <div class="steps-card">
-        <div class="metric-card-label">Steps</div>
+      <div class="activity-card metric-card-tappable" data-detail-field="activity" role="button" tabindex="0">
+        <div class="metric-card-label">Activity</div>
         <p class="metric-card-empty">No data yet today</p>
       </div>
     `;
   }
-  const rows = devices.map(device => `
-    <div class="metric-device-row">
-      <div class="metric-device-name">${escapeHtml(device)}</div>
-      <div class="metric-value">${steps[device].toLocaleString()}</div>
-    </div>
-  `).join("");
+  const rows = [...devices].map(device => {
+    const stepCount = steps[device];
+    const sitting = sittingMinutes[device] || 0;
+    const stood = stoodHours[device] || 0;
+    const active = sumActiveMinutes(hourlyBreakdown, device);
+    return `
+      <div class="metric-device-row">
+        <div class="metric-device-name">${escapeHtml(device)}</div>
+        <div class="activity-card-stats">
+          <div class="activity-card-stat">
+            <span class="activity-card-stat-value">${stepCount !== undefined ? stepCount.toLocaleString() : "\u2013"}</span>
+            <span class="activity-card-stat-label">Steps</span>
+          </div>
+          <div class="activity-card-stat">
+            <span class="activity-card-stat-value">${active}m</span>
+            <span class="activity-card-stat-label">Active</span>
+          </div>
+          <div class="activity-card-stat">
+            <span class="activity-card-stat-value">${stood}h</span>
+            <span class="activity-card-stat-label">Stood</span>
+          </div>
+          <div class="activity-card-stat">
+            <span class="activity-card-stat-value">${escapeHtml(formatMinutes(sitting))}</span>
+            <span class="activity-card-stat-label">Sitting</span>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join("");
   return `
-    <div class="steps-card">
-      <div class="metric-card-label">Steps</div>
+    <div class="activity-card metric-card-tappable" data-detail-field="activity" role="button" tabindex="0">
+      <div class="metric-card-label">Activity</div>
       ${rows}
     </div>
   `;
@@ -121,10 +163,15 @@ function renderStepsCard(steps) {
 export async function loadToday(anchorDate = todayISO()) {
   const container = document.getElementById("today-content");
   try {
-    const data = await api(`/today?date=${anchorDate}`);
+    const [data, sittingMinutes, stoodHours, hourlyBreakdown] = await Promise.all([
+      api(`/today?date=${anchorDate}`),
+      api(`/activity/sitting-minutes?date=${anchorDate}`),
+      api(`/activity/stood-hours?date=${anchorDate}`),
+      api(`/activity/hourly-breakdown?date=${anchorDate}`),
+    ]);
 
     const sleepHtml = renderSleepCard(data.sleep);
-    const stepsHtml = renderStepsCard(data.steps || {});
+    const activityHtml = renderActivityCard(data.steps || {}, sittingMinutes, stoodHours, hourlyBreakdown);
     const metricsHtml = METRIC_FIELDS.map(f => renderMetricCard(f, (data.vitals || {})[f.key] || {})).join("");
 
     container.innerHTML = `
@@ -132,7 +179,7 @@ export async function loadToday(anchorDate = todayISO()) {
       <p class="today-section-label">Last night's sleep</p>
       ${sleepHtml}
       <p class="today-section-label">Today</p>
-      ${stepsHtml}
+      ${activityHtml}
       <div class="metric-grid">${metricsHtml}</div>
     `;
 
@@ -143,10 +190,16 @@ export async function loadToday(anchorDate = todayISO()) {
     // piling up duplicates across refreshes.
     container.querySelectorAll("[data-detail-field]").forEach(el => {
       // Opens the detail view on the SAME day currently being viewed
-      // here, not always today - tapping "Heart Rate" while looking at
-      // three days ago should show that day's heart rate, not jump
-      // back to today's.
-      const open = () => openMetricDetail(el.dataset.detailField, anchorDate);
+      // here, not always today - tapping "Heart Rate" (or "Activity")
+      // while looking at three days ago should show that day's data,
+      // not jump back to today's. Activity isn't one of the
+      // DETAIL_VIEWS metric fields openMetricDetail knows about - it's
+      // its own module with its own opener, so it needs its own
+      // branch here rather than being handled the same generic way.
+      const field = el.dataset.detailField;
+      const open = field === "activity"
+        ? () => openActivityDetail(anchorDate)
+        : () => openMetricDetail(field, anchorDate);
       el.addEventListener("click", open);
       el.addEventListener("keydown", e => {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }

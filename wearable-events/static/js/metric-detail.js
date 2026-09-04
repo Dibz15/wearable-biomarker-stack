@@ -4,15 +4,30 @@ import { buildLineChart, buildRangeBarChart, buildDifferentialChart, buildTiered
 
 let activeCharts = [];
 
-function openDetailScreen(title) {
+// The detail-screen overlay (title, back button, chart cleanup) is
+// shared UI, not specific to the metric-detail views defined in this
+// file - the Activity page (its own module, not one of the
+// DETAIL_VIEWS below) reuses it too, via these three exports, rather
+// than duplicating the overlay toggling or - more importantly -
+// tracking a second, separate set of live Chart.js instances that the
+// shared back button wouldn't know to destroy.
+export function openDetailScreen(title) {
   document.getElementById("detail-title").textContent = title;
   document.getElementById("detail-screen").style.display = "block";
 }
 
-function closeDetailScreen() {
-  document.getElementById("detail-screen").style.display = "none";
+export function registerActiveChart(chart) {
+  activeCharts.push(chart);
+}
+
+export function clearActiveCharts() {
   activeCharts.forEach(c => c.destroy());
   activeCharts = [];
+}
+
+function closeDetailScreen() {
+  document.getElementById("detail-screen").style.display = "none";
+  clearActiveCharts();
 }
 
 document.getElementById("detail-back-btn").addEventListener("click", closeDetailScreen);
@@ -180,6 +195,7 @@ const DETAIL_VIEWS = {
       field: "stress",
       unit: "",
       decimals: 0,
+      yMax: 100,
       // Confirmed FIXED thresholds, stated directly in Zepp's own
       // educational blurb on the Stress page (not user-configurable,
       // not inferred) - see parser/activefit/FIELD_RESEARCH.md.
@@ -204,9 +220,9 @@ const DETAIL_PERIODS = [
 // Days to shift the anchor date by one prev/next step, per period -
 // matches each period's own window size (RANGE_PERIODS on the backend),
 // so "previous" moves a whole week/month/year at a time, not just a day.
-const PERIOD_SHIFT_DAYS = { day: 1, week: 7, month: 30, year: 365 };
+export const PERIOD_SHIFT_DAYS = { day: 1, week: 7, month: 30, year: 365 };
 
-function renderPeriodButtons(activePeriod, availablePeriods) {
+export function renderPeriodButtons(activePeriod, availablePeriods) {
   const periods = availablePeriods
     ? DETAIL_PERIODS.filter(p => availablePeriods.includes(p.key))
     : DETAIL_PERIODS;
@@ -450,7 +466,7 @@ function renderBaselineBar(comparisonByDevice, baselineDays, config = {}) {
 async function renderDetailPeriod(view, period, anchorDate) {
   const content = document.getElementById("detail-content");
   content.innerHTML = renderPeriodButtons(period, view.periods) + renderDateNav(period, anchorDate) + `<p class="muted">Loading...</p>`;
-  wireDetailControls(view, period, anchorDate);
+  wireDetailControls((p, d) => renderDetailPeriod(view, p, d), period, anchorDate);
 
   activeCharts.forEach(c => c.destroy());
   activeCharts = [];
@@ -519,7 +535,7 @@ async function renderDetailPeriod(view, period, anchorDate) {
     }
   } catch (e) {
     content.innerHTML = renderPeriodButtons(period, view.periods) + renderDateNav(period, anchorDate) + `<p class="status">Error loading chart data: ${escapeHtml(e.message)}</p>`;
-    wireDetailControls(view, period, anchorDate);
+    wireDetailControls((p, d) => renderDetailPeriod(view, p, d), period, anchorDate);
     return;
   }
 
@@ -590,7 +606,7 @@ async function renderDetailPeriod(view, period, anchorDate) {
     : "";
 
   content.innerHTML = renderPeriodButtons(period, view.periods) + renderDateNav(period, anchorDate) + cardsHtml + differentialHtml + stressBreakdownHtml;
-  wireDetailControls(view, period, anchorDate);
+  wireDetailControls((p, d) => renderDetailPeriod(view, p, d), period, anchorDate);
 
   view.charts.forEach((c, i) => {
     const series = seriesByField[c.field];
@@ -645,7 +661,7 @@ async function renderDetailPeriod(view, period, anchorDate) {
   }
 }
 
-function wireDetailControls(view, activePeriod, anchorDate) {
+export function wireDetailControls(onNavigate, activePeriod, anchorDate) {
   // Period switch keeps the SAME anchor date - switching from Week to
   // Month while looking at a past date should stay in that same area
   // of history, not snap back to today.
@@ -653,7 +669,7 @@ function wireDetailControls(view, activePeriod, anchorDate) {
     btn.addEventListener("click", () => {
       const period = btn.dataset.period;
       if (period === activePeriod) return;
-      renderDetailPeriod(view, period, anchorDate);
+      onNavigate(period, anchorDate);
     });
   });
 
@@ -662,7 +678,7 @@ function wireDetailControls(view, activePeriod, anchorDate) {
   const shift = PERIOD_SHIFT_DAYS[activePeriod];
   if (prevBtn) {
     prevBtn.addEventListener("click", () => {
-      renderDetailPeriod(view, activePeriod, shiftISODate(anchorDate, -shift));
+      onNavigate(activePeriod, shiftISODate(anchorDate, -shift));
     });
   }
   if (nextBtn && !nextBtn.disabled) {
@@ -671,7 +687,7 @@ function wireDetailControls(view, activePeriod, anchorDate) {
       // days of today should land exactly on today, not overshoot
       // into a meaningless future date.
       const next = shiftISODate(anchorDate, shift);
-      renderDetailPeriod(view, activePeriod, next > todayISO() ? todayISO() : next);
+      onNavigate(activePeriod, next > todayISO() ? todayISO() : next);
     });
   }
 
@@ -679,7 +695,7 @@ function wireDetailControls(view, activePeriod, anchorDate) {
   const dateLabel = document.querySelector(".date-nav-label");
   if (dateInput) {
     dateInput.addEventListener("change", () => {
-      if (dateInput.value) renderDetailPeriod(view, activePeriod, dateInput.value);
+      if (dateInput.value) onNavigate(activePeriod, dateInput.value);
     });
   }
   if (dateLabel && dateInput) {

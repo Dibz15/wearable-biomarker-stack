@@ -1149,6 +1149,126 @@ def get_stood_hours(user: str, for_date: date | None = None) -> dict[str, int]:
     return result
 
 
+def get_hourly_activity_breakdown(user: str, for_date: date | None = None) -> dict[str, list[dict]]:
+    ''' Per-hour breakdown of sitting vs. active minutes for one day,
+    per device - the Activity page's day-view "sitting vs standing"
+    chart. Each hour reports how many of its minutes were sitting (low
+    intensity, not sleep/not_worn/charging - same SITTING_EXCLUDED_LABELS
+    criteria as get_sitting_minutes), how many were active (crossed
+    STAND_INTENSITY_THRESHOLD - the same threshold get_stood_hours uses
+    to credit a whole hour), and how many were excluded (sleep/
+    not_worn/charging) - the three categories sum to that hour's total
+    sampled minutes, which is what makes this suited to a stacked bar
+    rather than needing a separate "total" figure.
+
+    A minute with an excluded label is excluded outright, even if its
+    intensity happens to be high (e.g. briefly rolling over in bed) -
+    it counts toward neither sitting nor active, matching
+    get_sitting_minutes's own reasoning exactly (sleep/not_worn/
+    charging aren't meaningfully "sitting" OR "standing").
+
+    Bucketed by LOCAL hour, same reasoning as get_stood_hours - watch
+    displays are local-time, InfluxDB timestamps are always UTC.
+
+    Returns {"<device>": [{"t": <local hour start, ISO8601 with its
+    own local offset - ready to display directly, no further timezone
+    math needed by the caller>, "sitting_minutes": N,
+    "active_minutes": M, "excluded_minutes": K}, ...]}, one entry per
+    hour that has ANY data (an hour with zero samples - e.g. before
+    the first sync of the day - is omitted entirely, not shown as an
+    all-zero row), sorted chronologically.
+    '''
+    start, end = local_today_bounds(for_date)
+    minutes_by_device = _get_pivoted_activity_minutes(user, start, end)
+    tz = ZoneInfo(TZ_NAME)
+
+    result: dict[str, list[dict]] = {}
+    for device, minutes in minutes_by_device.items():
+        buckets: dict[datetime, dict] = {}
+        for row in minutes:
+            local_t = row["t"].astimezone(tz)
+            hour_start = local_t.replace(minute=0, second=0, microsecond=0)
+            bucket = buckets.setdefault(hour_start, {"sitting_minutes": 0, "active_minutes": 0, "excluded_minutes": 0})
+            if row["activity_kind_label"] in SITTING_EXCLUDED_LABELS:
+                bucket["excluded_minutes"] += 1
+                continue
+            intensity = row["raw_intensity"] or 0
+            if intensity >= STAND_INTENSITY_THRESHOLD:
+                bucket["active_minutes"] += 1
+            else:
+                bucket["sitting_minutes"] += 1
+        if buckets:
+            result[device] = [
+                {"t": hour.isoformat(), **counts}
+                for hour, counts in sorted(buckets.items())
+            ]
+    return result
+
+
+def get_activity_time_range_series(user: str, start: datetime, end: datetime, window: str) -> dict[str, list[dict]]:
+    ''' Per-bucket (day- or month-sized, matching `window`) sitting/
+    active minute sums across an arbitrary range - the Week/Month/Year
+    "total activity time" chart (active_minutes alone) and "sitting vs
+    standing" stacked bar chart (both fields together) share this same
+    underlying data rather than each needing their own query.
+
+    Same sitting/active criteria as get_hourly_activity_breakdown
+    (SITTING_EXCLUDED_LABELS, STAND_INTENSITY_THRESHOLD) - a minute
+    with an excluded label counts toward neither, and unlike
+    get_hourly_activity_breakdown, excluded minutes aren't tracked as
+    their own category here (this function only reports the two
+    fields the charts above actually need) - which also means a
+    bucket where EVERY minute was excluded (e.g. a day the watch
+    wasn't worn at all) is correctly skipped entirely, not shown as a
+    misleading all-zero bar.
+
+    `window` is "1d" for the Week/Month views or "1mo" for the Year
+    view - matching get_period_range_series's own convention, so this
+    can be wired into the same call sites the same way. Bucketed in
+    LOCAL time throughout (each raw minute converted to local time
+    before being assigned to a bucket - same reasoning as
+    get_stood_hours/get_hourly_activity_breakdown), and "1mo" buckets
+    align to calendar months (the 1st of each month), matching how the
+    Year view's other range charts already align.
+
+    Returns {"<device>": [{"t": <bucket start, local-time ISO8601>,
+    "sitting_minutes": N, "active_minutes": M}, ...]}, sorted
+    chronologically. A bucket with zero qualifying minutes is omitted,
+    not shown as an all-zero row.
+    '''
+    if window not in ("1d", "1mo"):
+        raise ValueError(f"unsupported window: {window!r} (must be '1d' or '1mo')")
+
+    minutes_by_device = _get_pivoted_activity_minutes(user, start, end)
+    tz = ZoneInfo(TZ_NAME)
+
+    def bucket_key(local_t: datetime) -> datetime:
+        if window == "1d":
+            return local_t.replace(hour=0, minute=0, second=0, microsecond=0)
+        return local_t.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    result: dict[str, list[dict]] = {}
+    for device, minutes in minutes_by_device.items():
+        buckets: dict[datetime, dict] = {}
+        for row in minutes:
+            if row["activity_kind_label"] in SITTING_EXCLUDED_LABELS:
+                continue
+            local_t = row["t"].astimezone(tz)
+            key = bucket_key(local_t)
+            bucket = buckets.setdefault(key, {"sitting_minutes": 0, "active_minutes": 0})
+            intensity = row["raw_intensity"] or 0
+            if intensity >= STAND_INTENSITY_THRESHOLD:
+                bucket["active_minutes"] += 1
+            else:
+                bucket["sitting_minutes"] += 1
+        if buckets:
+            result[device] = [
+                {"t": key.isoformat(), **counts}
+                for key, counts in sorted(buckets.items())
+            ]
+    return result
+
+
 def get_period_range_series(field: str, user: str, start: datetime, end: datetime, window: str) -> dict[str, list[dict]]:
     ''' Per-device min/max/median for one field, bucketed into
     `window`-sized periods (a Flux duration string, e.g. "1d" or "1mo")

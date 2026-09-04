@@ -30,8 +30,10 @@ from app.influx import (
     find_manual_events_in_range,
     find_sleep_entries_in_range,
     find_sleep_entry_by_id,
+    get_activity_time_range_series,
     get_baseline_comparison,
     get_combined_activity_sessions,
+    get_hourly_activity_breakdown,
     get_manual_readings,
     get_nightly_baseline_comparison,
     get_nightly_differential_series,
@@ -476,7 +478,18 @@ def get_today(date: str | None = None, current_user: dict = Depends(get_current_
 # than passing the path parameter straight into the Flux query, since
 # `field` reaches the query string directly (see get_today_series())
 # and this is a user-influenceable URL segment.
-TODAY_SERIES_FIELDS = {"heart_rate", "hrv", "stress", "spo2", "temperature", "resting_heart_rate"}
+TODAY_SERIES_FIELDS = {
+    "heart_rate", "hrv", "stress", "spo2", "temperature", "resting_heart_rate",
+    # Added for the Activity page: raw_intensity (day-view raw activity
+    # chart only - no week/month/year raw-intensity view exists, so its
+    # presence on the shared /vitals/range, /vitals/rolling-mean, and
+    # /vitals/baseline endpoints is unused surface area, not a problem -
+    # same shared-allowlist tradeoff resting_heart_rate already makes)
+    # and steps (used by BOTH /today/series/steps for the day chart AND
+    # /vitals/range/steps for the Week/Month/Year chart - this one is
+    # actually exercised on more than one of the four endpoints).
+    "raw_intensity", "steps",
+}
 
 # Same allowlist reasoning as above - `period` also reaches Flux
 # (as an aggregateWindow() duration), so it's validated against a fixed
@@ -751,6 +764,36 @@ def get_stood_hours_endpoint(date: str | None = None, current_user: dict = Depen
     '''
     parsed_date = _parse_optional_date(date)
     return get_stood_hours(current_user["username"], for_date=parsed_date)
+
+
+@app.get("/activity/hourly-breakdown")
+def get_hourly_activity_breakdown_endpoint(date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Per-hour sitting/active/excluded minute breakdown for one day,
+    per device - the Activity page's day-view sitting-vs-standing
+    chart. See get_hourly_activity_breakdown's own docstring. `date`
+    defaults to today, same convention as /today.
+    '''
+    parsed_date = _parse_optional_date(date)
+    return get_hourly_activity_breakdown(current_user["username"], for_date=parsed_date)
+
+
+@app.get("/activity/time-range")
+def get_activity_time_range_endpoint(period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Per-day (week/month) or per-month (year) sitting/active minute
+    sums - the Activity page's Week/Month/Year "total activity time"
+    chart (active_minutes alone) and "sitting vs standing" stacked bar
+    chart (both fields), which share this same endpoint rather than
+    each needing their own. Day isn't offered here - that's exactly
+    the single-day sitting/active breakdown /activity/hourly-breakdown
+    already gives, at hourly rather than daily granularity, not a
+    period this endpoint's day/month bucketing would even apply to.
+    '''
+    if period not in ("week", "month", "year"):
+        raise HTTPException(400, f"unsupported period: {period!r} (must be 'week', 'month', or 'year')")
+
+    spec = RANGE_PERIODS[period]
+    start, end = _period_bounds(period, end_date)
+    return get_activity_time_range_series(current_user["username"], start, end, spec["window"])
 
 
 # --- sleep ---
