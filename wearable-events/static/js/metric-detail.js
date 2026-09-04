@@ -662,10 +662,25 @@ async function renderDetailPeriod(view, period, anchorDate) {
 }
 
 export function wireDetailControls(onNavigate, activePeriod, anchorDate) {
+  // Scoped to #detail-content specifically, not a global document
+  // query - this is shared by every DETAIL_VIEWS metric page AND the
+  // Activity page, and #detail-content is always exactly where each
+  // one's own period-buttons/date-nav just got rendered, regardless
+  // of which caller this is. Real bug found and fixed here (2026-09):
+  // an unscoped document.querySelector(...) HAPPENED to still work
+  // correctly here only because #detail-screen sits earlier in
+  // index.html than #today-content, so it was always the first match
+  // regardless - but that was accidental, not correct, and the exact
+  // same unscoped pattern in Today's own wireTodayDateNav (fixed
+  // alongside this) broke there for precisely that document-order
+  // reason. Scoping this one too removes the same fragility here,
+  // rather than leaving it correct by coincidence.
+  const container = document.getElementById("detail-content");
+
   // Period switch keeps the SAME anchor date - switching from Week to
   // Month while looking at a past date should stay in that same area
   // of history, not snap back to today.
-  document.querySelectorAll(".period-btn").forEach(btn => {
+  container.querySelectorAll(".period-btn").forEach(btn => {
     btn.addEventListener("click", () => {
       const period = btn.dataset.period;
       if (period === activePeriod) return;
@@ -673,8 +688,8 @@ export function wireDetailControls(onNavigate, activePeriod, anchorDate) {
     });
   });
 
-  const prevBtn = document.querySelector('.date-nav-btn[data-nav="prev"]');
-  const nextBtn = document.querySelector('.date-nav-btn[data-nav="next"]');
+  const prevBtn = container.querySelector('.date-nav-btn[data-nav="prev"]');
+  const nextBtn = container.querySelector('.date-nav-btn[data-nav="next"]');
   const shift = PERIOD_SHIFT_DAYS[activePeriod];
   if (prevBtn) {
     prevBtn.addEventListener("click", () => {
@@ -691,8 +706,8 @@ export function wireDetailControls(onNavigate, activePeriod, anchorDate) {
     });
   }
 
-  const dateInput = document.querySelector(".date-nav-input");
-  const dateLabel = document.querySelector(".date-nav-label");
+  const dateInput = container.querySelector(".date-nav-input");
+  const dateLabel = container.querySelector(".date-nav-label");
   if (dateInput) {
     dateInput.addEventListener("change", () => {
       if (dateInput.value) onNavigate(activePeriod, dateInput.value);

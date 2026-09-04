@@ -216,9 +216,27 @@ export async function loadToday(anchorDate = todayISO()) {
 // prev/next and the date-picker input only, since Today has no D/W/M/Y
 // period switcher to also wire up (it's always a single day, just with
 // a movable anchor date).
+//
+// Real bug found and fixed here (2026-09): every query here used to be
+// an unscoped document.querySelector(...) - broken once a detail view
+// (Activity or any metric) had ever been opened at least once. The
+// detail screen overlay (#detail-screen) sits EARLIER in index.html
+// than #today-content, closing it only hides it (display:none) rather
+// than clearing #detail-content's own HTML, and CSS display:none does
+// NOT remove an element from the DOM. So a stale, hidden
+// .date-nav-btn[data-nav="next"] from whatever detail view was last
+// open would be the FIRST match in document order - an unscoped query
+// would silently attach Today's own listener to that invisible,
+// unreachable button instead of the real, visible one, leaving the
+// actual on-screen button with no listener at all (confirmed as the
+// exact symptom reported: click does nothing, no request fires).
+// Scoping every query to #today-content specifically closes this off
+// completely, not just for the one button that happened to get
+// reported.
 function wireTodayDateNav(anchorDate) {
-  const prevBtn = document.querySelector('.date-nav-btn[data-nav="prev"]');
-  const nextBtn = document.querySelector('.date-nav-btn[data-nav="next"]');
+  const container = document.getElementById("today-content");
+  const prevBtn = container.querySelector('.date-nav-btn[data-nav="prev"]');
+  const nextBtn = container.querySelector('.date-nav-btn[data-nav="next"]');
   if (prevBtn) {
     prevBtn.addEventListener("click", () => loadToday(shiftISODate(anchorDate, -1)));
   }
@@ -226,8 +244,8 @@ function wireTodayDateNav(anchorDate) {
     nextBtn.addEventListener("click", () => loadToday(shiftISODate(anchorDate, 1)));
   }
 
-  const dateInput = document.querySelector(".date-nav-input");
-  const dateLabel = document.querySelector(".date-nav-label");
+  const dateInput = container.querySelector(".date-nav-input");
+  const dateLabel = container.querySelector(".date-nav-label");
   if (dateInput) {
     dateInput.addEventListener("change", () => {
       if (dateInput.value) loadToday(dateInput.value);
