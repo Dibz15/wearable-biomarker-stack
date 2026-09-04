@@ -1266,6 +1266,14 @@ main {
   font-size: 0.75rem;
 }
 
+/* Same tap-affordance gap as .sleep-summary-duration's own fix -
+   .metric-card-tappable's chevron only fires on .metric-card-label
+   elements, which this stat item's label isn't. */
+.sleep-stat-item.metric-card-tappable .sleep-stat-label::after {
+  content: " \203a";
+  color: var(--muted);
+}
+
 .sleep-stat-value {
   font-weight: 700;
   font-size: 1.1rem;
@@ -1407,4 +1415,22 @@ main {
   padding-top: 0.6rem;
   border-top: 1px solid var(--surface-active);
   line-height: 1.4;
+}
+
+/* A standalone card whose ONLY content is a link to another page (no
+   value/number of its own, unlike every other tappable card in this
+   app) - .metric-card-label's default styling (small, muted) is meant
+   for a label ABOVE a value, and reads as low-priority/washed-out when
+   it's the only text in the card. Bumped to real body-text size and
+   the app's primary text color so it reads as an inviting link, not
+   de-emphasized filler. Scoped to .sleep-summary-card specifically so
+   this doesn't change .metric-card-label's normal "label above a
+   value" appearance anywhere else it's already used.
+   Real gap found and fixed while building the Sleep Regularity link -
+   rendered it and it looked wrong before this fix. */
+.sleep-summary-card.metric-card-tappable .metric-card-label {
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 0;
 }

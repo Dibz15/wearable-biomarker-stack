@@ -8,7 +8,7 @@
 import { escapeHtml, api, todayISO, shiftISODate } from "./core.js";
 import { renderDateNav } from "./metric-detail.js";
 import { buildHypnogramSVG } from "./metric-charts.js";
-import { openSleepDurationDetail } from "./sleep-detail.js";
+import { openSleepDurationDetail, openSleepHeartRateDetail, openSleepRespiratoryRateDetail, openSleepRegularityDetail } from "./sleep-detail.js";
 
 const SLEEP_STAGE_ORDER = ["deep", "light", "rem", "awake"];
 const SLEEP_STAGE_LABELS = { deep: "Deep", light: "Light", rem: "REM", awake: "Awake" };
@@ -113,7 +113,7 @@ function renderSleepStatsRow(overview) {
   const wakeMin = Math.round((overview.duration_s % 3600) / 60);
   return `
     <div class="sleep-stats-row">
-      <div class="sleep-stat-item">
+      <div class="sleep-stat-item metric-card-tappable" data-detail-field="sleep-duration" role="button" tabindex="0">
         <span class="sleep-stat-value">${wakeHours}h ${wakeMin}m</span>
         <span class="sleep-stat-label">Duration</span>
       </div>
@@ -121,11 +121,11 @@ function renderSleepStatsRow(overview) {
         <span class="sleep-stat-value">${overview.wake_events}</span>
         <span class="sleep-stat-label">Wake Events</span>
       </div>
-      <div class="sleep-stat-item">
+      <div class="sleep-stat-item metric-card-tappable" data-detail-field="sleep-heart-rate" role="button" tabindex="0">
         <span class="sleep-stat-value">${overview.avg_heart_rate !== null ? overview.avg_heart_rate : "\u2013"}</span>
         <span class="sleep-stat-label">Avg HR</span>
       </div>
-      <div class="sleep-stat-item">
+      <div class="sleep-stat-item metric-card-tappable" data-detail-field="sleep-respiratory-rate" role="button" tabindex="0">
         <span class="sleep-stat-value">${overview.avg_respiratory_rate !== null ? overview.avg_respiratory_rate : "\u2013"}</span>
         <span class="sleep-stat-label">Avg BRPM</span>
       </div>
@@ -170,16 +170,31 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
       </div>
       ${renderSleepStatsRow(overview)}
       ${renderSleepQuality(overview.sleep_quality)}
+      <div class="sleep-summary-card metric-card-tappable" data-detail-field="sleep-regularity" role="button" tabindex="0">
+        <span class="metric-card-label">Sleep Regularity</span>
+      </div>
     `;
     wireSleepOverviewDateNav(anchorDate);
-    const durationTap = container.querySelector('[data-detail-field="sleep-duration"]');
-    if (durationTap) {
-      const open = () => openSleepDurationDetail(anchorDate);
-      durationTap.addEventListener("click", open);
-      durationTap.addEventListener("keydown", e => {
+    // Each sub-detail page has one or more tappable elements linking
+    // to it (Duration has two - the header number and the stats-row
+    // item; Heart Rate/Respiratory Rate/Regularity have one each, so
+    // far) - one map from data-detail-field value to its opener, then
+    // wire every matching element generically, rather than hardcoding
+    // one query per field.
+    const detailOpeners = {
+      "sleep-duration": () => openSleepDurationDetail(anchorDate),
+      "sleep-heart-rate": () => openSleepHeartRateDetail(anchorDate),
+      "sleep-respiratory-rate": () => openSleepRespiratoryRateDetail(anchorDate),
+      "sleep-regularity": () => openSleepRegularityDetail(anchorDate),
+    };
+    container.querySelectorAll("[data-detail-field]").forEach(el => {
+      const open = detailOpeners[el.dataset.detailField];
+      if (!open) return;
+      el.addEventListener("click", open);
+      el.addEventListener("keydown", e => {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
       });
-    }
+    });
   } catch (e) {
     container.innerHTML = `${renderDateNav("day", anchorDate)}<p class="status">Error loading sleep data: ${escapeHtml(e.message)}</p>`;
     wireSleepOverviewDateNav(anchorDate);

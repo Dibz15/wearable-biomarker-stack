@@ -395,7 +395,7 @@ function renderDriftClue(z, threshold, lowClue, highClue, normalClue) {
   return `<p class="baseline-clue ${cls}">${escapeHtml(text)}</p>`;
 }
 
-function renderBaselineBar(comparisonByDevice, baselineDays, config = {}) {
+export function renderBaselineBar(comparisonByDevice, baselineDays, config = {}) {
   // Defaults match Resting Heart Rate's original hardcoded behavior
   // exactly - generalized so HRV (Lower/Higher, ms, plus a drift clue)
   // can reuse the same rendering and z-score-capping logic rather than

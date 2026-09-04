@@ -3,8 +3,8 @@
 // the main Sleep tab, opened in the shared detail-screen overlay
 // (same one metric-detail.js's DETAIL_VIEWS and activity.js use).
 import { escapeHtml, api, todayISO, shiftISODate } from "./core.js";
-import { openDetailScreen, registerActiveChart, clearActiveCharts, renderDateNav } from "./metric-detail.js";
-import { buildRangeBarChart } from "./metric-charts.js";
+import { openDetailScreen, registerActiveChart, clearActiveCharts, renderDateNav, renderBaselineBar } from "./metric-detail.js";
+import { buildTrendBarChart, buildVitalsHypnogramSVG, buildRangeBarChart, buildTimeScatterChart } from "./metric-charts.js";
 
 function formatHoursMinutes(hours) {
   const totalMin = Math.round(hours * 60);
@@ -52,7 +52,7 @@ export async function openSleepDurationDetail(anchorDate = todayISO()) {
 async function renderSleepDurationDay(anchorDate) {
   const content = document.getElementById("detail-content");
   content.innerHTML = `${renderDateNav("day", anchorDate)}<p class="muted">Loading...</p>`;
-  wireDurationDateNav(anchorDate);
+  wireSubDetailDateNav(anchorDate, renderSleepDurationDay);
 
   clearActiveCharts();
 
@@ -73,7 +73,7 @@ async function renderSleepDurationDay(anchorDate) {
           <p class="metric-card-empty">No sleep session recorded for this night.</p>
         </div>
       `;
-      wireDurationDateNav(anchorDate);
+      wireSubDetailDateNav(anchorDate, renderSleepDurationDay);
       return;
     }
 
@@ -98,7 +98,7 @@ async function renderSleepDurationDay(anchorDate) {
         <canvas id="sleep-duration-trend-chart"></canvas>
       </div>
     `;
-    wireDurationDateNav(anchorDate);
+    wireSubDetailDateNav(anchorDate, renderSleepDurationDay);
 
     if (trend.length > 0) {
       // Group by each night's own reporting device, not assumed to
@@ -109,11 +109,11 @@ async function renderSleepDurationDay(anchorDate) {
       const series = {};
       devices.forEach(d => { series[d] = []; });
       trend.forEach(t => {
-        const hours = t.duration_s / 3600;
-        series[t.device].push({ t: t.date, min: hours, max: hours, median: hours });
+        series[t.device].push({ t: t.date, value: Math.round((t.duration_s / 3600) * 10) / 10 });
       });
-      const chart = buildRangeBarChart(
-        document.getElementById("sleep-duration-trend-chart"), series, devices, "week", {}, 0, 1
+      const chart = buildTrendBarChart(
+        document.getElementById("sleep-duration-trend-chart"), series, devices,
+        { yAxisTitle: "hours", decimals: 1, unit: "h", meanLabel: "Week average" }
       );
       if (chart) registerActiveChart(chart);
     } else {
@@ -123,33 +123,38 @@ async function renderSleepDurationDay(anchorDate) {
     }
   } catch (e) {
     content.innerHTML = `${renderDateNav("day", anchorDate)}<p class="status">Error loading sleep duration data: ${escapeHtml(e.message)}</p>`;
-    wireDurationDateNav(anchorDate);
+    wireSubDetailDateNav(anchorDate, renderSleepDurationDay);
   }
 }
 
-// Trimmed-down date-nav, same pattern as Today's/Sleep overview's own
-// (prev/next/date-picker only, no period switcher - this page is a
-// single "day" view, not a D/W/M/Y one, per UI_DESIGN_NOTES.md).
+// Trimmed-down date-nav shared by every sleep sub-detail page
+// (prev/next/date-picker only, no period switcher - each of these
+// pages is a single "day" view, not a D/W/M/Y one, per
+// UI_DESIGN_NOTES.md's own spec for all of them). Takes the render
+// function to call on navigation, same callback pattern
+// wireDetailControls (metric-detail.js) already established, rather
+// than each page hardcoding its own copy of this wiring.
+//
 // Scoped to #detail-content specifically - the same class of bug
 // fixed earlier this session for Today's own date-nav applies here
 // too, now that multiple containers with identical .date-nav-btn
 // markup can coexist in the DOM.
-function wireDurationDateNav(anchorDate) {
+function wireSubDetailDateNav(anchorDate, renderFn) {
   const container = document.getElementById("detail-content");
   const prevBtn = container.querySelector('.date-nav-btn[data-nav="prev"]');
   const nextBtn = container.querySelector('.date-nav-btn[data-nav="next"]');
   if (prevBtn) {
-    prevBtn.addEventListener("click", () => renderSleepDurationDay(shiftISODate(anchorDate, -1)));
+    prevBtn.addEventListener("click", () => renderFn(shiftISODate(anchorDate, -1)));
   }
   if (nextBtn && !nextBtn.disabled) {
-    nextBtn.addEventListener("click", () => renderSleepDurationDay(shiftISODate(anchorDate, 1)));
+    nextBtn.addEventListener("click", () => renderFn(shiftISODate(anchorDate, 1)));
   }
 
   const dateInput = container.querySelector(".date-nav-input");
   const dateLabel = container.querySelector(".date-nav-label");
   if (dateInput) {
     dateInput.addEventListener("change", () => {
-      if (dateInput.value) renderSleepDurationDay(dateInput.value);
+      if (dateInput.value) renderFn(dateInput.value);
     });
   }
   if (dateLabel && dateInput) {
@@ -163,5 +168,249 @@ function wireDurationDateNav(anchorDate) {
         }
       }
     });
+  }
+}
+
+// --- Sleep Heart Rate / Sleep Respiratory Rate ---
+// Structurally identical pages (UI_DESIGN_NOTES.md confirms Sleep
+// Respiratory Rate is "near-identical layout to Sleep Heart Rate"),
+// one field-parameterized implementation rather than two near-copies.
+const VITALS_PAGE_CONFIG = {
+  heart_rate: { title: "Sleep Heart Rate", unit: "bpm", lowLabel: "Slower", highLabel: "Faster", decimals: 0 },
+  sleep_respiratory_rate: { title: "Sleep Respiratory Rate", unit: "brpm", lowLabel: "Lower", highLabel: "Higher", decimals: 0 },
+};
+
+export async function openSleepHeartRateDetail(anchorDate = todayISO()) {
+  openDetailScreen("Sleep Heart Rate");
+  await renderSleepVitalsDay("heart_rate", anchorDate);
+}
+
+export async function openSleepRespiratoryRateDetail(anchorDate = todayISO()) {
+  openDetailScreen("Sleep Respiratory Rate");
+  await renderSleepVitalsDay("sleep_respiratory_rate", anchorDate);
+}
+
+async function renderSleepVitalsDay(field, anchorDate) {
+  const cfg = VITALS_PAGE_CONFIG[field];
+  const renderFn = (d) => renderSleepVitalsDay(field, d);
+  const content = document.getElementById("detail-content");
+  content.innerHTML = `${renderDateNav("day", anchorDate)}<p class="muted">Loading...</p>`;
+  wireSubDetailDateNav(anchorDate, renderFn);
+
+  clearActiveCharts();
+
+  try {
+    // "Last 7 days" always ends at the night currently being viewed,
+    // same reasoning as Sleep Duration's own trend window.
+    const weekEnd = anchorDate;
+    const [overview, hypnogram, vitalsSeries, baseline, trend] = await Promise.all([
+      api(`/sleep/overview?date=${anchorDate}`),
+      api(`/sleep/hypnogram?date=${anchorDate}`),
+      api(`/sleep/vitals-series/${field}?date=${anchorDate}`),
+      api(`/sleep/vitals-baseline/${field}?date=${anchorDate}`),
+      api(`/sleep/vitals-trend/${field}?period=week&end_date=${weekEnd}`),
+    ]);
+
+    if (overview === null) {
+      content.innerHTML = `
+        ${renderDateNav("day", anchorDate)}
+        <div class="sleep-summary-card">
+          <p class="metric-card-empty">No sleep session recorded for this night.</p>
+        </div>
+      `;
+      wireSubDetailDateNav(anchorDate, renderFn);
+      return;
+    }
+
+    const avgValue = field === "heart_rate" ? overview.avg_heart_rate : overview.avg_respiratory_rate;
+    // vitalsSeries is {"<device>": [{t,v},...]} with at most one
+    // device by construction (get_sleep_vitals_series is already
+    // scoped to the primary device server-side) - flatten to that
+    // one device's own point list, or an empty list if it's missing
+    // entirely (e.g. no readings of this specific field that night).
+    const vitalsPoints = Object.values(vitalsSeries)[0] || [];
+
+    content.innerHTML = `
+      ${renderDateNav("day", anchorDate)}
+      <div class="sleep-summary-card">
+        <div class="sleep-summary-top">
+          <span class="sleep-summary-duration">${avgValue !== null && avgValue !== undefined ? avgValue : "\u2013"}<span class="unit"> ${escapeHtml(cfg.unit)}</span></span>
+          <span class="sleep-summary-date">${escapeHtml(anchorDate)}</span>
+        </div>
+      </div>
+      ${renderBaselineBar(baseline, 7, { lowLabel: cfg.lowLabel, highLabel: cfg.highLabel, unit: cfg.unit, decimals: cfg.decimals })}
+
+      <p class="today-section-label">${escapeHtml(cfg.title)}</p>
+      <div class="sleep-hypnogram-card">
+        ${vitalsPoints.length > 0 && hypnogram.length > 0
+          ? buildVitalsHypnogramSVG(vitalsPoints, hypnogram, { width: 800, height: 180 })
+          : `<p class="metric-card-empty">No data for this night</p>`}
+      </div>
+
+      <p class="today-section-label">Last 7 Days</p>
+      <div class="detail-chart-card">
+        <canvas id="sleep-vitals-trend-chart"></canvas>
+      </div>
+    `;
+    wireSubDetailDateNav(anchorDate, renderFn);
+
+    if (trend.length > 0) {
+      // Same per-night-own-device grouping as Sleep Duration's trend.
+      const devices = [...new Set(trend.map(t => t.device))];
+      const series = {};
+      devices.forEach(d => { series[d] = []; });
+      trend.forEach(t => { series[t.device].push({ t: t.date, value: t.value }); });
+      const chart = buildTrendBarChart(
+        document.getElementById("sleep-vitals-trend-chart"), series, devices,
+        { yAxisTitle: cfg.unit, decimals: cfg.decimals, unit: ` ${cfg.unit}`, meanLabel: "Week average" }
+      );
+      if (chart) registerActiveChart(chart);
+    } else {
+      document.getElementById("sleep-vitals-trend-chart").replaceWith(Object.assign(document.createElement("p"), {
+        className: "metric-card-empty", textContent: "No data for the last 7 days",
+      }));
+    }
+  } catch (e) {
+    content.innerHTML = `${renderDateNav("day", anchorDate)}<p class="status">Error loading ${escapeHtml(cfg.title.toLowerCase())} data: ${escapeHtml(e.message)}</p>`;
+    wireSubDetailDateNav(anchorDate, renderFn);
+  }
+}
+
+// --- Sleep Regularity ---
+// Structurally different from the other 3 sub-detail pages: no single
+// night's own "big number" (regularity is inherently a multi-night
+// consistency question), and Zepp's own 0-100% regularity score isn't
+// reproducible (its scoring formula was never published - see
+// UI_DESIGN_NOTES.md's own note on this page). Built instead as three
+// visualizations of the same underlying per-night timing data that
+// don't need that formula to be useful: a bedtime-to-waketime range
+// per night, and separate consistency scatters for each end of that
+// range. All three come from the SAME /sleep/timing-trend fetch
+// already built for Sleep Duration - no new backend endpoint needed.
+
+// Bedtimes are naturally PM, wake times AM - plotting raw 24h time-of-
+// day would put a night's own bedtime and wake time far apart on the
+// axis instead of adjacent. Anchoring the day at noon (rather than
+// midnight) keeps a normal night contiguous: times before noon are
+// treated as continuing past 24 (7:00 AM -> 31), so an 11 PM bedtime
+// (23) and a 7 AM wake time (31) sit 8 hours apart on the axis, matching
+// the real elapsed time between them. Assumes a conventional bedtime-
+// after-noon / wake-before-noon pattern - a night that doesn't fit that
+// (e.g. an extreme shift-work schedule) would plot oddly, but that's a
+// reasonable simplification for what this chart is for.
+function noonAnchoredHour(iso) {
+  const d = new Date(iso);
+  let h = d.getHours() + d.getMinutes() / 60;
+  if (h < 12) h += 24;
+  return h;
+}
+
+function formatClockTime(hour) {
+  const h = ((hour % 24) + 24) % 24;
+  const period = h < 12 ? "AM" : "PM";
+  const h12raw = Math.floor(h) % 12;
+  const h12 = h12raw === 0 ? 12 : h12raw;
+  const min = Math.round((h % 1) * 60);
+  return `${h12}:${String(min).padStart(2, "0")} ${period}`;
+}
+
+export async function openSleepRegularityDetail(anchorDate = todayISO()) {
+  openDetailScreen("Sleep Regularity");
+  await renderSleepRegularityDay(anchorDate);
+}
+
+async function renderSleepRegularityDay(anchorDate) {
+  const content = document.getElementById("detail-content");
+  content.innerHTML = `${renderDateNav("day", anchorDate)}<p class="muted">Loading...</p>`;
+  wireSubDetailDateNav(anchorDate, renderSleepRegularityDay);
+
+  clearActiveCharts();
+
+  try {
+    const trend = await api(`/sleep/timing-trend?period=week&end_date=${anchorDate}`);
+
+    if (!trend.length) {
+      content.innerHTML = `
+        ${renderDateNav("day", anchorDate)}
+        <div class="sleep-summary-card">
+          <p class="metric-card-empty">No sleep sessions recorded in the last 7 days.</p>
+        </div>
+      `;
+      wireSubDetailDateNav(anchorDate, renderSleepRegularityDay);
+      return;
+    }
+
+    const bedtimes = trend.map(t => noonAnchoredHour(t.start_time));
+    const waketimes = trend.map(t => noonAnchoredHour(t.end_time));
+    const avgBedtime = bedtimes.reduce((a, b) => a + b, 0) / bedtimes.length;
+    const avgWaketime = waketimes.reduce((a, b) => a + b, 0) / waketimes.length;
+
+    content.innerHTML = `
+      ${renderDateNav("day", anchorDate)}
+      <div class="sleep-summary-card">
+        <div class="sleep-stats-row">
+          <div class="sleep-stat-item">
+            <span class="sleep-stat-value">${formatClockTime(avgBedtime)}</span>
+            <span class="sleep-stat-label">Avg Bedtime</span>
+          </div>
+          <div class="sleep-stat-item">
+            <span class="sleep-stat-value">${formatClockTime(avgWaketime)}</span>
+            <span class="sleep-stat-label">Avg Wake Time</span>
+          </div>
+        </div>
+      </div>
+
+      <p class="today-section-label">Last 7 Days</p>
+      <div class="detail-chart-card">
+        <canvas id="sleep-regularity-window-chart"></canvas>
+      </div>
+
+      <p class="today-section-label">Went to Bed</p>
+      <div class="detail-chart-card">
+        <canvas id="sleep-regularity-bedtime-chart"></canvas>
+      </div>
+
+      <p class="today-section-label">Get Up</p>
+      <div class="detail-chart-card">
+        <canvas id="sleep-regularity-waketime-chart"></canvas>
+      </div>
+    `;
+    wireSubDetailDateNav(anchorDate, renderSleepRegularityDay);
+
+    const devices = [...new Set(trend.map(t => t.device))];
+
+    const windowSeries = {};
+    devices.forEach(d => { windowSeries[d] = []; });
+    trend.forEach(t => {
+      windowSeries[t.device].push({
+        t: t.date,
+        min: noonAnchoredHour(t.start_time),
+        max: noonAnchoredHour(t.end_time),
+        median: (noonAnchoredHour(t.start_time) + noonAnchoredHour(t.end_time)) / 2,
+      });
+    });
+    const windowChart = buildRangeBarChart(
+      document.getElementById("sleep-regularity-window-chart"), windowSeries, devices, "week", {}, undefined, undefined, formatClockTime
+    );
+    if (windowChart) registerActiveChart(windowChart);
+
+    const bedtimeSeries = {};
+    devices.forEach(d => { bedtimeSeries[d] = []; });
+    trend.forEach(t => { bedtimeSeries[t.device].push({ t: t.date, value: noonAnchoredHour(t.start_time) }); });
+    const bedtimeChart = buildTimeScatterChart(
+      document.getElementById("sleep-regularity-bedtime-chart"), bedtimeSeries, devices, { yTickCallback: formatClockTime }
+    );
+    if (bedtimeChart) registerActiveChart(bedtimeChart);
+
+    const waketimeSeries = {};
+    devices.forEach(d => { waketimeSeries[d] = []; });
+    trend.forEach(t => { waketimeSeries[t.device].push({ t: t.date, value: noonAnchoredHour(t.end_time) }); });
+    const waketimeChart = buildTimeScatterChart(
+      document.getElementById("sleep-regularity-waketime-chart"), waketimeSeries, devices, { yTickCallback: formatClockTime }
+    );
+    if (waketimeChart) registerActiveChart(waketimeChart);
+  } catch (e) {
+    content.innerHTML = `${renderDateNav("day", anchorDate)}<p class="status">Error loading sleep regularity data: ${escapeHtml(e.message)}</p>`;
+    wireSubDetailDateNav(anchorDate, renderSleepRegularityDay);
   }
 }

@@ -110,7 +110,7 @@ const medianMarkerPlugin = {
   },
 };
 
-export function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}, yMin, decimals) {
+export function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}, yMin, decimals, yTickCallback) {
   // Floating bars: Chart.js draws a [min, max] pair as a bar spanning
   // that range, rather than a bar from zero - exactly the "vertical
   // range bar per period" pattern from the Zepp research (see
@@ -202,7 +202,16 @@ export function buildRangeBarChart(canvas, series, devices, period, rollingMean 
         y: {
           ticks: {
             color: "#8a8d99",
-            callback: (v) => formatNum(v, decimals),
+            // Optional trailing override - every existing caller
+            // omits this and keeps the original formatNum(v,decimals)
+            // numeric formatting exactly as before. Added for Sleep
+            // Regularity's own use of this function: a bedtime/wake
+            // floating bar needs its Y-axis labeled as clock times
+            // ("11:00 PM"), not plain numbers - the underlying floating-
+            // bar mechanism (a genuine [min,max] range per period) is
+            // exactly right for that case, unlike Duration's earlier,
+            // now-fixed misuse of this same function for a single value.
+            callback: yTickCallback || ((v) => formatNum(v, decimals)),
           },
           grid: { color: "#2a2d38" },
           // A field like SpO2 naturally lives in a narrow high range
@@ -232,7 +241,9 @@ export function buildRangeBarChart(canvas, series, devices, period, rollingMean 
             label: (item) => {
               if (item.dataset.raw) {
                 const real = item.dataset.raw[item.dataIndex];
-                return real ? `${item.dataset.label}: ${formatNum(real[0], decimals)}\u2013${formatNum(real[1], decimals)}` : "";
+                if (!real) return "";
+                const fmt = yTickCallback || ((v) => formatNum(v, decimals));
+                return `${item.dataset.label}: ${fmt(real[0])}\u2013${fmt(real[1])}`;
               }
               // The rolling-mean overlay dataset doesn't carry a `raw`
               // array (that's specific to the padded-bar workaround
@@ -855,4 +866,276 @@ export function buildHypnogramSVG(segments, options = {}) {
     ${yLabels}
     ${xLabels}
   </svg>`;
+}
+
+// A simple bar-from-zero trend chart with a dashed mean-line overlaid
+// across the WHOLE chart (one constant value, not per-bar) - for
+// trends like "Last 7 days duration" where each day has exactly ONE
+// value (not a min/max range), and the useful comparison is "this
+// day vs the week's overall average", not "this day's own range".
+// Deliberately NOT buildRangeBarChart, which draws a floating
+// [min,max] bar per period - reused for this once by mistake,
+// producing a bar that starts/ends at nearly the same height (its
+// own min==max padding logic drawing a ~1-unit-tall floating bar
+// centered on the value) rather than a real 0-to-value bar. `series`
+// is {"<device>": [{t, value}, ...]}, one point per bucket.
+export function buildTrendBarChart(canvas, series, devices, config = {}) {
+  const allPeriods = [...new Set(devices.flatMap(d => series[d].map(p => p.t)))].sort();
+  const labels = allPeriods.map(t => new Date(t).toLocaleDateString([], { month: "short", day: "numeric" }));
+
+  const barDatasets = devices.map((device, i) => {
+    const byPeriod = Object.fromEntries(series[device].map(p => [p.t, p.value]));
+    return {
+      type: "bar",
+      label: device,
+      data: allPeriods.map(t => (t in byPeriod ? byPeriod[t] : null)),
+      backgroundColor: DEVICE_CHART_COLORS[i % DEVICE_CHART_COLORS.length],
+      borderRadius: 4,
+    };
+  });
+
+  // The dashed mean line - one constant value across the whole chart,
+  // computed over all real (non-null) values across all devices, not
+  // per-device or per-bucket. null (not drawn at all) if there's no
+  // data to average.
+  //
+  // Deliberately NOT a "line"-type dataset plotted on the same
+  // category x-axis as the bars - two real problems with that
+  // approach (both reported directly, confirmed real): a category
+  // axis positions each point at its OWN category's center, so the
+  // line only spans between the first and last bar's centers, never
+  // reaching the chart's actual left/right edges (the axis reserves
+  // half a category's padding on each side, by design, so bars don't
+  // touch the edges); and Chart.js's default per-dataset draw order
+  // put the line dataset visually BEHIND the bars rather than over
+  // them. A canvas plugin drawn in afterDatasetsDraw sidesteps both
+  // at once: it draws after every dataset (always on top, not
+  // dependent on dataset order/an `order` weight trick), directly
+  // from chartArea.left to chartArea.right (the chart's real pixel
+  // bounds, not tied to the category axis's own point positions at
+  // all).
+  const allValues = devices.flatMap(d => series[d].map(p => p.value)).filter(v => v !== null && v !== undefined);
+  const mean = allValues.length ? allValues.reduce((a, b) => a + b, 0) / allValues.length : null;
+
+  const meanLinePlugin = {
+    id: "trendMeanLine",
+    afterDatasetsDraw(chart) {
+      if (mean === null) return;
+      const { ctx, chartArea, scales } = chart;
+      const y = scales.y.getPixelForValue(mean);
+
+      ctx.save();
+      ctx.strokeStyle = "#8a8d99";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 5]);
+      ctx.beginPath();
+      ctx.moveTo(chartArea.left, y);
+      ctx.lineTo(chartArea.right, y);
+      ctx.stroke();
+      ctx.restore();
+
+      // A small value label near the line, rather than a legend entry
+      // (this line isn't a real dataset, so it has no automatic
+      // legend representation) - flips below the line instead of
+      // above when the line sits too close to the chart's own top
+      // edge for an above-line label to fit.
+      const formatted = config.decimals !== undefined ? mean.toFixed(config.decimals) : mean;
+      const text = `${config.meanLabel || "Average"}: ${formatted}${config.unit || ""}`;
+      const labelBelow = y - chartArea.top < 14;
+      ctx.save();
+      ctx.fillStyle = "#8a8d99";
+      ctx.font = "11px sans-serif";
+      ctx.textAlign = "right";
+      ctx.textBaseline = labelBelow ? "top" : "bottom";
+      ctx.fillText(text, chartArea.right, labelBelow ? y + 4 : y - 4);
+      ctx.restore();
+    },
+  };
+
+  return new Chart(canvas, {
+    type: "bar",
+    data: { labels, datasets: barDatasets },
+    plugins: [meanLinePlugin],
+    options: {
+      responsive: true,
+      animation: false,
+      scales: {
+        x: {
+          ticks: { color: "#8a8d99", maxRotation: 0, autoSkip: true, autoSkipPadding: 16 },
+          grid: { display: false },
+        },
+        y: {
+          min: 0,
+          ticks: { color: "#8a8d99" },
+          grid: { color: "#2a2d38" },
+          title: config.yAxisTitle ? { display: true, text: config.yAxisTitle, color: "#8a8d99" } : undefined,
+        },
+      },
+      plugins: {
+        legend: { display: devices.length > 1, labels: { color: "#e8e9ed" } },
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const v = item.parsed.y;
+              if (v === null || v === undefined) return "";
+              const formatted = config.decimals !== undefined ? v.toFixed(config.decimals) : v;
+              return `${item.dataset.label}: ${formatted}${config.unit || ""}`;
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
+// A continuous vitals line (heart_rate or sleep_respiratory_rate)
+// over one full night, with the sleep-stage hypnogram as translucent
+// FULL-HEIGHT BACKGROUND BANDS behind it - matches UI_DESIGN_NOTES.md's
+// "sleep-stage lanes as the chart's background" pattern for the Sleep
+// Heart Rate / Sleep Respiratory Rate detail pages: one glance shows
+// both what the signal was doing and what stage was active at once.
+//
+// Hand-computed SVG, same reasoning as buildHypnogramSVG: this is a
+// genuinely simple layout (time-proportional X, a value range Y, a
+// polyline, some background rects) that doesn't need a charting
+// library's scale-fitting machinery, and this project has already
+// hit real, hard-to-diagnose Chart.js bugs (documented on
+// buildHypnogramSVG itself) building something in this same family.
+//
+// `vitalsPoints` is an ORDERED {t, v} list for ONE device (already
+// filtered/flattened by the caller - see get_sleep_vitals_series() on
+// the backend). `hypnogramSegments` is the same ordered
+// {stage, start, duration_min} list buildHypnogramSVG takes, used
+// here only to anchor the shared time range and draw the background
+// bands - not for its own 4-row layout.
+export function buildVitalsHypnogramSVG(vitalsPoints, hypnogramSegments, options = {}) {
+  if (!vitalsPoints.length || !hypnogramSegments.length) return "";
+
+  const width = options.width || 800;
+  const height = options.height || 180;
+  const labelWidth = 34; // reserved left margin for Y-axis min/max labels
+  const bottomAxisHeight = 20; // reserved bottom margin for time labels
+  const chartWidth = width - labelWidth;
+  const chartHeight = height - bottomAxisHeight;
+
+  // Anchored to the SESSION's own bounds (from the hypnogram segments),
+  // not just the vitals points' own range - keeps this chart's time
+  // axis consistent with the background bands even if vitals readings
+  // don't quite cover the session's full start/end.
+  const sessionStartMs = new Date(hypnogramSegments[0].start).getTime();
+  const lastSeg = hypnogramSegments[hypnogramSegments.length - 1];
+  const sessionEndMs = new Date(lastSeg.start).getTime() + lastSeg.duration_min * 60000;
+  const totalMs = Math.max(sessionEndMs - sessionStartMs, 1);
+
+  const xForMs = (ms) => labelWidth + ((ms - sessionStartMs) / totalMs) * chartWidth;
+  const xFor = (iso) => xForMs(new Date(iso).getTime());
+
+  // Y range from the real data, padded so the line doesn't touch the
+  // chart's own top/bottom edges. A flat/near-flat series (min≈max)
+  // gets a minimum padded span so it doesn't collapse to a degenerate
+  // zero-height scale.
+  const values = vitalsPoints.map(p => p.v);
+  const rawMin = Math.min(...values);
+  const rawMax = Math.max(...values);
+  const span = Math.max(rawMax - rawMin, 2);
+  const pad = span * 0.15;
+  const yMin = rawMin - pad;
+  const yMax = rawMax + pad;
+  const yFor = (v) => chartHeight - ((v - yMin) / (yMax - yMin)) * chartHeight;
+
+  const bands = hypnogramSegments.map(seg => {
+    const x = xFor(seg.start);
+    const segEndMs = new Date(seg.start).getTime() + seg.duration_min * 60000;
+    const w = xForMs(segEndMs) - x;
+    const color = HYPNOGRAM_STAGE_COLORS[seg.stage] || "#8a8d99";
+    return `<rect x="${x.toFixed(2)}" y="0" width="${w.toFixed(2)}" height="${chartHeight.toFixed(2)}" fill="${color}" opacity="0.16" />`;
+  }).join("");
+
+  const points = vitalsPoints.map(p => `${xFor(p.t).toFixed(2)},${yFor(p.v).toFixed(2)}`).join(" ");
+
+  const yLabels = [
+    `<text x="${(labelWidth - 6).toFixed(2)}" y="8" text-anchor="end" fill="#8a8d99" font-size="10">${Math.round(rawMax)}</text>`,
+    `<text x="${(labelWidth - 6).toFixed(2)}" y="${(chartHeight - 2).toFixed(2)}" text-anchor="end" fill="#8a8d99" font-size="10">${Math.round(rawMin)}</text>`,
+  ].join("");
+
+  const labelCount = 4;
+  const xLabels = Array.from({ length: labelCount + 1 }, (_, i) => {
+    const frac = i / labelCount;
+    const x = labelWidth + frac * chartWidth;
+    const t = new Date(sessionStartMs + frac * totalMs);
+    const text = t.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const anchor = i === 0 ? "start" : i === labelCount ? "end" : "middle";
+    return `<text x="${x.toFixed(2)}" y="${(chartHeight + 14).toFixed(2)}" text-anchor="${anchor}" fill="#8a8d99" font-size="11">${text}</text>`;
+  }).join("");
+
+  return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" xmlns="http://www.w3.org/2000/svg" font-family="inherit">
+    ${bands}
+    <polyline points="${points}" fill="none" stroke="#e8e9ed" stroke-width="1.75" />
+    ${yLabels}
+    ${xLabels}
+  </svg>`;
+}
+
+// One point per period, no connecting line - for things like Sleep
+// Regularity's "Went to bed" / "Get up" scatter charts (bedtime or
+// wake time per night). A "line" chart type with showLine:false and
+// real point markers, same base approach buildLineChart already uses
+// for sparse single-reading-per-day series, just without ever
+// connecting the dots even when there IS a full run of consecutive
+// days (a scatter is about consistency/spread, not a trend line).
+// `config.yTickCallback` formats the Y-axis (and tooltip) values -
+// same optional-override shape buildRangeBarChart's own extension
+// uses, for a consistent way to plot "time of day" style values
+// across both chart types.
+export function buildTimeScatterChart(canvas, series, devices, config = {}) {
+  const allPeriods = [...new Set(devices.flatMap(d => series[d].map(p => p.t)))].sort();
+  const labels = allPeriods.map(t => new Date(t).toLocaleDateString([], { month: "short", day: "numeric" }));
+
+  const datasets = devices.map((device, i) => {
+    const byPeriod = Object.fromEntries(series[device].map(p => [p.t, p.value]));
+    const color = DEVICE_CHART_COLORS[i % DEVICE_CHART_COLORS.length];
+    return {
+      type: "line",
+      label: device,
+      data: allPeriods.map(t => (t in byPeriod ? byPeriod[t] : null)),
+      showLine: false,
+      pointRadius: 5,
+      pointBackgroundColor: color,
+      pointBorderColor: color,
+    };
+  });
+
+  const fmt = config.yTickCallback || ((v) => v);
+
+  return new Chart(canvas, {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      animation: false,
+      scales: {
+        x: {
+          ticks: { color: "#8a8d99", maxRotation: 0, autoSkip: true },
+          grid: { display: false },
+        },
+        y: {
+          ticks: { color: "#8a8d99", callback: fmt },
+          grid: { color: "#2a2d38" },
+          min: config.yMin,
+          max: config.yMax,
+        },
+      },
+      plugins: {
+        legend: { display: devices.length > 1, labels: { color: "#e8e9ed" } },
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const v = item.parsed.y;
+              return v === null || v === undefined ? "" : `${item.dataset.label}: ${fmt(v)}`;
+            },
+          },
+        },
+      },
+    },
+  });
 }

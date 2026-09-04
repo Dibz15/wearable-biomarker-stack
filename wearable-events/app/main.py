@@ -1003,6 +1003,37 @@ def get_sleep_vitals_trend_endpoint(field: str, period: str, end_date: str | Non
     return get_sleep_vitals_trend(field, current_user["username"], start.date(), end.date())
 
 
+@app.get("/sleep/vitals-baseline/{field}")
+def get_sleep_vitals_baseline_endpoint(field: str, days: int = 7, date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Night-anchored baseline comparison for heart_rate or
+    sleep_respiratory_rate - the "Slower/Lower - Baseline - Faster/
+    Higher" gauge on the Sleep Heart Rate / Sleep Respiratory Rate
+    detail pages.
+
+    Deliberately its OWN endpoint under /sleep/, not routed through
+    the existing /vitals/baseline/{field} (which decides nightly-vs-
+    calendar-day comparison via the global NIGHTLY_BASELINE_FIELDS
+    set) - heart_rate specifically is a field a future GENERAL
+    (non-sleep) Heart Rate detail page would plausibly also want to
+    show, and that page would want a calendar-day baseline (matching
+    resting_heart_rate/hrv's own existing split), not the sleep-
+    specific nightly one. Adding heart_rate to NIGHTLY_BASELINE_FIELDS
+    globally would have silently forced every future caller into the
+    nightly comparison - scoping this here instead avoids that
+    conflict entirely rather than needing to resolve it later.
+
+    get_nightly_baseline_comparison() itself needed no changes - it
+    was already generic on `field`, this is purely about NOT wiring it
+    through the field-to-comparison-type routing that's global.
+    '''
+    if field not in ("heart_rate", "sleep_respiratory_rate"):
+        raise HTTPException(400, f"unsupported field for sleep vitals: {field!r}")
+    if days not in BASELINE_ALLOWED_DAYS:
+        raise HTTPException(400, f"unsupported days: {days!r} (must be one of {sorted(BASELINE_ALLOWED_DAYS)})")
+    parsed_date = _parse_optional_date(date)
+    return get_nightly_baseline_comparison(field, current_user["username"], baseline_days=days, for_date=parsed_date)
+
+
 # --- calendars ---
 
 @app.get("/calendars")
