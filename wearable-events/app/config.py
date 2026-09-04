@@ -56,6 +56,16 @@ MIN_SLEEP_SESSION_SECONDS = int(os.getenv("MIN_SLEEP_SESSION_SECONDS", str(3 * 3
 # corrupted rather than risking hiding a genuine unusual night.
 MAX_SLEEP_SESSION_SECONDS = int(os.getenv("MAX_SLEEP_SESSION_SECONDS", str(24 * 3600)))
 
+# Sleep Duration detail page's range-bar goal marker (0 to goal, per
+# UI_DESIGN_NOTES.md's "Page: Sleep Duration"). Zepp's own value there
+# is a person-configurable in-app setting, not something synced to
+# Gadgetbridge's database - no real field to read this from, so this
+# is a standalone, independently-configurable default rather than an
+# attempt to mirror Zepp's own number. 8 hours is a commonly-cited
+# general sleep recommendation, not this app's own opinion on the
+# "right" amount - override via env var for a personal target.
+SLEEP_DURATION_GOAL_SECONDS = int(os.getenv("SLEEP_DURATION_GOAL_SECONDS", str(8 * 3600)))
+
 # --- Activity session detection (Activity page) ---
 # An "active minute" (steps > 0 OR raw_intensity >= this) is the
 # trigger for both Stand-hour crediting and derived activity-session

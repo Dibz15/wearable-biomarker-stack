@@ -1743,6 +1743,162 @@ def get_nightly_baseline_comparison(field: str, user: str, baseline_days: int = 
     return _zscore_comparison(today_value, daily)
 
 
+def _primary_device_session(sessions: dict[str, dict]) -> tuple[str, dict]:
+    ''' Picks the single primary device+session from a
+    {device: session_dict} mapping (as returned by
+    _sleep_session_for_night()) - the LONGEST session, same rule
+    _sleep_sessions_by_wake_date() already applies to disambiguate a
+    nap from the main night's sleep. Shared by every Sleep-tab-family
+    function that needs "the one session for this night" rather than
+    a per-device breakdown, so this rule lives in exactly one place.
+    Caller's responsibility to have already checked `sessions` is
+    non-empty.
+    '''
+    return max(sessions.items(), key=lambda item: item[1]["duration_s"])
+
+
+def get_sleep_overview_for_night(user: str, wake_date: date) -> dict | None:
+    ''' Everything the Sleep tab's main day-view needs for ONE specific
+    night, combining several already-existing per-session queries into
+    one call rather than making every caller re-derive the session
+    window and re-pick a primary device itself.
+
+    Picks ONE primary device's session when more than one exists for
+    the same night (see _primary_device_session()) - Zepp's own Sleep
+    tab is a single-device view by construction (it only ever shows
+    the one device you're using), so this doesn't attempt a genuinely
+    multi-device sleep tab, matching find_last_completed_sleep_session()'s
+    own existing single-session convention already used for the Today
+    tab.
+
+    Returns None if no sleep session is recorded for this night (an
+    empty dict from _sleep_session_for_night() - e.g. a night before
+    any device was worn, or a genuinely missed sync) - the caller
+    should treat this as "no sleep data for this night", not an error.
+    '''
+    sessions = _sleep_session_for_night(user, wake_date)
+    if not sessions:
+        return None
+
+    device, session = _primary_device_session(sessions)
+    start, end = session["start_time"], session["end_time"]
+
+    stages = get_sleep_stage_breakdown(user, start, end, device=device)
+    wake_events = count_wake_events(user, start, end, device=device)
+
+    hr_means = _device_stat_by_field("heart_rate", user, start, end, "mean")
+    resp_means = _device_stat_by_field("sleep_respiratory_rate", user, start, end, "mean")
+
+    return {
+        "device": device,
+        "start_time": start.isoformat(),
+        "end_time": end.isoformat(),
+        "duration_s": session["duration_s"],
+        "stages_min": stages,
+        "wake_events": wake_events,
+        "avg_heart_rate": round(hr_means[device], 1) if device in hr_means else None,
+        "avg_respiratory_rate": round(resp_means[device], 1) if device in resp_means else None,
+    }
+
+
+def get_sleep_timing_trend(user: str, start_date: date, end_date: date) -> list[dict]:
+    ''' Per-night start_time/end_time/duration_s for each night waking
+    in [start_date, end_date), one primary (longest) device's session
+    per night - the shared underlying data behind BOTH the Sleep
+    Duration detail page's "Last 7 days" bar chart AND the Sleep
+    Regularity detail page's bedtime/wake-time scatter charts and
+    weekly averages (see UI_DESIGN_NOTES.md for both) - one function
+    rather than two, since both need the exact same per-night rows,
+    just different slices of the same data.
+
+    Returns a chronologically-sorted list of {"date": "YYYY-MM-DD",
+    "start_time": <ISO8601>, "end_time": <ISO8601>, "duration_s": int,
+    "device": str} - nights with no recorded session are simply
+    omitted (not a zero-duration entry), so callers building an
+    average or a bar chart don't need to filter these out themselves.
+    '''
+    by_date = _sleep_sessions_by_wake_date(user, start_date, end_date)
+    result = []
+    for wake_date in sorted(by_date):
+        sessions = by_date[wake_date]
+        if not sessions:
+            continue
+        device, session = _primary_device_session(sessions)
+        result.append({
+            "date": wake_date.strftime("%Y-%m-%d"),
+            "start_time": session["start_time"].isoformat(),
+            "end_time": session["end_time"].isoformat(),
+            "duration_s": session["duration_s"],
+            "device": device,
+        })
+    return result
+
+
+def get_sleep_stage_trend(user: str, start_date: date, end_date: date) -> list[dict]:
+    ''' Per-night stage-minute breakdown for each night waking in
+    [start_date, end_date) - the Sleep tab's own "vs Last 7 Days"
+    stacked-bar weekly view (see UI_DESIGN_NOTES.md). Reuses the same
+    primary-device-per-night selection as get_sleep_timing_trend()
+    (kept as a separate function rather than merged with it, since
+    this needs its own get_sleep_stage_breakdown() call per night - a
+    real query per night, not free to compute from the same rows
+    get_sleep_timing_trend() already has).
+
+    Returns a chronologically-sorted list of {"date": "YYYY-MM-DD",
+    "stages_min": {...}} - nights with no recorded session are simply
+    omitted, same convention as get_sleep_timing_trend().
+    '''
+    by_date = _sleep_sessions_by_wake_date(user, start_date, end_date)
+    result = []
+    for wake_date in sorted(by_date):
+        sessions = by_date[wake_date]
+        if not sessions:
+            continue
+        device, session = _primary_device_session(sessions)
+        stages = get_sleep_stage_breakdown(user, session["start_time"], session["end_time"], device=device)
+        result.append({
+            "date": wake_date.strftime("%Y-%m-%d"),
+            "stages_min": stages,
+        })
+    return result
+
+
+def get_sleep_vitals_series(field: str, user: str, wake_date: date) -> dict[str, list[dict]]:
+    ''' Raw (unaggregated) points for one field (heart_rate or
+    sleep_respiratory_rate) within the actual sleep session window for
+    one specific night - the full-night chart the Sleep Heart Rate and
+    Sleep Respiratory Rate detail pages plot against a stage-hypnogram
+    background (see UI_DESIGN_NOTES.md for both - same "physiological
+    signal during sleep, plotted against the stage hypnogram" pattern
+    confirmed for both pages).
+
+    Resolves the night's actual session window first (same primary-
+    device selection as the rest of this Sleep-tab-family - see
+    _primary_device_session()), then reuses _grouped_series() - the
+    same underlying query get_today_series() and the W/M/Y range
+    endpoints already use - over that session's real [start, end)
+    window rather than a calendar day, since a sleep session's actual
+    boundaries rarely align with midnight.
+
+    Filtered to the PRIMARY device's own series only, not every device
+    that happened to report during the window - matches this whole
+    Sleep-tab family's single-device convention (see
+    get_sleep_overview_for_night()'s docstring), so an unrelated
+    device's readings during the same hours can't leak into what's
+    meant to be one specific night's chart.
+
+    Returns the same shape as get_today_series():
+    {"<device>": [{"t": <ISO8601>, "v": <value>}, ...]} - empty dict if
+    no sleep session is recorded for this night.
+    '''
+    sessions = _sleep_session_for_night(user, wake_date)
+    if not sessions:
+        return {}
+    device, session = _primary_device_session(sessions)
+    series = _grouped_series(field, user, session["start_time"], session["end_time"])
+    return {device: series[device]} if device in series else {}
+
+
 def get_nightly_differential_series(field: str, user: str, start_date: date, end_date: date, baseline_days: int = 7) -> dict[str, list[dict]]:
     ''' Per-device, per-night DELTA from a trailing baseline_days-night
     rolling average, for each night waking in [start_date, end_date) -
@@ -1913,6 +2069,61 @@ def get_sleep_stage_breakdown(user: str, session_start: datetime, session_end: d
             if stage is not None and value is not None:
                 result[stage] = round(value / 60)
     return result
+
+
+def count_wake_events(user: str, session_start: datetime, session_end: datetime, device: str | None = None) -> int:
+    ''' Count of distinct awake-stage SEGMENTS during one sleep session -
+    genuinely different information from get_sleep_stage_breakdown()'s
+    duration sum: three separate 2-minute wake-ups and one continuous
+    6-minute wake-up both sum to 6 minutes of total awake time, but
+    are very different sleep-quality signals. Matches Zepp's own
+    "Awake ... N wake events" framing on the Sleep Metrics card (see
+    UI_DESIGN_NOTES.md).
+
+    Counts the sleep_stage_duration_s field specifically - written
+    ONCE per stage segment, at that segment's own start point (see
+    parser/activefit's sleep-stage extraction) - not sleep_stage_active
+    (written TWICE per segment, a start=1 marker and an end=0 marker
+    one second before the next stage begins, which would double the
+    count if used here instead).
+
+    Same optional device-filtering as get_sleep_stage_breakdown, same
+    reasoning: without it, this would silently sum wake-event counts
+    across multiple devices with stage data for the same night rather
+    than counting one device's own.
+    '''
+    client = get_client()
+    query_api = client.query_api()
+
+    start_iso = session_start.astimezone(timezone.utc).isoformat()
+    stop_iso = session_end.astimezone(timezone.utc).isoformat()
+
+    device_filter = f'|> filter(fn: (r) => r.device == "{device}")\n      ' if device else ""
+
+    flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: {start_iso}, stop: {stop_iso})
+      |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+      |> filter(fn: (r) => r.user == "{user}")
+      |> filter(fn: (r) => r.sample_type == "sleep_stage")
+      |> filter(fn: (r) => r.sleep_stage == "awake")
+      |> filter(fn: (r) => r._field == "sleep_stage_duration_s")
+      {device_filter}|> count()
+    '''
+
+    try:
+        tables = query_api.query(flux)
+    except Exception as e:
+        logger.warning(f"Failed to count wake events for user={user}: {e}")
+        return 0
+
+    total = 0
+    for table in tables:
+        for record in table.records:
+            value = record.get_value()
+            if value is not None:
+                total += value
+    return total
 
 
 def list_distinct_sensor_users(lookback_days: int = 365) -> list[str]:

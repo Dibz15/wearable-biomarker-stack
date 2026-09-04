@@ -18,6 +18,7 @@ from app.config import (
     PORT,
     SESSION_COOKIE_SECURE,
     SESSION_MAX_AGE_DAYS,
+    SLEEP_DURATION_GOAL_SECONDS,
     SYNC_INTERVAL_MINUTES,
     TZ_NAME,
 )
@@ -40,7 +41,11 @@ from app.influx import (
     get_period_range_series,
     get_rolling_mean_series,
     get_sitting_minutes,
+    get_sleep_overview_for_night,
     get_sleep_stage_breakdown,
+    get_sleep_stage_trend,
+    get_sleep_timing_trend,
+    get_sleep_vitals_series,
     get_stood_hours,
     get_today_series,
     get_today_steps,
@@ -897,6 +902,74 @@ def delete_sleep(entry_id: str, current_user: dict = Depends(get_current_user)):
 
     delete_sleep_entry(username, entry_id)
     return {"ok": True}
+
+
+SLEEP_TREND_PERIODS = {"week", "month", "year"}
+
+
+@app.get("/sleep/overview")
+def get_sleep_overview(date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Everything the Sleep tab's main day-view needs for one specific
+    night - session timing, stage breakdown, wake-event count, and
+    sleep-window HR/respiratory averages, all combined server-side by
+    get_sleep_overview_for_night() rather than requiring several
+    separate frontend fetches.
+
+    `date` names the WAKE date (the night that ended waking up on this
+    calendar day) - defaults to today. Returns null (not a 404) when
+    no sleep session is recorded for that night, the same "absence is
+    normal, not an error" convention /today already uses for its own
+    sleep card.
+    '''
+    wake_date = _parse_optional_date(date) or datetime.now(ZoneInfo(TZ_NAME)).date()
+    overview = get_sleep_overview_for_night(current_user["username"], wake_date)
+    if overview is not None:
+        overview["duration_goal_s"] = SLEEP_DURATION_GOAL_SECONDS
+    return overview
+
+
+@app.get("/sleep/vitals-series/{field}")
+def get_sleep_vitals_series_endpoint(field: str, date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Raw per-point series for heart_rate or sleep_respiratory_rate
+    within one night's actual sleep session window - the full-night
+    chart the Sleep Heart Rate and Sleep Respiratory Rate detail pages
+    plot against a stage-hypnogram background (see UI_DESIGN_NOTES.md).
+    Reuses TODAY_SERIES_FIELDS' existing allowlist rather than a new
+    one - both fields are already valid there.
+    '''
+    if field not in ("heart_rate", "sleep_respiratory_rate"):
+        raise HTTPException(400, f"unsupported field for sleep vitals: {field!r}")
+    wake_date = _parse_optional_date(date) or datetime.now(ZoneInfo(TZ_NAME)).date()
+    return get_sleep_vitals_series(field, current_user["username"], wake_date)
+
+
+@app.get("/sleep/timing-trend")
+def get_sleep_timing_trend_endpoint(period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Per-night start_time/end_time/duration_s across a W/M/Y range -
+    shared by the Sleep Duration detail page's "Last 7 days" bar chart
+    and the Sleep Regularity detail page's bedtime/wake-time scatter
+    charts and weekly averages (see get_sleep_timing_trend()'s own
+    docstring for why one endpoint covers both). "day" deliberately
+    not accepted - a trend across nights doesn't apply to a single
+    night, same reasoning as /activity/time-range rejecting it.
+    '''
+    if period not in SLEEP_TREND_PERIODS:
+        raise HTTPException(400, f"unsupported period: {period!r} (must be one of {sorted(SLEEP_TREND_PERIODS)})")
+    start, end = _period_bounds(period, end_date)
+    return get_sleep_timing_trend(current_user["username"], start.date(), end.date())
+
+
+@app.get("/sleep/stage-trend")
+def get_sleep_stage_trend_endpoint(period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Per-night stage-minute breakdown across a W/M/Y range - the
+    Sleep tab's own "vs Last 7 Days" stacked-bar weekly view (see
+    UI_DESIGN_NOTES.md). Same period restriction as /sleep/timing-trend
+    and for the same reason.
+    '''
+    if period not in SLEEP_TREND_PERIODS:
+        raise HTTPException(400, f"unsupported period: {period!r} (must be one of {sorted(SLEEP_TREND_PERIODS)})")
+    start, end = _period_bounds(period, end_date)
+    return get_sleep_stage_trend(current_user["username"], start.date(), end.date())
 
 
 # --- calendars ---
