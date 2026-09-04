@@ -511,6 +511,52 @@ def decode_sleep_session_blob(data: bytes):
     return result
 
 
+def deduplicate_sleep_session_rows(decoded_rows: list[tuple]) -> list[tuple]:
+    ''' Keeps only the most recently synced HUAMI_SLEEP_SESSION_SAMPLE
+    row per (device, night). Real bug found and fixed here (2026-09),
+    confirmed against real data: the watch can sync more than one
+    session-summary blob for the SAME night (two real rows one minute
+    apart, both describing the same sleep session with nearly-
+    identical but not byte-identical durations - presumably the watch
+    re-sending a refined summary shortly after the first). Each blob's
+    own stage array gets turned into its own set of sleep_stage points,
+    timestamped from that blob's OWN internal clock (timestamp_midnight),
+    not the outer row's TIMESTAMP - so two near-duplicate blobs for the
+    same night produce near-duplicate-but-not-identical stage
+    timestamps, which InfluxDB stores as SEPARATE points rather than
+    the second overwriting the first. Without this, get_sleep_stage_breakdown
+    (which sums every sleep_stage point in a session's time window)
+    silently summed both blobs' stage minutes together - confirmed
+    against real reported values still showing inflated stage sums
+    for a single, consistent device_id even after the earlier cross-
+    device summing fix (a different, unrelated bug in the dashboard's
+    own query, not this one).
+
+    Identifies "the same night" by (device_id, the blob's own
+    timestamp_midnight) - not the outer row TIMESTAMP, since that's
+    exactly the field that legitimately differs between the duplicate
+    rows. "Most recently synced" is decided by the outer row_ts (when
+    Gadgetbridge actually received this particular blob), the same
+    "most recent wins" principle find_last_completed_sleep_session
+    already applies at query time - just applied here at write time
+    instead, so duplicate stage data never reaches InfluxDB in the
+    first place, rather than relying on every downstream query to
+    correctly filter it back out.
+
+    Takes a list of (row_ts, device_id, decoded) tuples (decoded being
+    decode_sleep_session_blob()'s own return value - never None, the
+    caller already filters those out before this), returns the same
+    shape, deduplicated. Order of the returned list is not significant.
+    '''
+    best_by_night: dict[tuple, tuple] = {}
+    for row_ts, device_id, decoded in decoded_rows:
+        key = (device_id, decoded["timestamp_midnight"])
+        existing = best_by_night.get(key)
+        if existing is None or row_ts > existing[0]:
+            best_by_night[key] = (row_ts, device_id, decoded)
+    return list(best_by_night.values())
+
+
 def extract_data(cur, client):
     ''' Query the database for data - see this file's module docstring
     and README.md for the unverified/best-effort status of every table
@@ -884,15 +930,32 @@ def extract_data(cur, client):
     session_points = 0
     stage_points = 0
     if rows is not None:
+        # First pass: decode every row, skipping malformed/unpopulated
+        # blobs (same as before). Deliberately NOT writing session/stage
+        # points yet - deduplicate_sleep_session_rows() needs every
+        # successfully-decoded row available at once to pick the
+        # single most-recently-synced one per (device, night), not one
+        # at a time as they're decoded.
+        decoded_rows = []
         for r in rows:
             row_ts = to_nanos(r[0], HUAMI_SLEEP_SESSION_TIMESTAMPS_ARE_MS)
             device_id = r[1]
             decoded = decode_sleep_session_blob(bytes(r[2]) if r[2] is not None else None)
             if decoded is None:
                 logger.warning(f"HUAMI_SLEEP_SESSION_SAMPLE: could not decode blob for a row "
-                               f"(device_id={device_id}, timestamp={r[0]}) - too short or malformed, skipping")
+                               f"(device_id={device_id}, timestamp={r[0]}) - too short, malformed, "
+                               f"or an unpopulated placeholder session - skipping")
                 continue
+            decoded_rows.append((row_ts, device_id, decoded))
 
+        deduped_count = len(decoded_rows)
+        decoded_rows = deduplicate_sleep_session_rows(decoded_rows)
+        if deduped_count != len(decoded_rows):
+            logger.info(f"HUAMI_SLEEP_SESSION_SAMPLE: {deduped_count - len(decoded_rows)} "
+                        f"duplicate same-night session row(s) discarded (kept the most "
+                        f"recently synced blob per device/night)")
+
+        for row_ts, device_id, decoded in decoded_rows:
             tags_base = device_tags(device_id)
 
             # Session-start reference point, in the blob's own (confirmed
