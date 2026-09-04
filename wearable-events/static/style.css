@@ -726,6 +726,23 @@ main {
   font-weight: 700;
 }
 
+/* Visual affordance that this specific element is tappable - the
+   existing .metric-card-tappable chevron rule only fires on elements
+   with .metric-card-label, which this inline duration number isn't
+   (it sits inside a flex row next to the tier badge, not as a
+   block-level card label), so it needs its own version rather than
+   relying on that one. Real bug found here (2026-09): tapping this
+   already worked, but nothing signaled at rest that it was tappable -
+   a real UX gap, not just cosmetic, since the person had no way to
+   discover this without already knowing to try. */
+.sleep-summary-duration.metric-card-tappable::after {
+  content: "\203a";
+  color: var(--muted);
+  margin-left: 0.35rem;
+  font-size: 0.65em;
+  font-weight: 400;
+}
+
 .sleep-summary-duration .unit {
   font-size: 1rem;
   font-weight: 400;
@@ -1318,6 +1335,72 @@ main {
 }
 
 .sleep-quality-source {
+  color: var(--muted);
+  font-size: 0.75rem;
+  margin-top: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--surface-active);
+  line-height: 1.4;
+}
+
+/* --- Sleep Duration detail page --- */
+
+.duration-tier {
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 0.15rem 0.6rem;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+.duration-tier-good {
+  color: #6ecf97;
+  background: rgba(110, 207, 151, 0.12);
+}
+
+.duration-tier-attention {
+  color: #f0c674;
+  background: rgba(240, 198, 116, 0.12);
+}
+
+.duration-range-bar {
+  position: relative;
+  height: 12px;
+  border-radius: 6px;
+  background: var(--bg);
+  margin: 0.9rem 0 0.35rem;
+  overflow: hidden;
+}
+
+.duration-range-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  background: #6ea8fe;
+  border-radius: 6px;
+}
+
+.duration-range-fill.over-goal {
+  background: #6ecf97;
+}
+
+.duration-range-goal-line {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  background: var(--muted);
+}
+
+.duration-range-labels {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.sleep-duration-source {
   color: var(--muted);
   font-size: 0.75rem;
   margin-top: 0.6rem;

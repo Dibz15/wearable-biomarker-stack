@@ -47,6 +47,7 @@ from app.influx import (
     get_sleep_stage_trend,
     get_sleep_timing_trend,
     get_sleep_vitals_series,
+    get_sleep_vitals_trend,
     get_stood_hours,
     get_today_series,
     get_today_steps,
@@ -984,6 +985,22 @@ def get_sleep_stage_trend_endpoint(period: str, end_date: str | None = None, cur
         raise HTTPException(400, f"unsupported period: {period!r} (must be one of {sorted(SLEEP_TREND_PERIODS)})")
     start, end = _period_bounds(period, end_date)
     return get_sleep_stage_trend(current_user["username"], start.date(), end.date())
+
+
+@app.get("/sleep/vitals-trend/{field}")
+def get_sleep_vitals_trend_endpoint(field: str, period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Per-night average heart_rate or sleep_respiratory_rate across a
+    W/M/Y range - the "Last 7 days" trend on the Sleep Heart Rate /
+    Sleep Respiratory Rate detail pages. Same field restriction as
+    /sleep/vitals-series, same period restriction as the other sleep
+    trend endpoints and for the same reason.
+    '''
+    if field not in ("heart_rate", "sleep_respiratory_rate"):
+        raise HTTPException(400, f"unsupported field for sleep vitals: {field!r}")
+    if period not in SLEEP_TREND_PERIODS:
+        raise HTTPException(400, f"unsupported period: {period!r} (must be one of {sorted(SLEEP_TREND_PERIODS)})")
+    start, end = _period_bounds(period, end_date)
+    return get_sleep_vitals_trend(field, current_user["username"], start.date(), end.date())
 
 
 # --- calendars ---

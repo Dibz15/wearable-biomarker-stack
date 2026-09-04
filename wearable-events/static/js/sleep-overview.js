@@ -8,6 +8,7 @@
 import { escapeHtml, api, todayISO, shiftISODate } from "./core.js";
 import { renderDateNav } from "./metric-detail.js";
 import { buildHypnogramSVG } from "./metric-charts.js";
+import { openSleepDurationDetail } from "./sleep-detail.js";
 
 const SLEEP_STAGE_ORDER = ["deep", "light", "rem", "awake"];
 const SLEEP_STAGE_LABELS = { deep: "Deep", light: "Light", rem: "REM", awake: "Awake" };
@@ -160,7 +161,7 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
       ${renderDateNav("day", anchorDate)}
       <div class="sleep-summary-card">
         <div class="sleep-summary-top">
-          <span class="sleep-summary-duration">${formatDuration(overview.duration_s)}</span>
+          <span class="sleep-summary-duration metric-card-tappable" data-detail-field="sleep-duration" role="button" tabindex="0">${formatDuration(overview.duration_s)}</span>
           <span class="sleep-summary-date">${escapeHtml(anchorDate)}</span>
         </div>
         ${hasStageData
@@ -171,6 +172,14 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
       ${renderSleepQuality(overview.sleep_quality)}
     `;
     wireSleepOverviewDateNav(anchorDate);
+    const durationTap = container.querySelector('[data-detail-field="sleep-duration"]');
+    if (durationTap) {
+      const open = () => openSleepDurationDetail(anchorDate);
+      durationTap.addEventListener("click", open);
+      durationTap.addEventListener("keydown", e => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+      });
+    }
   } catch (e) {
     container.innerHTML = `${renderDateNav("day", anchorDate)}<p class="status">Error loading sleep data: ${escapeHtml(e.message)}</p>`;
     wireSleepOverviewDateNav(anchorDate);

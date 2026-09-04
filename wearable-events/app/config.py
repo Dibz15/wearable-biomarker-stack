@@ -101,6 +101,24 @@ SLEEP_QUALITY_THRESHOLDS = {
     "older_adult": {"waso_appropriate_max_min": 30, "awakenings_appropriate_max": 2, "efficiency_appropriate_min_pct": 85, "efficiency_poor_max_pct": 75},
 }
 
+# Recommended nightly sleep duration range, by the same age bracket as
+# SLEEP_QUALITY_THRESHOLDS above (see SLEEP_QUALITY_AGE_BRACKET) - a
+# DIFFERENT NSF publication than the sleep-continuity one above
+# (Hirshkowitz et al. 2015, "National Sleep Foundation's updated sleep
+# duration recommendations: final report", Sleep Health 1(4):233-243 -
+# reaffirmed by NSF's own 10-year, 133-meta-analysis review, June
+# 2026: https://www.thensf.org/sleep-duration-recommendations/).
+# Deliberately a plain recommended range, not a multi-tier gauge with
+# "may be appropriate" sub-bands - the source itself doesn't publish
+# those finer boundaries, so a simple below/within/above framing is
+# the honest amount of precision to claim, matching this app's general
+# approach of citing exactly what the source actually states.
+SLEEP_DURATION_RECOMMENDED_HOURS = {
+    "young_adult": {"min": 7, "max": 9},
+    "adult": {"min": 7, "max": 9},
+    "older_adult": {"min": 7, "max": 8},
+}
+
 # --- Activity session detection (Activity page) ---
 # An "active minute" (steps > 0 OR raw_intensity >= this) is the
 # trigger for both Stand-hour crediting and derived activity-session

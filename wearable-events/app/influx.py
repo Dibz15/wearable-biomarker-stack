@@ -20,6 +20,7 @@ from app.config import (
     SENSOR_MEASUREMENT,
     SESSION_GAP_MINUTES,
     SESSION_MIN_DURATION_MINUTES,
+    SLEEP_DURATION_RECOMMENDED_HOURS,
     SLEEP_MEASUREMENT,
     SLEEP_QUALITY_AGE_BRACKET,
     SLEEP_QUALITY_THRESHOLDS,
@@ -1794,6 +1795,7 @@ def get_sleep_overview_for_night(user: str, wake_date: date) -> dict | None:
     quality = get_sleep_quality_indicators(
         user, start, end, session["duration_s"], stages.get("awake", 0), device=device
     )
+    duration_recommendation = get_sleep_duration_recommendation(session["duration_s"])
 
     return {
         "device": device,
@@ -1805,6 +1807,7 @@ def get_sleep_overview_for_night(user: str, wake_date: date) -> dict | None:
         "avg_heart_rate": round(hr_means[device], 1) if device in hr_means else None,
         "avg_respiratory_rate": round(resp_means[device], 1) if device in resp_means else None,
         "sleep_quality": quality,
+        "duration_recommendation": duration_recommendation,
     }
 
 
@@ -1866,6 +1869,37 @@ def get_sleep_stage_trend(user: str, start_date: date, end_date: date) -> list[d
         result.append({
             "date": wake_date.strftime("%Y-%m-%d"),
             "stages_min": stages,
+        })
+    return result
+
+
+def get_sleep_vitals_trend(field: str, user: str, start_date: date, end_date: date) -> list[dict]:
+    ''' Per-night average of `field` (heart_rate or
+    sleep_respiratory_rate) for each night waking in
+    [start_date, end_date) - the "Last 7 days" trend on the Sleep
+    Heart Rate / Sleep Respiratory Rate detail pages. Same primary-
+    device-per-night selection as get_sleep_timing_trend()/
+    get_sleep_stage_trend() (see _primary_device_session()).
+
+    Returns a chronologically-sorted list of {"date": "YYYY-MM-DD",
+    "value": float} - nights with no recorded session, OR no readings
+    of this field during that session, are simply omitted (not a null
+    entry), so callers building an average or a chart don't need to
+    filter these out themselves.
+    '''
+    by_date = _sleep_sessions_by_wake_date(user, start_date, end_date)
+    result = []
+    for wake_date in sorted(by_date):
+        sessions = by_date[wake_date]
+        if not sessions:
+            continue
+        device, session = _primary_device_session(sessions)
+        means = _device_stat_by_field(field, user, session["start_time"], session["end_time"], "mean")
+        if device not in means:
+            continue
+        result.append({
+            "date": wake_date.strftime("%Y-%m-%d"),
+            "value": round(means[device], 1),
         })
     return result
 
@@ -2273,6 +2307,41 @@ def get_sleep_quality_indicators(user: str, session_start: datetime, session_end
         "awakenings_meets_threshold": awakenings_5min <= thresholds["awakenings_appropriate_max"],
         "age_bracket": SLEEP_QUALITY_AGE_BRACKET,
         "source": "Ohayon et al. 2017, National Sleep Foundation Sleep Quality Consensus Panel (Sleep Health 3(1):6-19)",
+    }
+
+
+def get_sleep_duration_recommendation(duration_s: int) -> dict:
+    ''' Compares a night's total duration against the age-bracketed NSF-
+    recommended range (SLEEP_DURATION_RECOMMENDED_HOURS in config.py) -
+    a DIFFERENT NSF publication than get_sleep_quality_indicators()'s
+    sleep-continuity metrics (Hirshkowitz et al. 2015, not Ohayon et
+    al. 2017 - see config.py's own comment for the full citation), but
+    the same "individually cited, not a blended score" spirit: a
+    literature-backed range comparison for the Sleep Duration detail
+    page's qualitative label, not an attempt to reproduce Zepp's own
+    "Good"/"Fair" tiering.
+
+    Deliberately a simple below/within/above comparison, not a multi-
+    tier gauge - the source publishes one recommended range per age
+    bracket, not finer "may be appropriate" sub-bands, so that's the
+    honest amount of precision to claim here.
+
+    Uses the same SLEEP_QUALITY_AGE_BRACKET config as the Sleep
+    Quality panel, for one consistent age-bracket setting across the
+    whole Sleep section rather than two independently-configured ones.
+    '''
+    bracket = SLEEP_QUALITY_AGE_BRACKET
+    rec = SLEEP_DURATION_RECOMMENDED_HOURS.get(bracket, SLEEP_DURATION_RECOMMENDED_HOURS["adult"])
+    hours = round(duration_s / 3600, 1)
+    return {
+        "hours": hours,
+        "meets_recommendation": rec["min"] <= hours <= rec["max"],
+        "below": hours < rec["min"],
+        "above": hours > rec["max"],
+        "range_min_hours": rec["min"],
+        "range_max_hours": rec["max"],
+        "age_bracket": bracket,
+        "source": "Hirshkowitz et al. 2015, National Sleep Foundation (reaffirmed 2026)",
     }
 
 
