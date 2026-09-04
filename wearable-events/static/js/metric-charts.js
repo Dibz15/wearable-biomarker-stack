@@ -671,3 +671,93 @@ export function buildActivityTimeChart(canvas, series, devices, config) {
     },
   });
 }
+
+// Clinical hypnogram convention: depth increases downward (Awake at
+// top, Deep at bottom), REM placed between Light and Awake since it's
+// physiologically a "lighter" state despite being distinct from light
+// sleep. Same colors as the existing .sleep-stage-seg CSS (Today's
+// proportion bar, and the legend below this chart) - reused rather
+// than a separate palette invented just for this chart, so the same
+// stage reads as the same color everywhere in the app.
+const HYPNOGRAM_STAGE_ORDER_TOP_TO_BOTTOM = ["awake", "rem", "light", "deep"];
+const HYPNOGRAM_STAGE_COLORS = { deep: "#7c6ce8", light: "#6ea8fe", rem: "#4fd8b8", awake: "#e88a8a" };
+const HYPNOGRAM_STAGE_LABELS = { deep: "Deep", light: "Light", rem: "REM", awake: "Awake" };
+
+// A true hypnogram - sleep stage over time, one filled rectangle per
+// segment, laid out on a hand-computed SVG grid rather than a Chart.js
+// scale. Deliberately NOT built on Chart.js, after two rounds of
+// genuinely subtle Chart.js linear-scale-as-categorical-axis bugs (a
+// tick-placement mismatch, then a chart-area sizing collapse specific
+// to this testing environment) that this environment couldn't reliably
+// catch before shipping - a charting library's internal scale-fitting
+// machinery is the wrong tool for "4 fixed rows, exact proportional
+// time width per segment", which is simple enough to compute directly.
+// Every coordinate below is plain arithmetic on the input data, fully
+// verifiable with string/math assertions alone, no rendering engine
+// required to trust the result is correct.
+//
+// `segments` is the ordered {stage, start, duration_min} list
+// /sleep/hypnogram returns (see get_sleep_hypnogram_for_night() on the
+// backend). `options.width`/`options.height` size the SVG's viewBox
+// (defaults chosen to match this app's existing chart-card sizing).
+// Returns an SVG markup string, or "" for no data - the caller sets
+// this as innerHTML directly, no canvas/chart-instance involved.
+export function buildHypnogramSVG(segments, options = {}) {
+  if (!segments.length) return "";
+
+  const width = options.width || 800;
+  const height = options.height || 200;
+  const labelWidth = 46; // reserved left margin for stage row labels
+  const bottomAxisHeight = 20; // reserved bottom margin for time labels
+  const chartWidth = width - labelWidth;
+  const chartHeight = height - bottomAxisHeight;
+  const bandHeight = chartHeight / HYPNOGRAM_STAGE_ORDER_TOP_TO_BOTTOM.length;
+
+  const sessionStartMs = new Date(segments[0].start).getTime();
+  const last = segments[segments.length - 1];
+  const sessionEndMs = new Date(last.start).getTime() + last.duration_min * 60000;
+  const totalMs = Math.max(sessionEndMs - sessionStartMs, 1); // guard against a degenerate zero-length session
+
+  const rects = segments.map(seg => {
+    const startMs = new Date(seg.start).getTime();
+    const x = labelWidth + ((startMs - sessionStartMs) / totalMs) * chartWidth;
+    const w = (seg.duration_min * 60000 / totalMs) * chartWidth;
+    const bandIndex = HYPNOGRAM_STAGE_ORDER_TOP_TO_BOTTOM.indexOf(seg.stage);
+    const y = bandIndex >= 0 ? bandIndex * bandHeight : 0;
+    const color = HYPNOGRAM_STAGE_COLORS[seg.stage] || "#8a8d99";
+    return `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${w.toFixed(2)}" height="${bandHeight.toFixed(2)}" fill="${color}" />`;
+  }).join("");
+
+  const gridLines = HYPNOGRAM_STAGE_ORDER_TOP_TO_BOTTOM.map((_, i) => {
+    const y = i * bandHeight;
+    return `<line x1="${labelWidth}" y1="${y.toFixed(2)}" x2="${width}" y2="${y.toFixed(2)}" stroke="#2a2d38" stroke-width="1" />`;
+  }).join("");
+  const bottomLine = `<line x1="${labelWidth}" y1="${chartHeight.toFixed(2)}" x2="${width}" y2="${chartHeight.toFixed(2)}" stroke="#2a2d38" stroke-width="1" />`;
+
+  const yLabels = HYPNOGRAM_STAGE_ORDER_TOP_TO_BOTTOM.map((stage, i) => {
+    const y = i * bandHeight + bandHeight / 2;
+    return `<text x="${(labelWidth - 8).toFixed(2)}" y="${y.toFixed(2)}" text-anchor="end" dominant-baseline="middle" fill="#8a8d99" font-size="11">${HYPNOGRAM_STAGE_LABELS[stage]}</text>`;
+  }).join("");
+
+  // Time labels at ~4 roughly-even points across the night, not one
+  // per segment (which could be dozens) - matches the tick density
+  // the earlier Chart.js x-axis aimed for via autoSkip, just computed
+  // directly instead of relying on a library's own skip heuristic.
+  const labelCount = 4;
+  const xLabels = Array.from({ length: labelCount + 1 }, (_, i) => {
+    const frac = i / labelCount;
+    const x = labelWidth + frac * chartWidth;
+    const t = new Date(sessionStartMs + frac * totalMs);
+    const text = t.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const anchor = i === 0 ? "start" : i === labelCount ? "end" : "middle";
+    return `<text x="${x.toFixed(2)}" y="${(chartHeight + 14).toFixed(2)}" text-anchor="${anchor}" fill="#8a8d99" font-size="11">${text}</text>`;
+  }).join("");
+
+  return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" xmlns="http://www.w3.org/2000/svg" font-family="inherit">
+    ${gridLines}
+    ${bottomLine}
+    ${rects}
+    ${yLabels}
+    ${xLabels}
+  </svg>`;
+}

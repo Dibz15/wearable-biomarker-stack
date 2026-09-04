@@ -1216,14 +1216,12 @@ main {
 
 /* --- Sleep tab's objective-data overview --- */
 
-/* Many small adjacent segments (unlike the 4-segment proportion bar
-   this class is shared with) can visually blend together without a
-   seam - a subtle border keeps each segment distinguishable. */
-.sleep-hypnogram-bar .sleep-stage-seg {
-  border-right: 1px solid var(--bg);
+.sleep-hypnogram-card {
+  margin-bottom: 0.5rem;
 }
-.sleep-hypnogram-bar .sleep-stage-seg:last-child {
-  border-right: none;
+
+.sleep-hypnogram-card svg text {
+  font-family: inherit;
 }
 
 .sleep-stats-row {

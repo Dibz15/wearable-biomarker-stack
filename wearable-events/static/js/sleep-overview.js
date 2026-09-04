@@ -7,6 +7,7 @@
 // UI_DESIGN_NOTES.md's "Sleep tab" entry).
 import { escapeHtml, api, todayISO, shiftISODate } from "./core.js";
 import { renderDateNav } from "./metric-detail.js";
+import { buildHypnogramSVG } from "./metric-charts.js";
 
 const SLEEP_STAGE_ORDER = ["deep", "light", "rem", "awake"];
 const SLEEP_STAGE_LABELS = { deep: "Deep", light: "Light", rem: "REM", awake: "Awake" };
@@ -18,31 +19,11 @@ function formatDuration(totalSeconds) {
   return hr > 0 ? `${hr}<span class="unit">hr</span> ${min}<span class="unit">min</span>` : `${min}<span class="unit">min</span>`;
 }
 
-// True chronological hypnogram - each segment's width is proportional
-// to its own duration, rendered in the ORDER returned by the backend
-// (already sorted chronologically - see get_sleep_hypnogram_for_night()),
-// NOT grouped/reordered by stage type the way Today's own proportion-
-// only sleep-stage-bar is. Reuses that same .sleep-stage-seg CSS
-// (color per stage) since the visual language should match, but this
-// is a genuinely different chart: two separate "light" periods stay
-// visually separate here, matching what a real night's sleep actually
-// looked like.
-function renderHypnogram(segments) {
-  if (!segments.length) {
-    return `<p class="metric-card-empty">No stage data for this night</p>`;
-  }
-  const totalMin = segments.reduce((sum, s) => sum + s.duration_min, 0);
-  if (totalMin <= 0) {
-    return `<p class="metric-card-empty">No stage data for this night</p>`;
-  }
-  const bar = segments.map(s => {
-    const pct = (s.duration_min / totalMin) * 100;
-    const stageClass = SLEEP_STAGE_ORDER.includes(s.stage) ? s.stage : "";
-    return `<div class="sleep-stage-seg ${stageClass}" style="width:${pct}%"></div>`;
-  }).join("");
-
+// Legend beneath the hypnogram - same per-stage total-minutes
+// breakdown as before, still useful alongside the real hypnogram.
+function renderHypnogramLegend(segments) {
   const presentStages = SLEEP_STAGE_ORDER.filter(stage => segments.some(s => s.stage === stage));
-  const legend = presentStages.map(stage => {
+  return presentStages.map(stage => {
     const stageMin = segments.filter(s => s.stage === stage).reduce((sum, s) => sum + s.duration_min, 0);
     return `
       <span class="sleep-stage-legend-item">
@@ -51,11 +32,6 @@ function renderHypnogram(segments) {
       </span>
     `;
   }).join("");
-
-  return `
-    <div class="sleep-stage-bar sleep-hypnogram-bar">${bar}</div>
-    <div class="sleep-stage-legend">${legend}</div>
-  `;
 }
 
 function renderQualityMetricRow(label, valueText, meetsThreshold, thresholdText, notMetLabel) {
@@ -178,6 +154,8 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
       return;
     }
 
+    const hasStageData = hypnogram.length > 0;
+
     container.innerHTML = `
       ${renderDateNav("day", anchorDate)}
       <div class="sleep-summary-card">
@@ -185,7 +163,9 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
           <span class="sleep-summary-duration">${formatDuration(overview.duration_s)}</span>
           <span class="sleep-summary-date">${escapeHtml(anchorDate)}</span>
         </div>
-        ${renderHypnogram(hypnogram)}
+        ${hasStageData
+          ? `<div class="sleep-hypnogram-card">${buildHypnogramSVG(hypnogram, { width: 800, height: 190 })}</div><div class="sleep-stage-legend">${renderHypnogramLegend(hypnogram)}</div>`
+          : `<p class="metric-card-empty">No stage data for this night</p>`}
       </div>
       ${renderSleepStatsRow(overview)}
       ${renderSleepQuality(overview.sleep_quality)}
