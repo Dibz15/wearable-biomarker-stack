@@ -31,12 +31,15 @@ from app.influx import (
     find_sleep_entries_in_range,
     find_sleep_entry_by_id,
     get_baseline_comparison,
+    get_combined_activity_sessions,
     get_manual_readings,
     get_nightly_baseline_comparison,
     get_nightly_differential_series,
     get_period_range_series,
     get_rolling_mean_series,
+    get_sitting_minutes,
     get_sleep_stage_breakdown,
+    get_stood_hours,
     get_today_series,
     get_today_steps,
     get_today_vitals,
@@ -712,6 +715,42 @@ def get_vitals_manual_readings(field: str, period: str, end_date: str | None = N
 
     start, end = _period_bounds(period, end_date)
     return get_manual_readings(field, current_user["username"], start, end)
+
+
+# --- activity page ---
+
+@app.get("/activity/sessions")
+def get_activity_sessions_endpoint(date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Combined activity session list for one day (both automatic
+    sessions derived from raw per-minute data, and pre-computed
+    workout entries from BASE_ACTIVITY_SUMMARY) - the Activity page's
+    session list. `date` defaults to today, same convention as /today.
+    '''
+    parsed_date = _parse_optional_date(date)
+    return get_combined_activity_sessions(current_user["username"], for_date=parsed_date)
+
+
+@app.get("/activity/sitting-minutes")
+def get_sitting_minutes_endpoint(date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Cumulative "sitting" minutes per device for one day (low-
+    intensity minutes, excluding sleep/not-worn/charging - see
+    get_sitting_minutes's own docstring for the full reasoning).
+    `date` defaults to today, same convention as /today.
+    '''
+    parsed_date = _parse_optional_date(date)
+    return get_sitting_minutes(current_user["username"], for_date=parsed_date)
+
+
+@app.get("/activity/stood-hours")
+def get_stood_hours_endpoint(date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Count of hours today where activity intensity crossed the
+    confirmed Stand threshold at some point, per device - see
+    get_stood_hours's own docstring for the full reasoning (including
+    why this buckets by local hour, not UTC). `date` defaults to
+    today, same convention as /today.
+    '''
+    parsed_date = _parse_optional_date(date)
+    return get_stood_hours(current_user["username"], for_date=parsed_date)
 
 
 # --- sleep ---

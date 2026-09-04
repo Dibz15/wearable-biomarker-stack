@@ -159,6 +159,17 @@ HUAMI_ACTIVITY_TIMESTAMPS_ARE_MS = os.getenv("HUAMI_ACTIVITY_TIMESTAMPS_ARE_MS",
 # verification, not a single assumption, is what actually holds up here.
 HUAMI_SLEEP_SESSION_TIMESTAMPS_ARE_MS = os.getenv("HUAMI_SLEEP_SESSION_TIMESTAMPS_ARE_MS", "Y") == "Y"
 
+# BASE_ACTIVITY_SUMMARY is a device-agnostic Gadgetbridge-native table
+# (no HUAMI_/XIAOMI_/etc. prefix, unlike every table above), storing
+# discrete workout/activity entries rather than a continuous per-minute
+# stream. Its START_TIME/END_TIME scale was classified as milliseconds
+# via scripts/check_table_usage.py against real data - but based on
+# just the ONE row that existed at the time (see
+# parser/activefit/FIELD_RESEARCH.md's "Workout/Activity summaries"
+# entry), not the same exhaustive confirmation the flags above have.
+# Worth re-checking once more real rows accumulate.
+BASE_ACTIVITY_SUMMARY_TIMESTAMPS_ARE_MS = os.getenv("BASE_ACTIVITY_SUMMARY_TIMESTAMPS_ARE_MS", "Y") == "Y"
+
 # CONFIRMED directly from Gadgetbridge's own source
 # (HuamiSleepSessionSampleProvider.java, SleepStage.getType() docstring
 # and asActivityKind()) - not inferred, not guessed. See
@@ -284,6 +295,61 @@ def compute_query_start_bound(checkpoint_ns, now_seconds, fallback_bound_seconds
         )
 
     return bound_scaled
+
+
+def extract_base_activity_summary_rows(rows, device_tags) -> list[dict]:
+    ''' Turns raw BASE_ACTIVITY_SUMMARY rows (START_TIME, END_TIME,
+    DEVICE_ID, NAME, ACTIVITY_KIND - in that column order, matching the
+    SELECT in extract_data()) into the same {"timestamp", "fields",
+    "tags"} dict shape every other section builds for write_results().
+
+    `device_tags` is the same per-run closure extract_data() builds via
+    device_tags_factory() - passed in explicitly rather than assumed
+    available, since this function lives outside extract_data()'s own
+    scope and has no other way to reach it.
+
+    Pulled out as its own function (rather than inlined like most other
+    sections) specifically so it's independently testable against
+    hand-built rows, without needing to mock the whole extract_data()
+    call chain - matching the same reasoning compute_query_start_bound()
+    was already split out for.
+
+    NAME is nullable in the schema - "Unset" for a missing value,
+    matching the exact same sentinel device_tags() already uses for
+    DEVICE.ALIAS (see parser/common/devices.py), not a new convention
+    invented just for this table. ACTIVITY_KIND here is NOT assumed to
+    share HUAMI_EXTENDED_ACTIVITY_SAMPLE's RAW_KIND code space (a
+    different table, no confirmation either way) - kept as its own
+    separate raw tag (activity_kind_summary), not run through
+    HUAMI_ACTIVITY_KIND_MAP.
+
+    Rows with a missing END_TIME (an in-progress/unfinished workout, or
+    a malformed row) are skipped with a warning, not written with a
+    missing duration_s - an InfluxDB point needs at least one field,
+    and a start/stop-time feature can't meaningfully show an entry with
+    no stop time anyway.
+    '''
+    results = []
+    for r in rows:
+        start_time, end_time, device_id, name, activity_kind = r[0], r[1], r[2], r[3], r[4]
+        if end_time is None:
+            logger.warning(f"BASE_ACTIVITY_SUMMARY: row with no END_TIME "
+                           f"(device_id={device_id}, start_time={start_time}) - skipping")
+            continue
+        row_ts = to_nanos(start_time, BASE_ACTIVITY_SUMMARY_TIMESTAMPS_ARE_MS)
+        unit_divisor = 1000 if BASE_ACTIVITY_SUMMARY_TIMESTAMPS_ARE_MS else 1
+        duration_s = (end_time - start_time) / unit_divisor
+        results.append({
+            "timestamp": row_ts,
+            "fields": {"duration_s": duration_s},
+            "tags": {
+                **device_tags(device_id),
+                "name": "Unset" if name is None else name,
+                "activity_kind_summary": "unknown" if activity_kind is None else activity_kind,
+                "sample_type": "activity_summary",
+            }
+        })
+    return results
 
 
 def decode_sleep_session_blob(data: bytes):
@@ -457,6 +523,9 @@ def extract_data(cur, client):
     sleep_session_query_start_bound_scaled = compute_query_start_bound(
         checkpoint_ns, now_seconds, fallback_bound_seconds, HUAMI_SLEEP_SESSION_TIMESTAMPS_ARE_MS, "sleep_session"
     )
+    base_activity_summary_query_start_bound_scaled = compute_query_start_bound(
+        checkpoint_ns, now_seconds, fallback_bound_seconds, BASE_ACTIVITY_SUMMARY_TIMESTAMPS_ARE_MS, "base_activity_summary"
+    )
 
     devices = fetch_devices(cur)
     if devices is None:
@@ -625,13 +694,13 @@ def extract_data(cur, client):
         section_counts["manual_heart_rate"] = len(rows)
 
     # --- Stress. CONFIRMED table/columns, including TYPE_NUM - captured
-    # as a tag rather than decoded, since its exact encoding isn't
-    # confirmed (Gadgetbridge's Zepp OS feature list documents both
-    # "automatic and manual" stress measurements, so TYPE_NUM is
-    # presumed to distinguish those, but the 0/1-or-other mapping isn't
-    # verified). Keeping it raw as a tag means it can still be filtered
-    # on in Grafana once its meaning is confirmed, without needing a
-    # parser change to retroactively recover it.
+    # as a tag (still raw, not decoded into a friendlier value at parse
+    # time) so it stays filterable in Grafana without a parser change.
+    # Meaning CONFIRMED via a deliberate cross-check (see
+    # FIELD_RESEARCH.md's stress_type_num entry): three manual stress
+    # readings taken in Zepp at known timestamps all showed
+    # stress_type_num="0" when matched against this data.
+    # stress_type_num: 0 = manual, 1 = automatic.
     #
     # TYPE_NUM is NULL for some rows (observed: the earliest couple
     # hours of a real export - likely an initial historical-backfill
@@ -670,8 +739,10 @@ def extract_data(cur, client):
         section_counts["stress"] = len(rows)
 
     # --- SpO2. CONFIRMED table/columns, including TYPE_NUM (same
-    # automatic-vs-manual caveat, and same NULL-vs-absent-tag
-    # normalization, as HUAMI_STRESS_SAMPLE.TYPE_NUM above). ---
+    # NULL-vs-absent-tag normalization as HUAMI_STRESS_SAMPLE.TYPE_NUM
+    # above). spo2_type_num meaning CONFIRMED independently (see
+    # FIELD_RESEARCH.md), same convention as stress_type_num:
+    # 0 = manual, 1 = automatic. ---
     rows = run_query(cur, "HUAMI_SPO2_SAMPLE",
         "SELECT TIMESTAMP, DEVICE_ID, TYPE_NUM, SPO2 FROM HUAMI_SPO2_SAMPLE "
         f"WHERE TIMESTAMP >= {query_start_bound_scaled} ORDER BY TIMESTAMP ASC")
@@ -734,6 +805,39 @@ def extract_data(cur, client):
             })
             observed.note(r[1], row_ts)
         section_counts["pai"] = len(rows)
+
+    # --- Pre-computed activity summaries (deliberately-started workouts,
+    # not the continuous per-minute stream above). BASE_ACTIVITY_SUMMARY
+    # is a device-agnostic Gadgetbridge-native table (no HUAMI_/XIAOMI_
+    # prefix), confirmed present via scripts/check_table_usage.py against
+    # real data - genuinely sparse in practice (1 row observed against
+    # 2798 rows in the per-minute activity table over the same period),
+    # since it's populated only for explicitly-started workout sessions,
+    # not ambient daily movement (see parser/activefit/FIELD_RESEARCH.md's
+    # "Workout/Activity summaries" entry for the full reasoning behind
+    # that conclusion).
+    #
+    # Deliberately NOT extracting SUMMARY_DATA/RAW_SUMMARY_DATA (the
+    # richer per-workout breakdown - HR zones, laps, etc.) here - their
+    # actual content has never been inspected against a real row, so
+    # writing extraction code against a guessed shape risks silently
+    # extracting nothing or the wrong thing. NAME/START_TIME/END_TIME/
+    # ACTIVITY_KIND are all simple, directly-typed columns needing no
+    # such guessing, and are all this feature (the Activity page's
+    # session list) actually needs - average heart rate is computed
+    # downstream by wearable-events from the already-extracted per-
+    # minute heart_rate field over each entry's [start, end) window,
+    # not duplicated here.
+    rows = run_query(cur, "BASE_ACTIVITY_SUMMARY",
+        "SELECT START_TIME, END_TIME, DEVICE_ID, NAME, ACTIVITY_KIND "
+        "FROM BASE_ACTIVITY_SUMMARY "
+        f"WHERE START_TIME >= {base_activity_summary_query_start_bound_scaled} ORDER BY START_TIME ASC")
+    if rows is not None:
+        new_results = extract_base_activity_summary_rows(rows, device_tags)
+        results.extend(new_results)
+        for r in rows:
+            observed.note(r[2], to_nanos(r[0], BASE_ACTIVITY_SUMMARY_TIMESTAMPS_ARE_MS))
+        section_counts["base_activity_summary"] = len(rows)
 
     # --- Sleep sessions, decoded from the BLOB. CONFIRMED byte layout,
     # ported directly from Gadgetbridge's own HuamiSleepSessionSampleProvider.java

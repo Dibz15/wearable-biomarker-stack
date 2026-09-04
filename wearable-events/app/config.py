@@ -45,6 +45,28 @@ SYNC_INTERVAL_MINUTES = int(os.getenv("SYNC_INTERVAL_MINUTES", "15"))
 # resolution - excludes naps per spec §6.
 MIN_SLEEP_SESSION_SECONDS = int(os.getenv("MIN_SLEEP_SESSION_SECONDS", str(3 * 3600)))
 
+# --- Activity session detection (Activity page) ---
+# An "active minute" (steps > 0 OR raw_intensity >= this) is the
+# trigger for both Stand-hour crediting and derived activity-session
+# detection. Confirmed empirically against the watch's own real
+# hourly Stand display (see parser/activefit/FIELD_RESEARCH.md) -
+# not a guess, though the person's own words on it were "the best I
+# can do from one day's data" (the watch only shows one day at a
+# time), so this could still be refined with more comparison data
+# later.
+STAND_INTENSITY_THRESHOLD = int(os.getenv("STAND_INTENSITY_THRESHOLD", "50"))
+
+# How much of a gap (in inactive minutes) is tolerated within one
+# session before it's considered ended, and how short a session is
+# short enough to discard as noise (a single stray step, a brief arm
+# movement) rather than a real activity bout. Both are OUR OWN
+# reasonable starting choices, not a replication of Gadgetbridge's own
+# StepAnalysis algorithm (its exact source wasn't available to pull
+# directly) - worth revisiting once there's enough real data to
+# compare our own session list against Gadgetbridge's or the watch's.
+SESSION_GAP_MINUTES = int(os.getenv("SESSION_GAP_MINUTES", "5"))
+SESSION_MIN_DURATION_MINUTES = int(os.getenv("SESSION_MIN_DURATION_MINUTES", "3"))
+
 # --- Server ---
 PORT = int(os.getenv("PORT", "8080"))
 
