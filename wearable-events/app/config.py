@@ -45,6 +45,17 @@ SYNC_INTERVAL_MINUTES = int(os.getenv("SYNC_INTERVAL_MINUTES", "15"))
 # resolution - excludes naps per spec §6.
 MIN_SLEEP_SESSION_SECONDS = int(os.getenv("MIN_SLEEP_SESSION_SECONDS", str(3 * 3600)))
 
+# Upper sanity bound - added 2026-09 after a confirmed real bug: a
+# corrupted sleep_session_duration_s value (~1092 hours, reported
+# directly against real data) was being treated as a genuine
+# completed session since it trivially cleared MIN_SLEEP_SESSION_SECONDS
+# (no upper bound existed to catch it). No real sleep session is ever
+# this long regardless of root cause - 24 hours is a deliberately
+# generous ceiling (well past even an extreme outlier night), not a
+# tight one, so this only ever filters out data that's obviously
+# corrupted rather than risking hiding a genuine unusual night.
+MAX_SLEEP_SESSION_SECONDS = int(os.getenv("MAX_SLEEP_SESSION_SECONDS", str(24 * 3600)))
+
 # --- Activity session detection (Activity page) ---
 # An "active minute" (steps > 0 OR raw_intensity >= this) is the
 # trigger for both Stand-hour crediting and derived activity-session

@@ -410,7 +410,11 @@ def decode_sleep_session_blob(data: bytes):
     fixed-size header+stage-count (0x55 bytes) - some other malformed/
     truncated/future-format blob, logged and skipped by the caller via
     the same graceful-degradation pattern as everything else in this
-    file, rather than raising and taking down the whole sync run.
+    file, rather than raising and taking down the whole sync run. Also
+    None if sleepStart/sleepEnd are left at the 0xFFFF "unset" firmware
+    sentinel (see the check right after they're decoded, below) - a
+    confirmed real pattern for backfilled placeholder sessions from
+    before a device was paired, not a real night's sleep.
     '''
     if data is None or len(data) < 0x55:
         return None
@@ -430,6 +434,30 @@ def decode_sleep_session_blob(data: bytes):
     sleep_end_min = u16(0x0c)
     avg_hr = u8(0x15)
     score = u8(0x16)
+
+    # Real bug found and fixed here (2026-09), confirmed against real
+    # data, not speculative: a backfilled/placeholder session (from
+    # before the watch was actually paired - Gadgetbridge or the
+    # watch's own firmware appears to write one when there's no real
+    # data for a period, though the exact mechanism isn't confirmed)
+    # left sleepStart/sleepEnd at their unpopulated firmware default,
+    # 0xFFFF (65535) - the maximum value a uint16 can hold, a classic
+    # "unset" sentinel. Naively computing a duration from that (as this
+    # function used to) produces (65535 - 0) * 60 = 3,932,100 seconds -
+    # confirmed to the exact second against a real reported value (was
+    # displaying as "1092hr 15min" on the dashboard, appearing
+    # identically on two different dates before the watch was owned).
+    # Checked against EITHER field, not just sleep_end_min - defensive
+    # against the same sentinel appearing on sleep_start_min instead in
+    # some other unpopulated-session variant, not just the one pattern
+    # actually observed.
+    UINT16_UNSET_SENTINEL = 0xFFFF
+    if sleep_start_min == UINT16_UNSET_SENTINEL or sleep_end_min == UINT16_UNSET_SENTINEL:
+        logger.warning(f"Sleep session blob has an unpopulated sleepStart/sleepEnd "
+                       f"(0xFFFF sentinel) - likely a backfilled placeholder for a period "
+                       f"before the device was paired, not a real session. Skipping.")
+        return None
+
     num_stages = u8(0x54)
 
     # Defensive cap: the blob only has room for 100 stage slots (500

@@ -459,6 +459,7 @@ def get_today(date: str | None = None, current_user: dict = Depends(get_current_
             username,
             session["start_time"],
             session["start_time"] + timedelta(seconds=session["duration_s"]),
+            device=session.get("device"),
         )
         sleep = {
             "sleep_date": session["sleep_date"],

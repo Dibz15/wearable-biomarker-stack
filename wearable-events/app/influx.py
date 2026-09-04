@@ -15,6 +15,7 @@ from app.config import (
     INFLUX_ORG,
     INFLUX_TOKEN,
     INFLUX_URL,
+    MAX_SLEEP_SESSION_SECONDS,
     MIN_SLEEP_SESSION_SECONDS,
     SENSOR_MEASUREMENT,
     SESSION_GAP_MINUTES,
@@ -389,6 +390,7 @@ def find_last_completed_sleep_session(user: str, lookback_days: int = 7, before:
       |> filter(fn: (r) => r.user == "{user}")
       |> filter(fn: (r) => r._field == "sleep_session_duration_s")
       |> filter(fn: (r) => r._value >= {MIN_SLEEP_SESSION_SECONDS})
+      |> filter(fn: (r) => r._value <= {MAX_SLEEP_SESSION_SECONDS})
       |> sort(columns: ["_time"], desc: true)
       |> limit(n: 1)
     '''
@@ -403,6 +405,7 @@ def find_last_completed_sleep_session(user: str, lookback_days: int = 7, before:
         for record in table.records:
             start_time = record.get_time()
             duration_s = record.get_value()
+            device = record.values.get("device")
             # Resolve the calendar date in the user's own local
             # timezone, not UTC's - a session starting shortly after
             # local midnight (any timezone ahead of UTC) can otherwise
@@ -426,6 +429,19 @@ def find_last_completed_sleep_session(user: str, lookback_days: int = 7, before:
                 # would be easy to introduce unnoticed later.
                 "start_time": local_start_time,
                 "duration_s": int(duration_s),
+                # Which device this session's sleep_session_duration_s
+                # point came from - needed by get_sleep_stage_breakdown
+                # to scope its own query to the SAME device, now that
+                # more than one device can have sleep-stage data for
+                # overlapping nights (the ring's historical data
+                # persists in InfluxDB even after being unbound from
+                # Gadgetbridge - see parser/activefit/FIELD_RESEARCH.md).
+                # Real bug found and fixed here (2026-09): without this,
+                # get_sleep_stage_breakdown had no way to avoid summing
+                # BOTH devices' stage minutes together for the same
+                # night, confirmed against real reported values showing
+                # stage sums roughly 2-3x a plausible night's duration.
+                "device": device,
             }
 
     logger.debug(
@@ -1596,6 +1612,7 @@ def find_sleep_sessions_in_range(user: str, start: datetime, end: datetime) -> l
       |> filter(fn: (r) => r.user == "{user}")
       |> filter(fn: (r) => r._field == "sleep_session_duration_s")
       |> filter(fn: (r) => r._value >= {MIN_SLEEP_SESSION_SECONDS})
+      |> filter(fn: (r) => r._value <= {MAX_SLEEP_SESSION_SECONDS})
     '''
 
     try:
@@ -1838,7 +1855,7 @@ def get_today_steps(user: str, for_date: date | None = None) -> dict[str, int]:
     return result
 
 
-def get_sleep_stage_breakdown(user: str, session_start: datetime, session_end: datetime) -> dict[str, int]:
+def get_sleep_stage_breakdown(user: str, session_start: datetime, session_end: datetime, device: str | None = None) -> dict[str, int]:
     ''' Minutes spent in each sleep stage (light/deep/rem/awake) for one
     specific sleep session, identified by its own [start, end) window -
     NOT a lookback query, the caller (typically find_last_completed_
@@ -1847,17 +1864,29 @@ def get_sleep_stage_breakdown(user: str, session_start: datetime, session_end: d
     Sums sleep_stage_duration_s (already extracted per stage segment,
     see parser/activefit and parser/colmi's sleep stage extraction)
     grouped by the sleep_stage tag, converted to whole minutes.
-    Deliberately does NOT filter by device - a single sleep session
-    belongs to one device by construction (whichever one was worn that
-    night), so grouping by sleep_stage alone is sufficient and avoids
-    an empty result if the device tag's exact string ever shifts
-    between sync and query (e.g. a device rename in Gadgetbridge).
+
+    `device`, if given, filters to that device's own stage data only -
+    added (2026-09) after a confirmed real bug: this function used to
+    NOT filter by device at all, on the assumption that "a single
+    sleep session belongs to one device by construction". That
+    assumption breaks once more than one device has sleep-stage data
+    for the same or overlapping night (e.g. a ring's historical data
+    persisting in InfluxDB after being unbound from Gadgetbridge,
+    alongside a watch that's since taken over) - without this filter,
+    the query silently SUMMED every device's stage minutes together
+    for the same calendar window, confirmed against real reported
+    values showing stage-minute sums roughly 2-3x a plausible night's
+    total. `device` is optional (not required) so any caller that
+    genuinely doesn't have one yet still gets a result, just without
+    this protection - every current caller does have one, though.
     '''
     client = get_client()
     query_api = client.query_api()
 
     start_iso = session_start.astimezone(timezone.utc).isoformat()
     stop_iso = session_end.astimezone(timezone.utc).isoformat()
+
+    device_filter = f'|> filter(fn: (r) => r.device == "{device}")\n      ' if device else ""
 
     flux = f'''
     from(bucket: "{INFLUX_BUCKET}")
@@ -1866,7 +1895,7 @@ def get_sleep_stage_breakdown(user: str, session_start: datetime, session_end: d
       |> filter(fn: (r) => r.user == "{user}")
       |> filter(fn: (r) => r.sample_type == "sleep_stage")
       |> filter(fn: (r) => r._field == "sleep_stage_duration_s")
-      |> group(columns: ["sleep_stage"])
+      {device_filter}|> group(columns: ["sleep_stage"])
       |> sum()
     '''
 
