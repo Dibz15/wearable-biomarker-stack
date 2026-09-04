@@ -1,4 +1,4 @@
-import { isoToDate, formatNum } from "./core.js";
+import { isoToDate, formatNum, escapeHtml } from "./core.js";
 
 // Distinct colors per device dataset on the chart - cycles if there
 // are ever more devices than colors defined here, rather than erroring.
@@ -293,6 +293,28 @@ export function renderBandLegend(bands) {
   return `<div class="band-legend">${items}</div>`;
 }
 
+// A separate function from renderBandLegend above, not a shared one
+// with a mode flag - that one is genuinely specific to temperature's
+// SYMMETRIC delta-from-baseline bands (hardcodes the +- symbol and a
+// degree unit baked into its own range formatting). Stress's tiers are
+// a plain ASCENDING range starting at 0 (0-39/40-59/60-79/80-100, no
+// +-, no fixed unit), a different enough shape that forcing one
+// function to handle both would need more branching than just writing
+// the second one directly.
+export function renderTierLegend(bands, unit = "") {
+  const items = bands.map((band, i) => {
+    const rangeStart = i === 0 ? 0 : bands[i - 1].max + 1;
+    const rangeText = `${rangeStart}\u2013${band.max}${unit}`;
+    return `
+      <div class="band-legend-item">
+        <span class="band-swatch" style="background: ${band.color}"></span>
+        <span>${escapeHtml(band.label)} (${rangeText})</span>
+      </div>
+    `;
+  }).join("");
+  return `<div class="band-legend">${items}</div>`;
+}
+
 export function buildDifferentialChart(canvas, series, devices, config) {
   // Deliberately colored by SEVERITY BAND, not by device the way every
   // other chart in this app colors its bars - the whole point of this
@@ -360,6 +382,140 @@ export function buildDifferentialChart(canvas, series, devices, config) {
               const deltaVal = formatNum(p.delta, config.decimals);
               const deltaText = deltaVal > 0 ? `+${deltaVal}` : `${deltaVal}`;
               return `${item.dataset.label}: ${deltaText}${config.unit} (${band.label})`;
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
+// Which band a raw VALUE falls into, by ascending threshold - unlike
+// bandForDelta (which bands by absolute magnitude of a delta from a
+// baseline), this bands a plain reading against fixed absolute
+// thresholds starting from 0 (Zepp's own stress tiers: 0-39/40-59/
+// 60-79/80-100), so it compares the value directly, not its distance
+// from anything.
+function bandForValue(value, bands) {
+  for (const band of bands) {
+    if (value <= band.max) return band;
+  }
+  return bands[bands.length - 1];
+}
+
+// Per-reading bars (not hourly aggregates like buildRangeBarChart, nor
+// a continuous line like buildLineChart) - each bar is one actual
+// reading, colored by which fixed tier its own value falls into. Built
+// for Stress's day view specifically: readings arrive roughly every 5
+// minutes (automatic) plus occasional manual ones, and Zepp's own
+// chart colors each individual reading by tier rather than aggregating
+// or connecting them with a line - collapsing that down to hourly
+// min/max bars (like SpO2's chart) would lose the exact thing this
+// chart exists to show.
+//
+// Deliberately a CATEGORY x-axis (bars evenly spaced by reading INDEX,
+// like buildRangeBarChart), not a true time-linear one - consistent
+// with the rest of this app's bar charts, and simpler/more robust than
+// getting Chart.js's linear-axis bar-width handling exactly right for
+// a mostly-but-not-perfectly-regular 5-minute cadence. This does mean
+// a large gap (e.g. overnight) doesn't visually take up more x-axis
+// space than a run of closely-spaced readings - a reasonable trade,
+// not a bug, given how this app's other bar charts already work.
+export function buildTieredBarChart(canvas, series, devices, config) {
+  const allTimes = [...new Set(devices.flatMap(d => series[d].map(p => p.t)))].sort();
+  const labels = allTimes.map(iso => new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }));
+
+  const datasets = devices.map(device => {
+    const byTime = Object.fromEntries(series[device].map(p => [p.t, p.v]));
+    const values = allTimes.map(t => (t in byTime ? byTime[t] : null));
+    return {
+      label: device,
+      data: values,
+      backgroundColor: values.map(v => (v === null ? "transparent" : bandForValue(v, config.bands).color)),
+      borderRadius: 2,
+    };
+  });
+
+  return new Chart(canvas, {
+    type: "bar",
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      animation: false,
+      scales: {
+        x: {
+          ticks: { color: "#8a8d99", maxRotation: 0, autoSkip: true, autoSkipPadding: 16 },
+          grid: { display: false },
+        },
+        y: {
+          min: 0,
+          max: 100,
+          ticks: { color: "#8a8d99" },
+          grid: { color: "#2a2d38" },
+        },
+      },
+      plugins: {
+        legend: { display: devices.length > 1, labels: { color: "#e8e9ed" } },
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const v = item.parsed.y;
+              if (v === null || v === undefined) return "";
+              const band = bandForValue(v, config.bands);
+              return `${item.dataset.label}: ${formatNum(v, config.decimals)}${config.unit} (${band.label})`;
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
+// Time-in-tier breakdown for ONE device's day - Zepp's own "Daily
+// Stress" pie chart. Takes that device's raw readings directly (not a
+// pre-computed breakdown) and does the tier-counting itself, matching
+// how every other chart function here takes raw series and does its
+// own necessary computation rather than expecting the caller to shape
+// it first. A pie inherently can't combine multiple devices into one
+// chart, so this builds exactly one device's pie - the caller loops
+// over devices and calls this once per device if there's more than one.
+//
+// This is genuinely "% of READINGS in each tier", not "% of TIME" -
+// readings arrive roughly every 5 minutes when automatic, so the two
+// are close but not identical (an unusually large gap would be counted
+// as zero time in this metric, even though the wearer's ACTUAL stress
+// state presumably didn't just vanish during it). Simpler and more
+// honest than pretending to reconstruct true elapsed time from
+// irregular samples when Zepp's own exact method isn't confirmed.
+export function buildTierPieChart(canvas, points, config) {
+  const counts = config.bands.map(() => 0);
+  for (const p of points) {
+    const band = bandForValue(p.v, config.bands);
+    counts[config.bands.indexOf(band)]++;
+  }
+  const total = points.length || 1;
+
+  return new Chart(canvas, {
+    type: "pie",
+    data: {
+      labels: config.bands.map(b => b.label),
+      datasets: [{
+        data: counts,
+        backgroundColor: config.bands.map(b => b.color),
+        borderColor: "#1a1c24",
+        borderWidth: 2,
+      }],
+    },
+    options: {
+      responsive: true,
+      animation: false,
+      plugins: {
+        legend: { display: false }, // the shared band legend beneath already explains the colors
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const pct = Math.round((item.parsed / total) * 100);
+              return `${item.label}: ${pct}%`;
             },
           },
         },

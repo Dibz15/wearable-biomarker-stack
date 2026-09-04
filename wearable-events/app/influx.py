@@ -349,7 +349,7 @@ def delete_sleep_entry(user: str, entry_id: str):
     delete_api.delete("1970-01-01T00:00:00Z", "2100-01-01T00:00:00Z", predicate, bucket=INFLUX_BUCKET, org=INFLUX_ORG)
 
 
-def find_last_completed_sleep_session(user: str, lookback_days: int = 7) -> dict | None:
+def find_last_completed_sleep_session(user: str, lookback_days: int = 7, before: datetime | None = None) -> dict | None:
     ''' Query the ring parser's sensor measurement for the most recent
     completed sleep session (has a wakeup time, i.e. duration_s field
     present) belonging to `user`, at least MIN_SLEEP_SESSION_SECONDS long.
@@ -357,6 +357,12 @@ def find_last_completed_sleep_session(user: str, lookback_days: int = 7) -> dict
     `user` must match the GADGETBRIDGE_USER value the ring parser tags
     that person's sensor data with - otherwise this will correctly find
     nothing, since the two are joined only by this shared tag value.
+
+    `before`, if given, shifts the whole lookback window to end there
+    instead of now - what the Today tab's date navigation uses to show
+    "the sleep session that had most recently completed as of that day"
+    rather than always today's actual most-recent session, regardless
+    of which day is being viewed.
 
     Returns {"sleep_date": "YYYY-MM-DD", "start_time": datetime,
     "duration_s": int} or None if nothing qualifying was found - in
@@ -366,9 +372,14 @@ def find_last_completed_sleep_session(user: str, lookback_days: int = 7) -> dict
     client = get_client()
     query_api = client.query_api()
 
+    range_args = f"start: -{lookback_days}d" if before is None else (
+        f'start: {(before - timedelta(days=lookback_days)).astimezone(timezone.utc).isoformat()}, '
+        f'stop: {before.astimezone(timezone.utc).isoformat()}'
+    )
+
     flux = f'''
     from(bucket: "{INFLUX_BUCKET}")
-      |> range(start: -{lookback_days}d)
+      |> range({range_args})
       |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
       |> filter(fn: (r) => r.sample_type == "sleep_session")
       |> filter(fn: (r) => r.user == "{user}")
@@ -555,12 +566,15 @@ def _device_stat_by_field(field: str, user: str, start: datetime, end: datetime,
     return result
 
 
-def get_today_vitals(user: str) -> dict[str, dict]:
+def get_today_vitals(user: str, for_date: date | None = None) -> dict[str, dict]:
     ''' Today's (local calendar day) vitals summary, per device, for
     every field both parsers share a common name for (see the shared-
     field-name design used throughout parser/activefit - this is
     exactly what makes a single query work unmodified across whichever
     devices happen to be reporting, ring or watch or both).
+
+    `for_date` defaults to today when omitted - what the Today tab's
+    date navigation uses to view a past day's summary instead.
 
     Returns:
         {
@@ -576,7 +590,7 @@ def get_today_vitals(user: str) -> dict[str, dict]:
     data yet" (e.g. before the first sync of the day) rather than a
     failure.
     '''
-    start, end = local_today_bounds()
+    start, end = local_today_bounds(for_date)
 
     # (field, which stats actually make sense for it)
     field_stats = {
@@ -655,6 +669,65 @@ def _grouped_series(field: str, user: str, start: datetime, end: datetime) -> di
         tables = query_api.query(flux)
     except Exception as e:
         logger.warning(f"Failed to query {field} series for user={user}: {e}")
+        return {}
+
+    result: dict[str, list[dict]] = {}
+    for table in tables:
+        for record in table.records:
+            device = record.values.get("device")
+            value = record.get_value()
+            if device is None or value is None:
+                continue
+            result.setdefault(device, []).append({
+                "t": record.get_time().isoformat(),
+                "v": value,
+            })
+    return result
+
+
+def get_manual_readings(field: str, user: str, start: datetime, end: datetime) -> dict[str, list[dict]]:
+    ''' Per-device manually-triggered readings only (as opposed to the
+    device's own automatic periodic sampling) for one field, over an
+    arbitrary [start, end) window - what Zepp's own Stress page calls
+    its "Manual Data" list, and (person-confirmed, not assumed) also
+    applicable to SpO2 given the identical TYPE_NUM convention on both
+    fields.
+
+    Relies on `{field}_type_num` being a TAG (not a field) with value
+    "0" meaning manual - confirmed for both stress and spo2 via a
+    deliberate cross-check (see parser/activefit/FIELD_RESEARCH.md),
+    not inferred from Gadgetbridge's feature-list wording alone. Only
+    ever call this for a field actually confirmed to have this tag -
+    MANUAL_TYPE_NUM_FIELDS in main.py is the enforced allowlist: an
+    unsupported field would just silently return {} here (the tag
+    filter simply never matches anything), which is a much less
+    obvious failure than the 400 the allowlist gives instead.
+
+    Returns {"<device>": [{"t": <ISO8601>, "v": <value>}, ...], ...},
+    each device's list sorted chronologically - same shape as
+    get_today_series(), just pre-filtered to manual readings only.
+    '''
+    client = get_client()
+    query_api = client.query_api()
+
+    start_iso = start.astimezone(timezone.utc).isoformat()
+    stop_iso = end.astimezone(timezone.utc).isoformat()
+
+    flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: {start_iso}, stop: {stop_iso})
+      |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+      |> filter(fn: (r) => r.user == "{user}")
+      |> filter(fn: (r) => r._field == "{field}")
+      |> filter(fn: (r) => r.{field}_type_num == "0")
+      |> group(columns: ["device"])
+      |> sort(columns: ["_time"])
+    '''
+
+    try:
+        tables = query_api.query(flux)
+    except Exception as e:
+        logger.warning(f"Failed to query manual {field} readings for user={user}: {e}")
         return {}
 
     result: dict[str, list[dict]] = {}
@@ -1198,13 +1271,16 @@ def get_nightly_differential_series(field: str, user: str, start_date: date, end
     return result
 
 
-def get_today_steps(user: str) -> dict[str, int]:
+def get_today_steps(user: str, for_date: date | None = None) -> dict[str, int]:
     ''' Today's (local calendar day) total steps per device - a sum,
     not last/mean/etc., since steps is a per-sample count that needs
     adding up across the day rather than reduced to one representative
     reading.
+
+    `for_date` defaults to today when omitted - same date-navigation
+    use as get_today_vitals().
     '''
-    start, end = local_today_bounds()
+    start, end = local_today_bounds(for_date)
     client = get_client()
     query_api = client.query_api()
 

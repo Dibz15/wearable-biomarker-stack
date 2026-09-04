@@ -1,11 +1,11 @@
 // --- Today tab ---
-import { escapeHtml, api } from "./core.js";
-import { openMetricDetail } from "./metric-detail.js";
+import { escapeHtml, api, todayISO, shiftISODate } from "./core.js";
+import { openMetricDetail, renderDateNav } from "./metric-detail.js";
 
 const METRIC_FIELDS = [
   { key: "heart_rate", label: "Heart Rate", unit: "bpm", hasDetail: true },
   { key: "hrv", label: "HRV", unit: "ms", hasDetail: true },
-  { key: "stress", label: "Stress", unit: "" },
+  { key: "stress", label: "Stress", unit: "", hasDetail: true },
   { key: "spo2", label: "SpO2", unit: "%", hasDetail: true },
   { key: "temperature", label: "Temperature", unit: "\u00b0", hasDetail: true },
 ];
@@ -118,16 +118,17 @@ function renderStepsCard(steps) {
   `;
 }
 
-export async function loadToday() {
+export async function loadToday(anchorDate = todayISO()) {
   const container = document.getElementById("today-content");
   try {
-    const data = await api("/today");
+    const data = await api(`/today?date=${anchorDate}`);
 
     const sleepHtml = renderSleepCard(data.sleep);
     const stepsHtml = renderStepsCard(data.steps || {});
     const metricsHtml = METRIC_FIELDS.map(f => renderMetricCard(f, (data.vitals || {})[f.key] || {})).join("");
 
     container.innerHTML = `
+      ${renderDateNav("day", anchorDate)}
       <p class="today-section-label">Last night's sleep</p>
       ${sleepHtml}
       <p class="today-section-label">Today</p>
@@ -141,13 +142,60 @@ export async function loadToday() {
     // runs - a per-card listener would need explicit cleanup to avoid
     // piling up duplicates across refreshes.
     container.querySelectorAll("[data-detail-field]").forEach(el => {
-      const open = () => openMetricDetail(el.dataset.detailField);
+      // Opens the detail view on the SAME day currently being viewed
+      // here, not always today - tapping "Heart Rate" while looking at
+      // three days ago should show that day's heart rate, not jump
+      // back to today's.
+      const open = () => openMetricDetail(el.dataset.detailField, anchorDate);
       el.addEventListener("click", open);
       el.addEventListener("keydown", e => {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
       });
     });
+
+    wireTodayDateNav(anchorDate);
   } catch (e) {
     container.innerHTML = `<p class="status">Error loading today's data: ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+// A trimmed-down version of the detail-view's wireDetailControls -
+// prev/next and the date-picker input only, since Today has no D/W/M/Y
+// period switcher to also wire up (it's always a single day, just with
+// a movable anchor date).
+function wireTodayDateNav(anchorDate) {
+  const prevBtn = document.querySelector('.date-nav-btn[data-nav="prev"]');
+  const nextBtn = document.querySelector('.date-nav-btn[data-nav="next"]');
+  if (prevBtn) {
+    prevBtn.addEventListener("click", () => loadToday(shiftISODate(anchorDate, -1)));
+  }
+  if (nextBtn && !nextBtn.disabled) {
+    nextBtn.addEventListener("click", () => loadToday(shiftISODate(anchorDate, 1)));
+  }
+
+  const dateInput = document.querySelector(".date-nav-input");
+  const dateLabel = document.querySelector(".date-nav-label");
+  if (dateInput) {
+    dateInput.addEventListener("change", () => {
+      if (dateInput.value) loadToday(dateInput.value);
+    });
+  }
+  if (dateLabel && dateInput) {
+    // Same showPicker() fix as the detail views - current Chrome only
+    // opens a date input's native picker when the calendar-icon
+    // affordance itself is clicked, not "anywhere in the input" the
+    // way it used to, and this input is invisible (opacity: 0,
+    // covering the label).
+    dateLabel.addEventListener("click", (e) => {
+      if (typeof dateInput.showPicker === "function") {
+        e.preventDefault();
+        try {
+          dateInput.showPicker();
+        } catch (err) {
+          // Rare - the person can still use the fallback click-
+          // passthrough path.
+        }
+      }
+    });
   }
 }

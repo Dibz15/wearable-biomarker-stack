@@ -1062,3 +1062,56 @@ main {
   border-radius: 3px;
   flex-shrink: 0;
 }
+.stress-mma-row {
+  display: flex;
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 0.75rem 0.5rem;
+  margin-bottom: 0.75rem;
+  text-align: center;
+}
+
+.stress-mma-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.stress-mma-item + .stress-mma-item {
+  border-left: 1px solid var(--surface-active);
+}
+
+.stress-mma-label {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.stress-mma-value {
+  font-weight: 700;
+  font-size: 1.1rem;
+}
+
+.stress-pie-card {
+  height: auto;
+  padding-bottom: 1.25rem;
+}
+
+.manual-readings-list {
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 0.25rem 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.manual-reading-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.65rem 0;
+}
+
+.manual-reading-row + .manual-reading-row {
+  border-top: 1px solid var(--surface-active);
+}

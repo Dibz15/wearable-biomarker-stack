@@ -31,6 +31,7 @@ from app.influx import (
     find_sleep_entries_in_range,
     find_sleep_entry_by_id,
     get_baseline_comparison,
+    get_manual_readings,
     get_nightly_baseline_comparison,
     get_nightly_differential_series,
     get_period_range_series,
@@ -415,11 +416,15 @@ def get_timeline(start: str | None = None, end: str | None = None, current_user:
 # --- today dashboard ---
 
 @app.get("/today")
-def get_today(current_user: dict = Depends(get_current_user)):
-    ''' Read-only summary for the "Today" tab: current vitals (per
-    device, for whichever fields have reported anything yet today),
-    today's step total, and last night's sleep (duration + stage
-    breakdown) if a qualifying session exists.
+def get_today(date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Read-only summary for the "Today" tab: vitals (per device, for
+    whichever fields reported anything that day), that day's step
+    total, and the most recently completed sleep session as of that
+    day (duration + stage breakdown) if a qualifying one exists.
+
+    `date` (YYYY-MM-DD) is optional and defaults to today - the Today
+    tab's own date navigation (prev/next/date-picker, mirroring the
+    detail views) uses this to show a past day's summary instead.
 
     Deliberately a single combined endpoint rather than one call per
     card - the frontend renders this as one dashboard, so one round
@@ -429,12 +434,21 @@ def get_today(current_user: dict = Depends(get_current_user)):
     client makes.
     '''
     username = current_user["username"]
+    parsed_date = _parse_optional_date(date)
 
-    vitals = get_today_vitals(username)
-    steps = get_today_steps(username)
+    vitals = get_today_vitals(username, for_date=parsed_date)
+    steps = get_today_steps(username, for_date=parsed_date)
+
+    # Always bounded at the END of the requested day (midnight going
+    # into the next one), rather than only doing this for a past date
+    # and leaving today's own case as an open-ended "now" - the two are
+    # provably equivalent for today specifically (there's no future
+    # sleep data to find either way), so one code path handles both
+    # rather than branching on whether a date was given.
+    _, before = local_today_bounds(parsed_date)
 
     sleep = None
-    session = find_last_completed_sleep_session(username)
+    session = find_last_completed_sleep_session(username, before=before)
     if session is not None:
         stages = get_sleep_stage_breakdown(
             username,
@@ -670,6 +684,34 @@ def get_vitals_differential(field: str, period: str, end_date: str | None = None
     start_date_obj = end_date_obj - timedelta(days=spec["days"])
 
     return get_nightly_differential_series(field, current_user["username"], start_date_obj, end_date_obj, baseline_days=7)
+
+
+# Fields confirmed to carry a `{field}_type_num` tag distinguishing
+# manual from automatic readings (0=manual, 1=automatic - confirmed
+# for BOTH fields independently via a deliberate cross-check, not
+# assumed to carry over from one to the other; see
+# parser/activefit/FIELD_RESEARCH.md). Enforced here rather than
+# trusting the path parameter, same reasoning as every other allowlist
+# in this file - an unsupported field would otherwise just silently
+# return no rows (the tag filter never matches), a far less obvious
+# failure than a 400.
+MANUAL_TYPE_NUM_FIELDS = {"stress", "spo2"}
+
+
+@app.get("/vitals/manual-readings/{field}")
+def get_vitals_manual_readings(field: str, period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Manually-triggered readings only, for one field, over a D/W/M/Y
+    period - Zepp's own Stress page "Manual Data" list for the Day
+    view; used as just a count (not the full list) for Week/Month/Year's
+    "Single Stress Measurement: N time(s)" style extra stat.
+    '''
+    if field not in MANUAL_TYPE_NUM_FIELDS:
+        raise HTTPException(400, f"unsupported field for manual-reading filtering: {field!r}")
+    if period not in RANGE_PERIODS:
+        raise HTTPException(400, f"unsupported period: {period!r} (must be one of {sorted(RANGE_PERIODS)})")
+
+    start, end = _period_bounds(period, end_date)
+    return get_manual_readings(field, current_user["username"], start, end)
 
 
 # --- sleep ---

@@ -1,6 +1,6 @@
 // --- Metric detail views (opened from a Today card, not a tab) ---
 import { escapeHtml, api, formatNum, dateToISO, isoToDate, todayISO, shiftISODate } from "./core.js";
-import { buildLineChart, buildRangeBarChart, buildDifferentialChart, renderBandLegend } from "./metric-charts.js";
+import { buildLineChart, buildRangeBarChart, buildDifferentialChart, buildTieredBarChart, buildTierPieChart, renderBandLegend, renderTierLegend } from "./metric-charts.js";
 
 let activeCharts = [];
 
@@ -150,6 +150,48 @@ const DETAIL_VIEWS = {
       ],
     },
   },
+  stress: {
+    title: "Stress",
+    // No Year here either, matching Zepp's own Stress page (D/W/M/Y
+    // was only ever documented for the day-to-day/weekly views in the
+    // research this was built from) - and the tier-colored day chart
+    // and "Manual Data" list are both inherently short-window concepts
+    // anyway.
+    periods: ["day", "week", "month"],
+    charts: [
+      {
+        field: "stress",
+        label: "Stress",
+        decimals: 0,
+        // Per-reading bars colored by tier (day only - see
+        // renderDetailPeriod's own chart-dispatch comment). Week/Month
+        // fall through to the normal device-colored range-bar chart,
+        // matching Zepp's own simpler single-item weekly legend.
+        chartStyle: "tiered-bars",
+      },
+    ],
+    // Day-view-only breakdown (tier legend, one pie chart per device,
+    // Max/Min/Avg, and the "Manual Data" list) plus the Week/Month
+    // extra "Single Stress Measurement: N time(s)" stat - see
+    // renderDetailPeriod's own comment on why this is a separate
+    // concept from `charts` above, same reasoning as temperature's
+    // `differential`.
+    stressBreakdown: {
+      field: "stress",
+      unit: "",
+      decimals: 0,
+      // Confirmed FIXED thresholds, stated directly in Zepp's own
+      // educational blurb on the Stress page (not user-configurable,
+      // not inferred) - see parser/activefit/FIELD_RESEARCH.md.
+      bands: [
+        { max: 39, label: "Relaxed", color: "#6ea8fe" },
+        { max: 59, label: "Normal", color: "#6ecf97" },
+        { max: 79, label: "Medium", color: "#f0c674" },
+        { max: 100, label: "High", color: "#e88a8a" },
+      ],
+      manualCountLabel: "Single Stress Measurement",
+    },
+  },
 };
 
 const DETAIL_PERIODS = [
@@ -174,7 +216,7 @@ function renderPeriodButtons(activePeriod, availablePeriods) {
   return `<div class="period-switcher">${buttons}</div>`;
 }
 
-function renderDateNav(period, anchorDate) {
+export function renderDateNav(period, anchorDate) {
   const isToday = anchorDate === todayISO();
   let label;
   if (period === "day") {
@@ -205,12 +247,12 @@ function renderDateNav(period, anchorDate) {
   `;
 }
 
-export async function openMetricDetail(viewKey) {
+export async function openMetricDetail(viewKey, anchorDate = todayISO()) {
   const view = DETAIL_VIEWS[viewKey];
   if (!view) return; // no detail view wired up for this field yet
 
   openDetailScreen(view.title);
-  await renderDetailPeriod(view, "day", todayISO());
+  await renderDetailPeriod(view, "day", anchorDate);
 }
 
 
@@ -263,6 +305,56 @@ function renderStatsCard(stats) {
     `;
   }).join("");
   return `<div class="detail-stats-card">${rows}</div>`;
+}
+
+// Max/Min/Avg specifically - Zepp's own "Daily Stress" card shows all
+// three together, which the generic renderStatsCard above doesn't
+// (it was built for a single last-or-range value, no avg). Kept as
+// its own small function rather than extending computeStatsFromSeries
+// itself, since no other field currently needs an average and
+// changing that shared function's output shape risks affecting every
+// other chart that calls it for no benefit to them.
+function computeMaxMinAvg(points, decimals) {
+  if (!points.length) return null;
+  const values = points.map(p => p.v);
+  const avg = values.reduce((sum, v) => sum + v, 0) / values.length;
+  return {
+    max: formatNum(Math.max(...values), decimals),
+    min: formatNum(Math.min(...values), decimals),
+    avg: formatNum(avg, decimals),
+  };
+}
+
+function renderMaxMinAvgRow(stats, unit) {
+  if (!stats) return "";
+  return `
+    <div class="stress-mma-row">
+      <div class="stress-mma-item"><span class="stress-mma-label">Max</span><span class="stress-mma-value">${stats.max}${unit}</span></div>
+      <div class="stress-mma-item"><span class="stress-mma-label">Min</span><span class="stress-mma-value">${stats.min}${unit}</span></div>
+      <div class="stress-mma-item"><span class="stress-mma-label">Avg</span><span class="stress-mma-value">${stats.avg}${unit}</span></div>
+    </div>
+  `;
+}
+
+// Zepp's "Manual Data" list - just time + value per manually-triggered
+// reading, newest first (matches how a person would actually want to
+// scan "what did I log and when", most recent at the top).
+function renderManualReadingsList(manualByDevice, unit) {
+  const devices = Object.keys(manualByDevice).filter(d => manualByDevice[d].length > 0);
+  if (devices.length === 0) {
+    return `<p class="metric-card-empty">No manually-triggered readings this day</p>`;
+  }
+  const rows = devices.map(device => {
+    const items = [...manualByDevice[device]].reverse().map(p => `
+      <div class="manual-reading-row">
+        <span class="metric-device-name">${escapeHtml(device)}</span>
+        <span>${new Date(p.t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
+        <span class="detail-stat-value">${p.v}${unit}</span>
+      </div>
+    `).join("");
+    return items;
+  }).join("");
+  return `<div class="manual-readings-list">${rows}</div>`;
 }
 
 const BASELINE_DAYS = 7;
@@ -383,11 +475,20 @@ async function renderDetailPeriod(view, period, anchorDate) {
   // could represent without either fetch colliding with the raw-value
   // chart sharing the same field, or forcing every other chart through
   // a shape it doesn't need.
+  //
+  // A view's optional `stressBreakdown` (Stress so far) is similarly
+  // separate: on Day it needs the full manual-readings LIST (Zepp's
+  // "Manual Data"), while Week/Month/Year only need a COUNT of the
+  // same underlying readings for the "Single Stress Measurement: N
+  // time(s)" style stat - same endpoint, two different uses of its
+  // response depending on period.
   let seriesByField;
   let baselineByField = {};
   let rollingMeanByField = {};
   let differentialBaseline = null;
   let differentialSeries = null;
+  let manualReadings = null;
+  let manualCounts = null;
   try {
     seriesByField = Object.fromEntries(await Promise.all(
       view.charts.map(async c => [c.field, await fetchDetailSeries(c, period, anchorDate)])
@@ -400,12 +501,20 @@ async function renderDetailPeriod(view, period, anchorDate) {
       if (view.differential) {
         differentialBaseline = await api(`/vitals/baseline/${view.differential.field}?days=${BASELINE_DAYS}&date=${anchorDate}`);
       }
-    } else if (period === "week" || period === "month") {
-      rollingMeanByField = Object.fromEntries(await Promise.all(
-        view.charts.map(async c => [c.field, await api(`/vitals/rolling-mean/${c.field}?period=${period}&end_date=${anchorDate}`)])
-      ));
-      if (view.differential) {
-        differentialSeries = await api(`/vitals/differential/${view.differential.field}?period=${period}&end_date=${anchorDate}`);
+      if (view.stressBreakdown) {
+        manualReadings = await api(`/vitals/manual-readings/${view.stressBreakdown.field}?period=day&end_date=${anchorDate}`);
+      }
+    } else {
+      if (period === "week" || period === "month") {
+        rollingMeanByField = Object.fromEntries(await Promise.all(
+          view.charts.map(async c => [c.field, await api(`/vitals/rolling-mean/${c.field}?period=${period}&end_date=${anchorDate}`)])
+        ));
+        if (view.differential) {
+          differentialSeries = await api(`/vitals/differential/${view.differential.field}?period=${period}&end_date=${anchorDate}`);
+        }
+      }
+      if (view.stressBreakdown) {
+        manualCounts = await api(`/vitals/manual-readings/${view.stressBreakdown.field}?period=${period}&end_date=${anchorDate}`);
       }
     }
   } catch (e) {
@@ -420,6 +529,14 @@ async function renderDetailPeriod(view, period, anchorDate) {
     const baselineHtml = (period === "day" && c.showBaseline)
       ? renderBaselineBar(baselineByField[c.field] || {}, BASELINE_DAYS, c.baseline || {})
       : "";
+    const manualCountHtml = (view.stressBreakdown && period !== "day" && manualCounts)
+      ? Object.keys(manualCounts).map(device => `
+          <div class="detail-stat-row">
+            <span class="metric-device-name">${escapeHtml(device)}</span>
+            <span class="metric-sub">${escapeHtml(view.stressBreakdown.manualCountLabel)}: ${manualCounts[device].length} time(s)</span>
+          </div>
+        `).join("")
+      : "";
     return `
       <p class="today-section-label">${c.label}</p>
       <div class="detail-chart-card">
@@ -427,6 +544,7 @@ async function renderDetailPeriod(view, period, anchorDate) {
       </div>
       ${renderStatsCard(stats)}
       ${baselineHtml}
+      ${manualCountHtml}
     `;
   }).join("");
 
@@ -440,7 +558,38 @@ async function renderDetailPeriod(view, period, anchorDate) {
     `
     : "";
 
-  content.innerHTML = renderPeriodButtons(period, view.periods) + renderDateNav(period, anchorDate) + cardsHtml + differentialHtml;
+  // Day-only: tier legend + one pie chart per device + Max/Min/Avg +
+  // the manual-readings list, all computed from data already fetched
+  // above (the main chart's own raw series for the legend/pie/stats,
+  // the separate manual-readings fetch for the list) - no additional
+  // network round trip beyond what's already happening.
+  let breakdownDevices = [];
+  const stressBreakdownHtml = (view.stressBreakdown && period === "day")
+    ? (() => {
+        const series = seriesByField[view.stressBreakdown.field] || {};
+        breakdownDevices = Object.keys(series);
+        const pies = breakdownDevices.map((device, i) => `
+          <div class="detail-chart-card stress-pie-card">
+            <p class="metric-device-name">${escapeHtml(device)}</p>
+            <canvas id="stress-pie-${i}"></canvas>
+          </div>
+        `).join("");
+        const mmaRows = breakdownDevices.map(device => `
+          <p class="metric-device-name">${escapeHtml(device)}</p>
+          ${renderMaxMinAvgRow(computeMaxMinAvg(series[device] || [], view.stressBreakdown.decimals), view.stressBreakdown.unit)}
+        `).join("");
+        return `
+          <p class="today-section-label">Daily Stress</p>
+          ${renderTierLegend(view.stressBreakdown.bands, view.stressBreakdown.unit)}
+          ${pies}
+          ${mmaRows}
+          <p class="today-section-label">Manual Data</p>
+          ${renderManualReadingsList(manualReadings || {}, view.stressBreakdown.unit)}
+        `;
+      })()
+    : "";
+
+  content.innerHTML = renderPeriodButtons(period, view.periods) + renderDateNav(period, anchorDate) + cardsHtml + differentialHtml + stressBreakdownHtml;
   wireDetailControls(view, period, anchorDate);
 
   view.charts.forEach((c, i) => {
@@ -458,10 +607,19 @@ async function renderDetailPeriod(view, period, anchorDate) {
     // fetches range-bar-shaped data ({t, min, max, median}) for its day
     // view too (via fetchDetailSeries), same shape week/month already
     // use, so it needs buildRangeBarChart even though period === "day".
+    // chartStyle:"tiered-bars" (Stress) is checked first and is day-
+    // only by construction - week/month/year still fall through to the
+    // normal range-bar chart, matching Zepp's own weekly view (device-
+    // colored bars, not tier-colored).
     const isRawPoints = "v" in series[devices[0]][0];
-    const chart = isRawPoints
-      ? buildLineChart(canvas, series, devices, c.decimals)
-      : buildRangeBarChart(canvas, series, devices, period, rollingMeanByField[c.field] || {}, c.yMin, c.decimals);
+    let chart;
+    if (c.chartStyle === "tiered-bars" && period === "day") {
+      chart = buildTieredBarChart(canvas, series, devices, view.stressBreakdown);
+    } else if (isRawPoints) {
+      chart = buildLineChart(canvas, series, devices, c.decimals);
+    } else {
+      chart = buildRangeBarChart(canvas, series, devices, period, rollingMeanByField[c.field] || {}, c.yMin, c.decimals);
+    }
     activeCharts.push(chart);
   });
 
@@ -475,6 +633,15 @@ async function renderDetailPeriod(view, period, anchorDate) {
     } else {
       activeCharts.push(buildDifferentialChart(diffCanvas, differentialSeries, devices, view.differential));
     }
+  }
+
+  if (view.stressBreakdown && period === "day") {
+    const series = seriesByField[view.stressBreakdown.field] || {};
+    breakdownDevices.forEach((device, i) => {
+      const pieCanvas = document.getElementById(`stress-pie-${i}`);
+      if (!pieCanvas) return;
+      activeCharts.push(buildTierPieChart(pieCanvas, series[device] || [], view.stressBreakdown));
+    });
   }
 }
 
