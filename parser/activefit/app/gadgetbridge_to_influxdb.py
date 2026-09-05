@@ -56,9 +56,11 @@
 import os
 import shutil
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 
+import fitparse
 from loguru import logger
 from webdav3.client import Client
 
@@ -75,6 +77,26 @@ PARSER_SOURCE = os.getenv("PARSER_SOURCE", "activefit")
 
 WEBDAV_URL = os.getenv("WEBDAV_URL", False)
 WEBDAV_PATH = os.getenv("WEBDAV_PATH", "files/service_user/GadgetBridge/")
+# Where Gadgetbridge's own "Auto export GPX/FIT tracks" automations
+# (Settings -> Automations, a SEPARATE mechanism from the main
+# Gadgetbridge.db auto-export - see the workout-detail extraction
+# code's own module-level comment) write their per-workout export
+# files. No universal default exists - this is wherever the person
+# pointed those automations at when setting them up.
+#
+# NOT automatically relative to WEBDAV_PATH, despite the similar name -
+# both are independent, FULL paths from the same WebDAV root (passed
+# straight to webdav_client.list()/.download_sync() with no
+# combination step - see fetch_database()'s own identical use of
+# WEBDAV_PATH for the same pattern). If the export folder is a
+# subfolder of WEBDAV_PATH itself (confirmed the common case in
+# practice, e.g. a "Tracks/" folder picked from within the same
+# Gadgetbridge sync location), WEBDAV_PATH's own prefix must be
+# included explicitly too - e.g. WEBDAV_PATH="files/austin/GadgetBridge/"
+# and a "Tracks" subfolder within it needs
+# EXPORT_TRACKS_PATH="files/austin/GadgetBridge/Tracks/" in full, not
+# just "Tracks/".
+EXPORT_TRACKS_PATH = os.getenv("EXPORT_TRACKS_PATH", None)
 WEBDAV_USER = os.getenv("WEBDAV_USER", False)
 WEBDAV_PASS = os.getenv("WEBDAV_PASS", False)
 EXPORT_FILE = os.getenv("EXPORT_FILENAME", "Gadgetbridge.db")
@@ -462,6 +484,365 @@ def flatten_workout_summary(raw_summary_data: bytes) -> dict:
     return fields
 
 
+# --- Per-sample workout detail (GPS/HR/cadence/etc.), separate from
+# the per-workout SUMMARY numbers above ---
+#
+# Source priority, per the person's own explicit guidance: use
+# whichever available source is richest, in this order:
+#   1. FIT (BASE_ACTIVITY_SUMMARY.RAW_DETAILS_PATH's own real per-
+#      sample data, exported via Gadgetbridge's "Auto export FIT
+#      tracks" automation) - confirmed richest: works for GPS AND non-
+#      GPS activities alike, and carries HR/cadence/power/temperature
+#      alongside position, not just position.
+#   2. GPX (the same automation's "Auto export GPX tracks" sibling) -
+#      only exists for GPS-tracked activities at all, and even then
+#      Gadgetbridge's own GPX export has not been confirmed to embed
+#      anything beyond position/elevation/time (no HR/cadence
+#      extension confirmed present - see parse_gpx_track_points()'s
+#      own docstring).
+#   3. Neither found: already handled by extract_base_activity_summary_rows()
+#      itself doing nothing extra - the per-workout SUMMARY point
+#      (duration/HR avg/etc, from RAW_SUMMARY_DATA) is written either
+#      way, this per-sample detail is purely additive on top of it.
+#
+# Neither export type is INSIDE Gadgetbridge.db itself (confirmed via
+# a real Gadgetbridge maintainer's own PR description, 2026-09) - both
+# live as separate files in a person-chosen WebDAV-synced folder,
+# correlated back to their own BASE_ACTIVITY_SUMMARY row by a shared
+# TIMESTAMP embedded in both filenames (confirmed directly against two
+# real examples - see find_workout_detail_export()'s own docstring).
+
+WORKOUT_DETAIL_MEASUREMENT_SAMPLE_TYPE = "workout_detail"
+
+# FIT field name -> (influx field name, optional transform function).
+# Deliberately a known-fields allowlist (skip anything else) rather
+# than writing every field FIT happens to carry - some FIT fields seen
+# even in an official test fixture (e.g. "resistance", "power",
+# "time_from_course") aren't populated by this device family at all
+# and aren't worth carrying through untranslated.
+FIT_RECORD_FIELD_MAP = {
+    "heart_rate": ("hr", None),
+    # Cadence's real meaning is device-dependent (some report full
+    # steps/min, others report one leg's cycles/min, i.e. roughly half
+    # actual steps/min) - stored as-is, under a name that doesn't
+    # assert which convention this device uses, since that hasn't been
+    # confirmed (see the person's own note that a 45-second test walk
+    # isn't a reliable sample to judge this from either way).
+    "cadence": ("cadence_rpm", None),
+    "distance": ("distance_m", None),
+    # enhanced_* are FIT's own newer, higher-precision fields for the
+    # same measurement - preferred over the plain versions when a
+    # record has both (handled in flatten_fit_records() itself, not
+    # here, since it requires seeing both keys on the same record).
+    "enhanced_altitude": ("altitude_m", None),
+    "altitude": ("altitude_m", None),
+    "enhanced_speed": ("speed_mps", None),
+    "speed": ("speed_mps", None),
+    "temperature": ("temperature_c", None),
+    "power": ("power_watts", None),
+    "step_length": ("step_length_mm", None),
+    "grade": ("grade_percent", None),
+    # FIT's own "semicircles" coordinate encoding - a real, documented
+    # unit (not a guess): degrees = semicircles * (180 / 2**31).
+    "position_lat": ("latitude", lambda v: v * (180 / 2**31)),
+    "position_long": ("longitude", lambda v: v * (180 / 2**31)),
+}
+
+
+def datetime_to_nanos(dt: datetime) -> int:
+    ''' Converts a Python datetime (from fitparse's own FIT timestamp
+    decoding, or this module's own GPX <time> parsing below) to
+    nanoseconds-since-epoch - the SAME "timestamp is always an int"
+    convention every other point in this entire parser (both
+    activefit and colmi) already follows via to_nanos(), and the only
+    format write_results() itself actually accepts (it compares
+    row['timestamp'] directly against an int future-timestamp bound
+    before ever reaching Point.time() - a real crash found and fixed
+    here: `datetime.datetime(...) > int` raises TypeError, discovered
+    only once this code ran for real against actual synced data, not
+    caught by this module's own earlier tests, which never exercised
+    the actual write_results() integration boundary at all).
+
+    FIT's own timestamps come back from fitparse as NAIVE datetimes
+    (no tzinfo) that represent UTC (FIT's own spec: seconds since a
+    2010-01-01T00:00:00 UTC epoch - confirmed directly against a real
+    fitparse-decoded example). A naive datetime is therefore assumed
+    UTC here, NOT the host's own local timezone - which is Python's
+    own default assumption for a naive datetime's .timestamp() call,
+    and would otherwise silently shift every FIT-derived sample by
+    the host's own UTC offset. A genuinely timezone-AWARE datetime
+    (this module's own GPX parsing always produces one, from a real
+    "Z"/UTC-suffixed <time> element) is respected as given, not
+    reinterpreted.
+    '''
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1_000_000_000)
+
+
+def flatten_fit_records(fit_messages) -> list[dict]:
+    ''' Converts a parsed FIT file's own "record" messages (fitparse's
+    own message objects, one per FIT sample - typically one every 1-2
+    seconds during a workout, confirmed directly against real
+    exported .fit files) into a list of {"timestamp": <datetime>,
+    "fields": {...}} dicts - NOT the full {"timestamp","fields","tags"}
+    shape write_results() wants, since the caller (extract_data())
+    still needs to attach the SAME workout-linking tags to every one
+    of these before that.
+
+    Only fields in FIT_RECORD_FIELD_MAP are extracted - anything else
+    a record happens to carry is ignored (see that map's own comment
+    for why). A record with NONE of the known fields present (fitparse
+    itself confirms this really happens - the very first record of a
+    real file can carry only a timestamp, before any sensor value has
+    been sampled yet) is skipped entirely, matching this codebase's
+    existing "an InfluxDB point needs at least one field" rule.
+
+    Prefers enhanced_altitude/enhanced_speed over their plain
+    altitude/speed counterparts when a record has both (FIT's own
+    higher-precision versions of the same measurement) - never writes
+    both under the same influx field name for one record.
+    '''
+    results = []
+    for message in fit_messages:
+        if message.name != "record":
+            continue
+        timestamp = message.get_value("timestamp")
+        if timestamp is None:
+            continue
+
+        raw_values = {}
+        for field in message:
+            if field.value is not None:
+                raw_values[field.name] = field.value
+
+        fields = {}
+        # enhanced_* first, so the plain fallback never overwrites it
+        # if a record happens to carry both under the same influx name.
+        for fit_name in ("enhanced_altitude", "altitude", "enhanced_speed", "speed"):
+            if fit_name in raw_values:
+                influx_name, transform = FIT_RECORD_FIELD_MAP[fit_name]
+                if influx_name not in fields:
+                    fields[influx_name] = transform(raw_values[fit_name]) if transform else raw_values[fit_name]
+        for fit_name, (influx_name, transform) in FIT_RECORD_FIELD_MAP.items():
+            if fit_name in ("enhanced_altitude", "altitude", "enhanced_speed", "speed"):
+                continue  # already handled above
+            if fit_name in raw_values:
+                fields[influx_name] = transform(raw_values[fit_name]) if transform else raw_values[fit_name]
+
+        if not fields:
+            continue
+        results.append({"timestamp": timestamp, "fields": fields})
+    return results
+
+
+def parse_gpx_track_points(gpx_bytes: bytes) -> list[dict]:
+    ''' Parses a GPX (plain XML) file's own <trkpt> elements into the
+    same [{"timestamp": <datetime>, "fields": {...}}, ...] shape
+    flatten_fit_records() produces - the GPX fallback path, used only
+    when no matching .fit export exists for a workout (FIT is
+    confirmed richer - see this module's own comment above).
+
+    Uses Python's stdlib xml.etree.ElementTree, not a new dependency -
+    GPX's own <trkpt lat="..." lon="..."><ele>...</ele><time>...</time></trkpt>
+    structure is simple enough not to need a dedicated GPX library.
+
+    Only lat/lon/elevation/time are extracted - Gadgetbridge's own GPX
+    export has NOT been confirmed to embed HR/cadence via the
+    <gpxtpx:TrackPointExtension> namespace some other tools use (an
+    unconfirmed possibility, not assumed present or absent without a
+    real file to check) - if a real Gadgetbridge-exported GPX file
+    turns out to carry that extension too, this function would need
+    extending to read it, not something to guess into existence now.
+    '''
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(gpx_bytes)
+    # GPX's default namespace makes every tag come back as
+    # "{http://www.topografix.com/GPX/1/1}trkpt" etc - stripping to the
+    # local tag name (after the last "}") rather than hardcoding one
+    # specific namespace URI, which could differ across GPX versions/
+    # generators.
+    def local_tag(elem):
+        return elem.tag.rsplit("}", 1)[-1]
+
+    results = []
+    for trkpt in root.iter():
+        if local_tag(trkpt) != "trkpt":
+            continue
+        lat = trkpt.get("lat")
+        lon = trkpt.get("lon")
+        fields = {}
+        if lat is not None and lon is not None:
+            fields["latitude"] = float(lat)
+            fields["longitude"] = float(lon)
+        timestamp = None
+        for child in trkpt:
+            tag = local_tag(child)
+            if tag == "ele" and child.text:
+                fields["altitude_m"] = float(child.text)
+            elif tag == "time" and child.text:
+                timestamp = datetime.fromisoformat(child.text.replace("Z", "+00:00"))
+        if timestamp is None or not fields:
+            continue
+        results.append({"timestamp": timestamp, "fields": fields})
+    return results
+
+
+def find_workout_detail_export(export_entries: list[str], raw_details_path: str) -> tuple[str, str] | None:
+    ''' Given a WebDAV directory listing (export_entries - just
+    filenames/paths as returned by the webdav client's own .list())
+    and a workout's own RAW_DETAILS_PATH, finds the matching export
+    file by the shared TIMESTAMP embedded in both filenames - NOT by
+    the (confirmed unreliable - see flatten_workout_summary's sibling
+    docstring) GPX_TRACK database column.
+
+    Confirmed directly against two real examples: RAW_DETAILS_PATH's
+    own basename ("2026-09-05T17_05_33+01_00.bin") matched a real GPX
+    export ("2026-09-05T17_05_33+01_00-walking.gpx"), and separately
+    ("2026-09-05T17_29_36+01_00.bin") matched a real FIT export
+    ("2026-09-05T17_29_36+01_00-yoga.fit") - only an activity-type
+    suffix and the extension differ from RAW_DETAILS_PATH's own
+    basename either way.
+
+    Returns (matched_filename, "fit"|"gpx") for whichever export
+    exists, PREFERRING fit over gpx when both are present for the same
+    workout (fit is confirmed richer - see this section's own top-of-
+    file comment) - or None if neither is found.
+    '''
+    from pathlib import Path
+    if not raw_details_path:
+        return None
+    timestamp_prefix = Path(raw_details_path).name.rsplit(".", 1)[0]
+    matches = {Path(e).name.rsplit(".", 1)[-1].lower(): Path(e).name
+               for e in export_entries if Path(e).name.startswith(timestamp_prefix)}
+    if "fit" in matches:
+        return matches["fit"], "fit"
+    if "gpx" in matches:
+        return matches["gpx"], "gpx"
+    return None
+
+
+def get_already_processed_workout_starts(client, bucket, measurement, user, source) -> set[str]:
+    ''' Which workouts (by their own BASE_ACTIVITY_SUMMARY START_TIME,
+    as a string tag) already have per-sample workout_detail points
+    written - queried directly from InfluxDB itself (same "ask the
+    destination what it already has" approach as
+    get_last_checkpoint_ns, not a separate local tracking file) so a
+    workout's own (potentially large) .fit/.gpx export is downloaded
+    and parsed AT MOST ONCE ever, rather than being re-fetched every
+    sync cycle for as long as it remains within the checkpoint window.
+
+    A workout that has ANY workout_detail points at all counts as
+    fully processed - this parser only ever writes a workout's detail
+    points in one single pass (see extract_workout_detail_points()),
+    so partial-write states aren't a real scenario worth detecting
+    here.
+    '''
+    query_api = client.query_api()
+    flux = f'''
+    from(bucket: "{bucket}")
+      |> range(start: -365d)
+      |> filter(fn: (r) => r._measurement == "{measurement}")
+      |> filter(fn: (r) => r.sample_type == "{WORKOUT_DETAIL_MEASUREMENT_SAMPLE_TYPE}")
+      |> filter(fn: (r) => r.user == "{user}")
+      |> filter(fn: (r) => r.source == "{source}")
+      |> keep(columns: ["workout_start_time"])
+      |> distinct(column: "workout_start_time")
+    '''
+    try:
+        tables = query_api.query(flux)
+    except Exception as e:
+        logger.warning(f"Could not query already-processed workout details (treating as none processed yet): {e}")
+        return set()
+    return {record.get_value() for table in tables for record in table.records}
+
+
+def extract_workout_detail_points(webdav_client, export_tracks_path, base_activity_rows, already_processed_starts, device_tags) -> list[dict]:
+    ''' For every BASE_ACTIVITY_SUMMARY row not already covered by
+    already_processed_starts, looks for a matching FIT (preferred) or
+    GPX export in export_tracks_path (see find_workout_detail_export's
+    own docstring for the correlation approach), downloads + parses
+    whichever is found, and returns one InfluxDB point PER SAMPLE -
+    NOT one point per workout, unlike every other section of this
+    parser. Each point carries a `workout_start_time` tag (the parent
+    workout's own START_TIME, as a string) linking it back to that
+    workout's own summary point, so a frontend can query "every sample
+    for this specific workout" directly.
+
+    A row with no matching export at all is silently skipped here -
+    NOT an error, and not this function's concern to log loudly about,
+    since the person may simply not have GPX/FIT export enabled for
+    every device, or a given workout may predate enabling it (both
+    real, confirmed-observed situations already, not hypothetical) -
+    that workout's own SUMMARY point (from RAW_SUMMARY_DATA, written
+    by extract_base_activity_summary_rows regardless) is already the
+    best available data for it, exactly per the person's own "fill in
+    what we can from the Gadgetbridge DB otherwise" guidance.
+    '''
+    if not export_tracks_path:
+        return []
+
+    try:
+        export_entries = webdav_client.list(export_tracks_path)
+    except Exception as e:
+        logger.warning(f"Could not list EXPORT_TRACKS_PATH ({export_tracks_path!r}) - skipping "
+                        f"workout detail extraction for this cycle: {e}")
+        return []
+
+    results = []
+    for row in base_activity_rows:
+        start_time, device_id, raw_details_path = row["start_time"], row["device_id"], row["raw_details_path"]
+        start_time_str = str(start_time)
+        if start_time_str in already_processed_starts:
+            continue
+        match = find_workout_detail_export(export_entries, raw_details_path)
+        if match is None:
+            continue
+        filename, kind = match
+        remote_path = export_tracks_path + filename if not filename.startswith(export_tracks_path) else filename
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_path = os.path.join(tmpdir, filename)
+            try:
+                webdav_client.download_sync(remote_path=remote_path, local_path=local_path)
+            except Exception as e:
+                logger.warning(f"Failed to download workout detail export {remote_path!r}: {e}")
+                continue
+
+            try:
+                if kind == "fit":
+                    fitfile = fitparse.FitFile(local_path)
+                    samples = flatten_fit_records(fitfile.get_messages())
+                else:
+                    with open(local_path, "rb") as f:
+                        samples = parse_gpx_track_points(f.read())
+            except Exception as e:
+                logger.warning(f"Failed to parse workout detail export {filename!r} ({kind}): {e}")
+                continue
+
+        if not samples:
+            logger.info(f"Workout detail export {filename!r} ({kind}) parsed but yielded no usable samples")
+            continue
+
+        device_specific_tags = device_tags(device_id)
+        for sample in samples:
+            results.append({
+                "timestamp": datetime_to_nanos(sample["timestamp"]),
+                "fields": sample["fields"],
+                "tags": {
+                    **device_specific_tags,
+                    "workout_start_time": start_time_str,
+                    "sample_type": WORKOUT_DETAIL_MEASUREMENT_SAMPLE_TYPE,
+                    "source_format": kind,
+                }
+            })
+        logger.info(f"Workout detail: extracted {len(samples)} sample(s) from {filename!r} ({kind}) "
+                    f"for workout starting {start_time}")
+
+    return results
+
+
 def extract_base_activity_summary_rows(rows, device_tags) -> list[dict]:
     ''' Turns raw BASE_ACTIVITY_SUMMARY rows (START_TIME, END_TIME,
     DEVICE_ID, NAME, ACTIVITY_KIND, BASE_LONGITUDE, BASE_LATITUDE,
@@ -769,7 +1150,7 @@ def deduplicate_sleep_session_rows(decoded_rows: list[tuple]) -> list[tuple]:
     return list(best_by_night.values())
 
 
-def extract_data(cur, client):
+def extract_data(cur, client, webdav_client):
     ''' Query the database for data - see this file's module docstring
     and README.md for the unverified/best-effort status of every table
     queried here.
@@ -1120,7 +1501,7 @@ def extract_data(cur, client):
     # pair is stored raw.
     rows = run_query(cur, "BASE_ACTIVITY_SUMMARY",
         "SELECT START_TIME, END_TIME, DEVICE_ID, NAME, ACTIVITY_KIND, "
-        "BASE_LONGITUDE, BASE_LATITUDE, BASE_ALTITUDE, RAW_SUMMARY_DATA "
+        "BASE_LONGITUDE, BASE_LATITUDE, BASE_ALTITUDE, RAW_SUMMARY_DATA, RAW_DETAILS_PATH "
         "FROM BASE_ACTIVITY_SUMMARY "
         f"WHERE START_TIME >= {base_activity_summary_query_start_bound_scaled} ORDER BY START_TIME ASC")
     if rows is not None:
@@ -1129,6 +1510,69 @@ def extract_data(cur, client):
         for r in rows:
             observed.note(r[2], to_nanos(r[0], BASE_ACTIVITY_SUMMARY_TIMESTAMPS_ARE_MS))
         section_counts["base_activity_summary"] = len(rows)
+
+    # --- Per-sample workout detail (GPS/HR/cadence/etc.), a SEPARATE,
+    # opt-in enrichment layered on top of the summary points above -
+    # see extract_workout_detail_points()'s own docstring for the full
+    # source-priority reasoning (FIT preferred, GPX fallback, DB-only
+    # summary if neither exists).
+    #
+    # Deliberately its OWN, UNBOUNDED query - NOT reusing `rows` above,
+    # and NOT gated on `rows is not None`. A real bug found and fixed
+    # here before it ever shipped correctly: this section originally
+    # lived inside the `if rows is not None:` block, sharing the SAME
+    # checkpoint-bounded query as the summary extraction above. But
+    # that checkpoint is GLOBAL and shared across every section
+    # (including the continuous per-minute activity stream, which
+    # advances every single cycle) - so by the time a workout's detail
+    # export becomes available (the person enabling Auto export well
+    # after the workout itself already happened and was already
+    # summarized in an earlier run), that workout's own START_TIME is
+    # long since behind the checkpoint, `rows` comes back empty on
+    # every subsequent cycle, and this whole section silently never
+    # ran at all - not even once, with zero log output, exactly
+    # matching a real report of "no workout_detail entries anywhere
+    # AND no mention in the logs at all" after enabling the feature and
+    # resyncing. Backfilling detail for an ALREADY-summarized workout
+    # is the whole point of this feature, so it needs to look at every
+    # workout regardless of the summary checkpoint's own position -
+    # BASE_ACTIVITY_SUMMARY is confirmed genuinely sparse in practice
+    # (FIELD_RESEARCH.md: a handful of rows even after real use, not
+    # thousands), so querying it in full on every cycle is cheap; the
+    # already-processed InfluxDB check inside
+    # extract_workout_detail_points() is what actually prevents
+    # redundant download/parse work, not this query's own bound.
+    if EXPORT_TRACKS_PATH:
+        detail_rows = run_query(cur, "BASE_ACTIVITY_SUMMARY",
+            "SELECT START_TIME, DEVICE_ID, RAW_DETAILS_PATH FROM BASE_ACTIVITY_SUMMARY "
+            "WHERE RAW_DETAILS_PATH IS NOT NULL ORDER BY START_TIME ASC")
+        if detail_rows:
+            already_processed = get_already_processed_workout_starts(
+                client, INFLUXDB_BUCKET, INFLUXDB_MEASUREMENT, GADGETBRIDGE_USER, PARSER_SOURCE
+            )
+            base_activity_rows_for_details = [
+                {"start_time": r[0], "device_id": r[1], "raw_details_path": r[2]}
+                for r in detail_rows
+            ]
+            detail_results = extract_workout_detail_points(
+                webdav_client, EXPORT_TRACKS_PATH, base_activity_rows_for_details, already_processed, device_tags
+            )
+            if detail_results:
+                results.extend(detail_results)
+                section_counts["workout_detail"] = len(detail_results)
+    else:
+        # A clear, low-noise signal that this feature is simply not
+        # configured - NOT total silence (this section's own earlier,
+        # real mistake): a person who just enabled Gadgetbridge's own
+        # export automations and resynced, expecting to see this
+        # section's own log line, deserves to know definitively
+        # whether the parser even attempted anything, rather than
+        # being left to guess between "not configured" and "configured
+        # but broken" from an empty log.
+        logger.debug("EXPORT_TRACKS_PATH not set - skipping workout detail extraction "
+                     "(this is expected if Gadgetbridge's own Auto export GPX/FIT tracks "
+                     "automations haven't been set up, or haven't been pointed at this "
+                     "parser's own EXPORT_TRACKS_PATH env var yet)")
 
     # --- Sleep sessions, decoded from the BLOB. CONFIRMED byte layout,
     # ported directly from Gadgetbridge's own HuamiSleepSessionSampleProvider.java
@@ -1328,7 +1772,7 @@ if __name__ == "__main__":
     conn, cur = open_database(tempdir)
 
     with build_client(INFLUXDB_URL, INFLUXDB_TOKEN, INFLUXDB_ORG) as influx_client:
-        results = extract_data(cur, influx_client)
+        results = extract_data(cur, influx_client, webdav_client)
         # See colmi/app's __main__ for why False (fatal) and an empty
         # list (legitimately nothing to sync - the normal case before
         # pairing, or any quiet cycle after) are handled differently.

@@ -30,6 +30,14 @@ RUN pip install --upgrade pip \
 # regenerate with (from parser/activefit/):
 #   protoc --python_out=app --proto_path=proto proto/huami.proto
 
+# fitparse decodes per-workout .fit exports (BASE_ACTIVITY_SUMMARY's
+# own RAW_DETAILS_PATH, found via Gadgetbridge's own "Auto export FIT
+# tracks" automation - confirmed 2026-09 to work for GPS AND non-GPS
+# activities alike, unlike GPX which only exists for GPS ones). Real,
+# standardized format with a mature open-source parser - same
+# reasoning as using the real protobuf library above, not a hand-
+# rolled decoder.
+
 COPY common /app/common
 COPY activefit/app /app
 COPY activefit/scripts /scripts

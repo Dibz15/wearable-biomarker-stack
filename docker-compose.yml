@@ -334,6 +334,14 @@ services:
       WEBDAV_USER: ${WEBDAV_USER:-your_nextcloud_user}
       WEBDAV_PASS: ${WEBDAV_PASS:-your_nextcloud_app_password}
       EXPORT_FILENAME: ${EXPORT_FILENAME:-Gadgetbridge}
+      # Optional - enables per-sample workout detail (GPS/HR/cadence)
+      # extraction from Gadgetbridge's own "Auto export GPX/FIT
+      # tracks" automations. No default - leave unset (empty) in your
+      # own .env if you haven't set those automations up. NOT
+      # automatically relative to WEBDAV_PATH above, despite the
+      # similar name - see env.stack.example's own note on this
+      # variable for the full explanation and a worked example.
+      EXPORT_TRACKS_PATH: ${EXPORT_TRACKS_PATH:-}
 
       QUERY_DURATION: ${QUERY_DURATION:-86400}
       MAX_CATCHUP_SECONDS: ${MAX_CATCHUP_SECONDS:-2592000}
