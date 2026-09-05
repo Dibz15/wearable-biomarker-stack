@@ -255,14 +255,41 @@ async function renderSleepVitalsDay(field, anchorDate) {
     wireSubDetailDateNav(anchorDate, renderFn);
 
     if (trend.length > 0) {
-      // Same per-night-own-device grouping as Sleep Duration's trend.
+      // Same per-night-own-device grouping as Sleep Duration's trend -
+      // but this chart shows each night's real MIN-MAX RANGE (with its
+      // own median tick, via buildRangeBarChart's existing per-bar
+      // marker) rather than a single value-per-night bar, since sleep
+      // HR/respiratory rate genuinely varies within a night and that
+      // range is the more useful comparison than just the nightly mean.
       const devices = [...new Set(trend.map(t => t.device))];
       const series = {};
       devices.forEach(d => { series[d] = []; });
-      trend.forEach(t => { series[t.device].push({ t: t.date, value: t.value }); });
-      const chart = buildTrendBarChart(
-        document.getElementById("sleep-vitals-trend-chart"), series, devices,
-        { yAxisTitle: cfg.unit, decimals: cfg.decimals, unit: ` ${cfg.unit}`, meanLabel: "Week average" }
+      trend.forEach(t => { series[t.device].push({ t: t.date, min: t.min, max: t.max, median: t.median }); });
+
+      // A tight y-axis (min-to-max-plus-margin) rather than Chart.js's
+      // own default scaling for a floating-bar dataset, which trends
+      // toward including 0 - same fix already applied to Sleep
+      // Regularity's own range-bar chart, applied proactively here
+      // too rather than waiting for the same symptom to get reported
+      // again for a different chart.
+      const allValues = trend.flatMap(t => [t.min, t.max]);
+      const span = Math.max(...allValues) - Math.min(...allValues);
+      const margin = Math.max(span * 0.15, 2);
+      const yMin = Math.min(...allValues) - margin;
+      const yMax = Math.max(...allValues) + margin;
+
+      // The flat "week average" line uses each night's own MEAN (not
+      // median) - matching the same "average of nightly averages"
+      // semantics as this page's own big number and Sleep Duration's
+      // "Week average" line, not a separate, differently-defined
+      // statistic.
+      const meanValues = trend.map(t => t.mean).filter(v => v !== null && v !== undefined);
+      const weekMean = meanValues.length ? meanValues.reduce((a, b) => a + b, 0) / meanValues.length : null;
+
+      const chart = buildRangeBarChart(
+        document.getElementById("sleep-vitals-trend-chart"), series, devices, "week",
+        {}, yMin, cfg.decimals, undefined,
+        { yMax, meanLine: weekMean !== null ? { value: weekMean, label: "Week average" } : undefined }
       );
       if (chart) registerActiveChart(chart);
     } else {

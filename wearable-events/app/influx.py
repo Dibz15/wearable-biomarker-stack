@@ -543,8 +543,9 @@ def local_today_bounds(for_date: date | None = None) -> tuple[datetime, datetime
 
 
 def _device_stat_by_field(field: str, user: str, start: datetime, end: datetime, stat: str) -> dict[str, float]:
-    ''' One reducer (stat: "last"/"mean"/"min"/"max") for one field,
-    grouped by device, within [start, end). Returns {device_name: value}.
+    ''' One reducer (stat: "last"/"mean"/"min"/"max"/"median") for one
+    field, grouped by device, within [start, end). Returns
+    {device_name: value}.
 
     Deliberately one simple query per (field, stat) pair rather than a
     cleverer combined Flux query (e.g. multiple yield() calls in one
@@ -554,7 +555,7 @@ def _device_stat_by_field(field: str, user: str, start: datetime, end: datetime,
     fewer-but-trickier round trips. Personal-use traffic volume makes
     that the right tradeoff here too.
     '''
-    if stat not in ("last", "mean", "min", "max"):
+    if stat not in ("last", "mean", "min", "max", "median"):
         raise ValueError(f"unsupported stat: {stat!r}")
 
     client = get_client()
@@ -1985,18 +1986,21 @@ def get_sleep_stage_trend(user: str, start_date: date, end_date: date) -> list[d
 
 
 def get_sleep_vitals_trend(field: str, user: str, start_date: date, end_date: date) -> list[dict]:
-    ''' Per-night average of `field` (heart_rate or
+    ''' Per-night min/max/median/mean of `field` (heart_rate or
     sleep_respiratory_rate) for each night waking in
-    [start_date, end_date) - the "Last 7 days" trend on the Sleep
-    Heart Rate / Sleep Respiratory Rate detail pages. Same primary-
-    device-per-night selection as get_sleep_timing_trend()/
+    [start_date, end_date) - the "Last 7 days" range-bar chart (with a
+    per-night median tick and a flat weekly-mean line, same visual
+    language as this app's other range-bar charts) on the Sleep Heart
+    Rate / Sleep Respiratory Rate detail pages. Same primary-device-
+    per-night selection as get_sleep_timing_trend()/
     get_sleep_stage_trend() (see _primary_device_session()).
 
     Returns a chronologically-sorted list of {"date": "YYYY-MM-DD",
-    "value": float} - nights with no recorded session, OR no readings
-    of this field during that session, are simply omitted (not a null
-    entry), so callers building an average or a chart don't need to
-    filter these out themselves.
+    "device": <device name>, "min": float, "max": float,
+    "median": float, "mean": float} - nights with no recorded session,
+    OR no readings of this field during that session, are simply
+    omitted (not a null entry), so callers building an average or a
+    chart don't need to filter these out themselves.
     '''
     by_date = _sleep_sessions_by_wake_date(user, start_date, end_date)
     result = []
@@ -2005,12 +2009,19 @@ def get_sleep_vitals_trend(field: str, user: str, start_date: date, end_date: da
         if not sessions:
             continue
         device, session = _primary_device_session(sessions)
-        means = _device_stat_by_field(field, user, session["start_time"], session["end_time"], "mean")
-        if device not in means:
+        mins = _device_stat_by_field(field, user, session["start_time"], session["end_time"], "min")
+        if device not in mins:
             continue
+        maxs = _device_stat_by_field(field, user, session["start_time"], session["end_time"], "max")
+        medians = _device_stat_by_field(field, user, session["start_time"], session["end_time"], "median")
+        means = _device_stat_by_field(field, user, session["start_time"], session["end_time"], "mean")
         result.append({
             "date": wake_date.strftime("%Y-%m-%d"),
-            "value": round(means[device], 1),
+            "device": device,
+            "min": round(mins[device], 1),
+            "max": round(maxs[device], 1),
+            "median": round(medians[device], 1) if device in medians else None,
+            "mean": round(means[device], 1) if device in means else None,
         })
     return result
 
