@@ -46,6 +46,7 @@ from app.influx import (
     get_sleep_stage_breakdown,
     get_sleep_stage_trend,
     get_sleep_timing_trend,
+    get_sleep_regularity_index,
     get_sleep_vitals_series,
     get_sleep_vitals_trend,
     get_stood_hours,
@@ -972,6 +973,28 @@ def get_sleep_timing_trend_endpoint(period: str, end_date: str | None = None, cu
         raise HTTPException(400, f"unsupported period: {period!r} (must be one of {sorted(SLEEP_TREND_PERIODS)})")
     start, end = _period_bounds(period, end_date)
     return get_sleep_timing_trend(current_user["username"], start.date(), end.date())
+
+
+@app.get("/sleep/regularity-index")
+def get_sleep_regularity_index_endpoint(end_date: str | None = None, days: int = 7, current_user: dict = Depends(get_current_user)):
+    ''' Sleep Regularity Index (SRI) - a real, peer-reviewed metric
+    (Phillips et al. 2017, Scientific Reports 7:3216) for the Sleep
+    Regularity detail page, replacing an attempt to reproduce Zepp's
+    own unpublished 0-100% "regularity" score (see UI_DESIGN_NOTES.md's
+    own note that formula was never published). See
+    get_sleep_regularity_index()'s own docstring for the full
+    definition and citation.
+
+    `days` mirrors the same window the page's other charts already use
+    (7 by default) - the original paper's own recommendation is 7, or a
+    multiple of 7, consecutive days, so this isn't an arbitrary default.
+    Returns null (not a 4xx) when there's insufficient data (fewer than
+    2 usable consecutive-night pairs) - matching how every other
+    "insufficient data" state in this app's sleep/vitals baseline
+    endpoints already behaves, not an error condition.
+    '''
+    parsed_date = _parse_optional_date(end_date)
+    return get_sleep_regularity_index(current_user["username"], end_date=parsed_date, num_days=days)
 
 
 @app.get("/sleep/stage-trend")

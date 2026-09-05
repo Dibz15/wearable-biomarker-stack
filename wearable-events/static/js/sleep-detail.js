@@ -314,6 +314,38 @@ function formatClockTime(hour) {
   return `${h12}:${String(min).padStart(2, "0")} ${period}`;
 }
 
+// The Sleep Regularity Index (SRI) - a real, peer-reviewed, widely-
+// validated metric (Phillips et al. 2017), not an attempt to
+// reproduce Zepp's own unpublished 0-100% "regularity" score (see
+// UI_DESIGN_NOTES.md's own note that that formula was never
+// published). Deliberately no "good/bad" tier label here - the
+// literature classifies regular-vs-irregular sleepers by COHORT-
+// SPECIFIC quintiles (top/bottom fifth of whatever study population),
+// not a fixed universal cutoff, so inventing one here would be
+// claiming more precision than the source actually supports. The raw
+// score plus its own citation is the honest amount of interpretation
+// to offer.
+function renderSleepRegularityIndex(sri) {
+  if (sri === null) {
+    return `
+      <div class="sleep-summary-card">
+        <p class="metric-card-empty">Not enough consecutive nights of data yet to compute a Sleep Regularity Index (needs at least 2 consecutive night-to-night comparisons).</p>
+      </div>
+    `;
+  }
+  return `
+    <div class="sleep-summary-card">
+      <div class="sleep-summary-top">
+        <span class="sleep-summary-duration">${sri.sri}</span>
+        <span class="sleep-summary-date">Sleep Regularity Index</span>
+      </div>
+      <p class="sleep-duration-source">
+        The percentage probability of being asleep (or awake) at the same clock time on any two nights \u2013 100 means an identical sleep/wake schedule every night, 0 a statistically random pattern, and negative values a consistently reversed one. Based on ${sri.pairs_used} night-to-night comparison${sri.pairs_used === 1 ? "" : "s"}. Source: ${escapeHtml(sri.source)}.
+      </p>
+    </div>
+  `;
+}
+
 export async function openSleepRegularityDetail(anchorDate = todayISO()) {
   openDetailScreen("Sleep Regularity");
   await renderSleepRegularityDay(anchorDate);
@@ -327,7 +359,10 @@ async function renderSleepRegularityDay(anchorDate) {
   clearActiveCharts();
 
   try {
-    const trend = await api(`/sleep/timing-trend?period=week&end_date=${anchorDate}`);
+    const [trend, sri] = await Promise.all([
+      api(`/sleep/timing-trend?period=week&end_date=${anchorDate}`),
+      api(`/sleep/regularity-index?end_date=${anchorDate}`),
+    ]);
 
     if (!trend.length) {
       content.innerHTML = `
@@ -347,6 +382,7 @@ async function renderSleepRegularityDay(anchorDate) {
 
     content.innerHTML = `
       ${renderDateNav("day", anchorDate)}
+      ${renderSleepRegularityIndex(sri)}
       <div class="sleep-summary-card">
         <div class="sleep-stats-row">
           <div class="sleep-stat-item">
@@ -379,6 +415,22 @@ async function renderSleepRegularityDay(anchorDate) {
 
     const devices = [...new Set(trend.map(t => t.device))];
 
+    // Shared margin helper - a tight [min,max] axis (rather than
+    // Chart.js's own default auto-scaling, which for a floating-bar
+    // dataset tends toward including 0 and produced a near-24-hour-wide
+    // axis here) with a little breathing room on each side so a point
+    // sitting exactly at the real min/max isn't drawn flush against the
+    // chart's own edge.
+    function marginRange(values, marginHours) {
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      return [min - marginHours, max + marginHours];
+    }
+
+    const midpoints = trend.map((t, i) => (bedtimes[i] + waketimes[i]) / 2);
+    const meanMidpoint = midpoints.reduce((a, b) => a + b, 0) / midpoints.length;
+    const [windowMin, windowMax] = marginRange([...bedtimes, ...waketimes], 0.5);
+
     const windowSeries = {};
     devices.forEach(d => { windowSeries[d] = []; });
     trend.forEach(t => {
@@ -386,27 +438,36 @@ async function renderSleepRegularityDay(anchorDate) {
         t: t.date,
         min: noonAnchoredHour(t.start_time),
         max: noonAnchoredHour(t.end_time),
-        median: (noonAnchoredHour(t.start_time) + noonAnchoredHour(t.end_time)) / 2,
+        // No `median` here (unlike other buildRangeBarChart callers) -
+        // this chart shows ONE flat week-mean line (extra.meanLine
+        // below) instead of a per-night median tick, so there's
+        // nothing for the shared median-marker plugin to draw per bar.
       });
     });
     const windowChart = buildRangeBarChart(
-      document.getElementById("sleep-regularity-window-chart"), windowSeries, devices, "week", {}, undefined, undefined, formatClockTime
+      document.getElementById("sleep-regularity-window-chart"), windowSeries, devices, "week",
+      {}, windowMin, undefined, formatClockTime,
+      { yMax: windowMax, meanLine: { value: meanMidpoint, label: "Week average" } }
     );
     if (windowChart) registerActiveChart(windowChart);
 
+    const [bedtimeMin, bedtimeMax] = marginRange(bedtimes, 0.5);
     const bedtimeSeries = {};
     devices.forEach(d => { bedtimeSeries[d] = []; });
     trend.forEach(t => { bedtimeSeries[t.device].push({ t: t.date, value: noonAnchoredHour(t.start_time) }); });
     const bedtimeChart = buildTimeScatterChart(
-      document.getElementById("sleep-regularity-bedtime-chart"), bedtimeSeries, devices, { yTickCallback: formatClockTime }
+      document.getElementById("sleep-regularity-bedtime-chart"), bedtimeSeries, devices,
+      { yTickCallback: formatClockTime, connectLine: true, yMin: bedtimeMin, yMax: bedtimeMax }
     );
     if (bedtimeChart) registerActiveChart(bedtimeChart);
 
+    const [waketimeMin, waketimeMax] = marginRange(waketimes, 0.5);
     const waketimeSeries = {};
     devices.forEach(d => { waketimeSeries[d] = []; });
     trend.forEach(t => { waketimeSeries[t.device].push({ t: t.date, value: noonAnchoredHour(t.end_time) }); });
     const waketimeChart = buildTimeScatterChart(
-      document.getElementById("sleep-regularity-waketime-chart"), waketimeSeries, devices, { yTickCallback: formatClockTime }
+      document.getElementById("sleep-regularity-waketime-chart"), waketimeSeries, devices,
+      { yTickCallback: formatClockTime, connectLine: true, yMin: waketimeMin, yMax: waketimeMax }
     );
     if (waketimeChart) registerActiveChart(waketimeChart);
   } catch (e) {

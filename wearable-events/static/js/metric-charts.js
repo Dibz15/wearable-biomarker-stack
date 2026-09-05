@@ -110,7 +110,51 @@ const medianMarkerPlugin = {
   },
 };
 
-export function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}, yMin, decimals, yTickCallback) {
+// Shared "dashed mean line across the whole chart" plugin factory -
+// used by both buildTrendBarChart (a plain single value per bucket)
+// and buildRangeBarChart's optional meanLine option (a range-bar chart
+// wanting ONE flat line instead of the existing per-bar median tick).
+// Drawn via afterDatasetsDraw (always on top, not order-weight
+// dependent) directly across chartArea.left-to-right (the chart's real
+// pixel bounds, not tied to the category axis's own per-point
+// positions) - see buildHypnogramSVG's own comment for why a
+// dataset-based line mixed onto a category axis doesn't reach the
+// real edges or draw on top reliably; this sidesteps both issues the
+// same way.
+function buildMeanLinePlugin(id, meanValue, label, formatFn) {
+  if (meanValue === null || meanValue === undefined) return null;
+  return {
+    id,
+    afterDatasetsDraw(chart) {
+      const { ctx, chartArea, scales } = chart;
+      const y = scales.y.getPixelForValue(meanValue);
+
+      ctx.save();
+      ctx.strokeStyle = "#8a8d99";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 5]);
+      ctx.beginPath();
+      ctx.moveTo(chartArea.left, y);
+      ctx.lineTo(chartArea.right, y);
+      ctx.stroke();
+      ctx.restore();
+
+      // Flips below the line instead of above when the line sits too
+      // close to the chart's own top edge for an above-line label to fit.
+      const text = `${label || "Average"}: ${formatFn(meanValue)}`;
+      const labelBelow = y - chartArea.top < 14;
+      ctx.save();
+      ctx.fillStyle = "#8a8d99";
+      ctx.font = "11px sans-serif";
+      ctx.textAlign = "right";
+      ctx.textBaseline = labelBelow ? "top" : "bottom";
+      ctx.fillText(text, chartArea.right, labelBelow ? y + 4 : y - 4);
+      ctx.restore();
+    },
+  };
+}
+
+export function buildRangeBarChart(canvas, series, devices, period, rollingMean = {}, yMin, decimals, yTickCallback, extra = {}) {
   // Floating bars: Chart.js draws a [min, max] pair as a bar spanning
   // that range, rather than a bar from zero - exactly the "vertical
   // range bar per period" pattern from the Zepp research (see
@@ -190,7 +234,17 @@ export function buildRangeBarChart(canvas, series, devices, period, rollingMean 
   return new Chart(canvas, {
     type: "bar",
     data: { labels, datasets: [...barDatasets, ...rollingDatasets] },
-    plugins: [medianMarkerPlugin],
+    plugins: [
+      medianMarkerPlugin,
+      // Optional single flat mean line for the whole chart - an
+      // alternative to the per-bar median tick above, for a chart like
+      // Sleep Regularity's sleep-window bar where "the week's average"
+      // is more useful than a per-night median mark. Callers that want
+      // this simply don't pass a `median` value per point at all (the
+      // median plugin already no-ops on a missing/null median), so the
+      // two never compete for the same bar.
+      buildMeanLinePlugin("rangeBarMeanLine", extra.meanLine?.value, extra.meanLine?.label, yTickCallback || ((v) => formatNum(v, decimals))),
+    ].filter(Boolean),
     options: {
       responsive: true,
       animation: false,
@@ -220,7 +274,13 @@ export function buildRangeBarChart(canvas, series, devices, period, rollingMean 
           // makes real, meaningful drops hard to see. Only set when a
           // chart's config actually specifies one (yMin) - other
           // fields keep Chart.js's normal auto-scaling untouched.
+          // extra.yMax is the same idea for the top of the range -
+          // Chart.js's own auto-scaling for a floating-bar dataset
+          // defaults toward including 0, which for something like
+          // Sleep Regularity's noon-anchored clock-time axis produces
+          // a much wider range than the data actually spans.
           min: yMin,
+          max: extra.yMax,
         },
       },
       plugins: {
@@ -916,46 +976,13 @@ export function buildTrendBarChart(canvas, series, devices, config = {}) {
   // all).
   const allValues = devices.flatMap(d => series[d].map(p => p.value)).filter(v => v !== null && v !== undefined);
   const mean = allValues.length ? allValues.reduce((a, b) => a + b, 0) / allValues.length : null;
-
-  const meanLinePlugin = {
-    id: "trendMeanLine",
-    afterDatasetsDraw(chart) {
-      if (mean === null) return;
-      const { ctx, chartArea, scales } = chart;
-      const y = scales.y.getPixelForValue(mean);
-
-      ctx.save();
-      ctx.strokeStyle = "#8a8d99";
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([5, 5]);
-      ctx.beginPath();
-      ctx.moveTo(chartArea.left, y);
-      ctx.lineTo(chartArea.right, y);
-      ctx.stroke();
-      ctx.restore();
-
-      // A small value label near the line, rather than a legend entry
-      // (this line isn't a real dataset, so it has no automatic
-      // legend representation) - flips below the line instead of
-      // above when the line sits too close to the chart's own top
-      // edge for an above-line label to fit.
-      const formatted = config.decimals !== undefined ? mean.toFixed(config.decimals) : mean;
-      const text = `${config.meanLabel || "Average"}: ${formatted}${config.unit || ""}`;
-      const labelBelow = y - chartArea.top < 14;
-      ctx.save();
-      ctx.fillStyle = "#8a8d99";
-      ctx.font = "11px sans-serif";
-      ctx.textAlign = "right";
-      ctx.textBaseline = labelBelow ? "top" : "bottom";
-      ctx.fillText(text, chartArea.right, labelBelow ? y + 4 : y - 4);
-      ctx.restore();
-    },
-  };
+  const meanFormat = (v) => `${config.decimals !== undefined ? v.toFixed(config.decimals) : v}${config.unit || ""}`;
+  const meanLinePlugin = buildMeanLinePlugin("trendMeanLine", mean, config.meanLabel, meanFormat);
 
   return new Chart(canvas, {
     type: "bar",
     data: { labels, datasets: barDatasets },
-    plugins: [meanLinePlugin],
+    plugins: [meanLinePlugin].filter(Boolean),
     options: {
       responsive: true,
       animation: false,
@@ -1098,7 +1125,17 @@ export function buildTimeScatterChart(canvas, series, devices, config = {}) {
       type: "line",
       label: device,
       data: allPeriods.map(t => (t in byPeriod ? byPeriod[t] : null)),
-      showLine: false,
+      // Off by default (a genuine scatter, matching this function's own
+      // name/purpose) - Sleep Regularity's own "Went to bed"/"Get up"
+      // charts opt into connected lines explicitly (config.connectLine),
+      // since seeing night-to-night drift as a connected path reads more
+      // like the "consistency over time" story those charts are for,
+      // without changing the default for any other future caller that
+      // just wants points.
+      showLine: !!config.connectLine,
+      borderColor: color,
+      borderWidth: 1.5,
+      spanGaps: true,
       pointRadius: 5,
       pointBackgroundColor: color,
       pointBorderColor: color,

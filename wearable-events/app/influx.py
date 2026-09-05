@@ -2,7 +2,7 @@ import hashlib
 import statistics
 import uuid
 from collections import Counter
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from influxdb_client import InfluxDBClient, Point
@@ -1842,6 +1842,117 @@ def get_sleep_timing_trend(user: str, start_date: date, end_date: date) -> list[
             "device": device,
         })
     return result
+
+
+def get_sleep_regularity_index(user: str, end_date: date | None = None, num_days: int = 7) -> dict | None:
+    ''' Sleep Regularity Index (SRI) - Phillips et al. 2017, "Irregular
+    sleep/wake patterns are associated with poorer academic performance
+    and delayed circadian and sleep/wake timing," Scientific Reports
+    7:3216 (doi:10.1038/s41598-017-03171-4). Since independently
+    replicated in much larger cohorts (UK Biobank, >500,000 adults;
+    MESA's older-adult sample) and linked to cardiometabolic risk,
+    incident depression/anxiety, and all-cause mortality, independent
+    of sleep duration itself. This is a real, peer-reviewed,
+    widely-used metric we can actually compute and cite - NOT an
+    attempt to reverse-engineer Zepp's own unpublished 0-100%
+    "regularity" score (see UI_DESIGN_NOTES.md's own note that that
+    formula was never published and isn't reproducible).
+
+    Definition: the percentage probability of being in the same sleep/
+    wake state (asleep vs. awake) at any two clock times exactly 24
+    hours apart, averaged across every pair of consecutive days in the
+    window:
+
+        SRI = -100 + (200 / (M*(N-1))) * sum_j sum_i delta(s[i,j], s[i+1,j])
+
+    where N is the number of days, M is the number of epochs per day
+    (here, 1-minute epochs, so M=1440), s[i,j] is the sleep/wake state
+    (1=asleep, 0=awake) at day i minute j, and delta=1 when two
+    CONSECUTIVE days agree at the same minute-of-day, 0 otherwise.
+    Ranges from -100 (every consecutive day exactly disagrees) to +100
+    (identical sleep/wake timing every day); 0 represents a
+    statistically random pattern. This exact formula (and the
+    -100..100 scale) is consistent across the original paper and every
+    later replication/toolkit (GGIR, sleepreg) found during research.
+
+    Days are defined NOON-TO-NOON, the original paper's own convention
+    - and the same one this app's bedtime/wake-time charts already use
+    independently - so a normal night's sleep session (PM to AM) falls
+    entirely within one day's own window rather than being split
+    across two by a midnight boundary.
+
+    A night with no recorded session breaks BOTH day-pairs it would
+    have been part of (the pair ending on it and the pair starting the
+    night after) - SRI is only computed over pairs where both days have
+    a real recorded session, rather than failing the whole window over
+    one missing night. Only the binary asleep/awake state matters here
+    (not sleep stage) - naps aren't included, since this app's
+    underlying data model is one main per-night session, not full nap
+    detection.
+
+    Returns {"sri": float, "days_used": int, "pairs_used": int,
+    "source": <citation>}, or None if fewer than 2 usable consecutive-
+    day pairs exist in the window (matching the "insufficient data"
+    state every other implementation of this metric also reports for a
+    too-short recording).
+    '''
+    tz = ZoneInfo(TZ_NAME)
+    if end_date is None:
+        end_date = datetime.now(tz).date()
+    start_date = end_date - timedelta(days=num_days - 1)
+    by_date = _sleep_sessions_by_wake_date(user, start_date, end_date + timedelta(days=1))
+
+    MINUTES_PER_DAY = 1440
+
+    def day_vector(wake_date: date) -> list[bool] | None:
+        ''' 1440-length asleep/awake array for the noon-to-noon day
+        ending at `wake_date` noon (i.e. [wake_date-1 12:00,
+        wake_date 12:00) local time) - True at any minute covered by
+        that night's own recorded session. None if there's no session
+        for that night at all.
+        '''
+        sessions = by_date.get(wake_date)
+        if not sessions:
+            return None
+        _, session = _primary_device_session(sessions)
+        day_start = datetime.combine(wake_date - timedelta(days=1), time(12, 0), tzinfo=tz)
+        sess_start = session["start_time"].astimezone(tz)
+        sess_end = session["end_time"].astimezone(tz)
+        start_min = max(0, int((sess_start - day_start).total_seconds() // 60))
+        end_min = min(MINUTES_PER_DAY, int((sess_end - day_start).total_seconds() // 60))
+        vec = [False] * MINUTES_PER_DAY
+        for m in range(start_min, end_min):
+            vec[m] = True
+        return vec
+
+    total_matches = 0
+    total_epochs = 0
+    pairs_used = 0
+    days_used: set[date] = set()
+
+    prev_vec, prev_date = None, None
+    current = start_date
+    while current <= end_date:
+        vec = day_vector(current)
+        if vec is not None and prev_vec is not None and (current - prev_date).days == 1:
+            total_matches += sum(1 for a, b in zip(prev_vec, vec) if a == b)
+            total_epochs += MINUTES_PER_DAY
+            pairs_used += 1
+            days_used.add(prev_date)
+            days_used.add(current)
+        prev_vec, prev_date = vec, current
+        current += timedelta(days=1)
+
+    if pairs_used < 2:
+        return None
+
+    sri = -100 + (200 * total_matches / total_epochs)
+    return {
+        "sri": round(sri, 1),
+        "days_used": len(days_used),
+        "pairs_used": pairs_used,
+        "source": "Phillips et al. 2017, Scientific Reports 7:3216 (doi:10.1038/s41598-017-03171-4)",
+    }
 
 
 def get_sleep_stage_trend(user: str, start_date: date, end_date: date) -> list[dict]:
