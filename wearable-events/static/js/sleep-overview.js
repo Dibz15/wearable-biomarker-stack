@@ -1,10 +1,14 @@
-// --- Sleep tab's objective-data overview (day view) ---
-// Separate module from sleep.js (the existing subjective 1-5 journal
-// feature, which keeps its own name/tab-loading role) - this renders
-// the device-derived content Zepp's own Sleep tab shows ABOVE its
-// "Sleep Tags" journal-style input, matching that same top-to-bottom
-// order: objective data first, subjective input below it (see
-// UI_DESIGN_NOTES.md's "Sleep tab" entry).
+// --- Sleep tab: per-night objective overview + subjective journal ---
+// Both objective data (device-derived: duration, hypnogram, quality
+// metrics, stats row) and the subjective "how did you sleep" journal
+// for the SAME night now live in this one file, matching Zepp's own
+// top-to-bottom order (objective data first, subjective input below
+// it - see UI_DESIGN_NOTES.md's "Sleep tab" entry). The journal used
+// to be a separate module (sleep.js, now retired) with its own flat
+// "Recent nights" list across every logged entry at once - that
+// predated each night having its own dedicated, date-nav-driven page
+// and has been replaced: each night's page now shows/edits only its
+// own entry (see the journal section further down).
 import { escapeHtml, api, todayISO, shiftISODate } from "./core.js";
 import { renderDateNav } from "./metric-detail.js";
 import { buildHypnogramSVG } from "./metric-charts.js";
@@ -12,6 +16,215 @@ import { openSleepDurationDetail, openSleepHeartRateDetail, openSleepRespiratory
 
 const SLEEP_STAGE_ORDER = ["deep", "light", "rem", "awake"];
 const SLEEP_STAGE_LABELS = { deep: "Deep", light: "Light", rem: "REM", awake: "Awake" };
+
+// --- Subjective sleep journal, scoped to ONE specific night ---
+// Replaces the old flat "Recent nights" list (sleep.js, now retired) -
+// that predates each night having its own dedicated page and showed
+// every logged entry across many nights at once. Each night's own
+// page now shows/edits only ITS OWN entry: the submit form when
+// nothing's been logged yet, or a read-only summary with an Edit
+// option once something has.
+const KNOWN_SLEEP_QUALIFIERS = ["groggy", "woke_up_often", "vivid_dreams", "racing_thoughts"];
+// A SEPARATE category from the qualifiers above - things that
+// happened BEFORE sleep, not how the sleep itself felt. Kept as its
+// own known-key list (matching write_sleep_point's own "factor_"
+// prefix convention on the backend) so the two chip groups render and
+// submit distinctly rather than being lumped into one.
+const KNOWN_PRE_SLEEP_FACTORS = [
+  "read", "alcohol", "late_water", "late_eating", "late_screen_time",
+  "games", "anxiety", "illness", "late_work", "late_shower",
+];
+
+function humanizeChipLabel(key) {
+  const words = key.replace(/_/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+function buildBoolPayload(knownKeys, selectedSet) {
+  // Every known key sent explicitly as true/false, not just the ones
+  // that are true - InfluxDB only overwrites fields actually included
+  // in a write, so omitting a previously-true one would silently leave
+  // it set instead of clearing it (same reasoning already documented
+  // for qualifiers - applies identically to pre-sleep factors).
+  const payload = {};
+  knownKeys.forEach(k => { payload[k] = selectedSet.has(k); });
+  return payload;
+}
+
+function renderChipButtons(knownKeys, selectedSet) {
+  return knownKeys.map(k => `
+    <button class="chip ${selectedSet.has(k) ? "selected" : ""}" data-chip="${k}">${humanizeChipLabel(k)}</button>
+  `).join("");
+}
+
+// In-progress submit/edit draft for the CURRENTLY-VIEWED night only -
+// explicitly reset in loadSleepOverview() whenever a different night
+// loads, since this is inherently per-night state that shouldn't
+// survive navigating away.
+let journalDraft = null; // { score: number|null, qualifiers: Set, factors: Set } | null
+let journalEditingExisting = false; // true while editing an ALREADY-LOGGED entry
+
+function renderJournalReadOnly(entry) {
+  const qualifierChips = KNOWN_SLEEP_QUALIFIERS
+    .filter(q => entry.qualifiers && entry.qualifiers[q])
+    .map(q => `<span class="chip-small">${humanizeChipLabel(q)}</span>`)
+    .join("");
+  const factorChips = KNOWN_PRE_SLEEP_FACTORS
+    .filter(f => entry.pre_sleep_factors && entry.pre_sleep_factors[f])
+    .map(f => `<span class="chip-small">${humanizeChipLabel(f)}</span>`)
+    .join("");
+  return `
+    <div class="sleep-journal-card">
+      <div class="sleep-journal-header">
+        <span class="sleep-entry-score">${"\u25cf".repeat(entry.score)}${"\u25cb".repeat(5 - entry.score)}</span>
+        <button class="small-btn" id="journal-edit-btn">Edit</button>
+      </div>
+      ${qualifierChips ? `<div class="timeline-tags">${qualifierChips}</div>` : ""}
+      ${factorChips ? `
+        <p class="sleep-journal-subheading">Pre-Sleep Factors</p>
+        <div class="timeline-tags">${factorChips}</div>
+      ` : ""}
+    </div>
+  `;
+}
+
+function renderJournalForm(isEditingExisting) {
+  const scoreButtons = [1, 2, 3, 4, 5].map(n => `
+    <button class="sleep-btn ${journalDraft.score === n ? "selected" : ""}" data-score="${n}">${n}</button>
+  `).join("");
+  return `
+    <div class="sleep-journal-card">
+      <p class="section-label">How did you sleep?</p>
+      <div class="sleep-scale">${scoreButtons}</div>
+      <p class="sleep-journal-subheading">Sleep Quality</p>
+      <div class="qualifier-chips" id="journal-qualifier-chips">${renderChipButtons(KNOWN_SLEEP_QUALIFIERS, journalDraft.qualifiers)}</div>
+      <p class="sleep-journal-subheading">Pre-Sleep Factors</p>
+      <div class="qualifier-chips" id="journal-factor-chips">${renderChipButtons(KNOWN_PRE_SLEEP_FACTORS, journalDraft.factors)}</div>
+      <div class="timeline-edit-actions">
+        <button class="small-btn" id="journal-save-btn" ${journalDraft.score === null ? "disabled" : ""}>${isEditingExisting ? "Save" : "Submit"}</button>
+        ${isEditingExisting ? `
+          <button class="small-btn" id="journal-cancel-btn">Cancel</button>
+          <button class="small-btn danger" id="journal-delete-btn">Delete</button>
+        ` : ""}
+      </div>
+      <p class="status" id="journal-status"></p>
+    </div>
+  `;
+}
+
+// entry is null when nothing's been logged for this night yet - the
+// ONLY case where the submit form shows unconditionally. Once an
+// entry exists, it shows read-only by default; the form only
+// reappears if the person explicitly taps Edit (journalEditingExisting).
+function renderJournalSection(entry) {
+  if (entry && !journalEditingExisting) return renderJournalReadOnly(entry);
+  if (!journalDraft) {
+    journalDraft = entry
+      ? {
+          score: entry.score,
+          qualifiers: new Set(KNOWN_SLEEP_QUALIFIERS.filter(q => entry.qualifiers && entry.qualifiers[q])),
+          factors: new Set(KNOWN_PRE_SLEEP_FACTORS.filter(f => entry.pre_sleep_factors && entry.pre_sleep_factors[f])),
+        }
+      : { score: null, qualifiers: new Set(), factors: new Set() };
+  }
+  return renderJournalForm(!!entry);
+}
+
+function rerenderJournal(anchorDate, entry) {
+  const container = document.getElementById("sleep-journal-section");
+  container.innerHTML = renderJournalSection(entry);
+  wireJournalSection(anchorDate, entry);
+}
+
+async function reloadJournalSection(anchorDate) {
+  // Re-fetches just the journal entry (not the whole page's overview/
+  // hypnogram data, which didn't change) after a save/delete, since
+  // the entry's own existence/content may now be different.
+  const container = document.getElementById("sleep-journal-section");
+  try {
+    const entry = await api(`/sleep/entry?date=${anchorDate}`);
+    container.innerHTML = renderJournalSection(entry);
+    wireJournalSection(anchorDate, entry);
+  } catch (e) {
+    container.innerHTML = `<p class="status">Error loading sleep journal: ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+function wireJournalSection(anchorDate, entry) {
+  const container = document.getElementById("sleep-journal-section");
+
+  if (entry && !journalEditingExisting) {
+    container.querySelector("#journal-edit-btn").addEventListener("click", () => {
+      journalEditingExisting = true;
+      journalDraft = null; // force a fresh draft rebuilt from the existing entry
+      rerenderJournal(anchorDate, entry);
+    });
+    return;
+  }
+
+  container.querySelectorAll(".sleep-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      journalDraft.score = parseInt(btn.dataset.score, 10);
+      rerenderJournal(anchorDate, entry);
+    });
+  });
+  container.querySelectorAll(".chip").forEach(chip => {
+    chip.addEventListener("click", () => {
+      const key = chip.dataset.chip;
+      const set = KNOWN_PRE_SLEEP_FACTORS.includes(key) ? journalDraft.factors : journalDraft.qualifiers;
+      if (set.has(key)) set.delete(key); else set.add(key);
+      rerenderJournal(anchorDate, entry);
+    });
+  });
+
+  const status = container.querySelector("#journal-status");
+  container.querySelector("#journal-save-btn").addEventListener("click", async () => {
+    if (journalDraft.score === null) return;
+    status.textContent = entry ? "Saving..." : "Submitting...";
+    const payload = {
+      score: journalDraft.score,
+      qualifiers: buildBoolPayload(KNOWN_SLEEP_QUALIFIERS, journalDraft.qualifiers),
+      pre_sleep_factors: buildBoolPayload(KNOWN_PRE_SLEEP_FACTORS, journalDraft.factors),
+    };
+    try {
+      if (entry) {
+        await api(`/sleep/${entry.entry_id}`, { method: "PATCH", body: JSON.stringify(payload) });
+      } else {
+        await api(`/sleep?date=${anchorDate}`, { method: "POST", body: JSON.stringify(payload) });
+      }
+      journalDraft = null;
+      journalEditingExisting = false;
+      await reloadJournalSection(anchorDate);
+    } catch (e) {
+      status.textContent = `Error: ${e.message}`;
+    }
+  });
+
+  const cancelBtn = container.querySelector("#journal-cancel-btn");
+  if (cancelBtn) {
+    cancelBtn.addEventListener("click", () => {
+      journalDraft = null;
+      journalEditingExisting = false;
+      rerenderJournal(anchorDate, entry);
+    });
+  }
+
+  const deleteBtn = container.querySelector("#journal-delete-btn");
+  if (deleteBtn) {
+    deleteBtn.addEventListener("click", async () => {
+      if (!confirm("Delete this sleep journal entry? This can't be undone.")) return;
+      status.textContent = "Deleting...";
+      try {
+        await api(`/sleep/${entry.entry_id}`, { method: "DELETE" });
+        journalDraft = null;
+        journalEditingExisting = false;
+        await reloadJournalSection(anchorDate);
+      } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+      }
+    });
+  }
+}
 
 function formatDuration(totalSeconds) {
   const totalMin = Math.round(totalSeconds / 60);
@@ -138,10 +351,16 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
   container.innerHTML = `${renderDateNav("day", anchorDate)}<p class="muted">Loading...</p>`;
   wireSleepOverviewDateNav(anchorDate);
 
+  // A fresh night's own journal state, not whatever was left over from
+  // whichever night was being viewed before this navigation.
+  journalDraft = null;
+  journalEditingExisting = false;
+
   try {
-    const [overview, hypnogram] = await Promise.all([
+    const [overview, hypnogram, journalEntry] = await Promise.all([
       api(`/sleep/overview?date=${anchorDate}`),
       api(`/sleep/hypnogram?date=${anchorDate}`),
+      api(`/sleep/entry?date=${anchorDate}`),
     ]);
 
     if (overview === null) {
@@ -173,6 +392,7 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
       <div class="sleep-summary-card metric-card-tappable" data-detail-field="sleep-regularity" role="button" tabindex="0">
         <span class="metric-card-label">Sleep Regularity</span>
       </div>
+      <div id="sleep-journal-section">${renderJournalSection(journalEntry)}</div>
     `;
     wireSleepOverviewDateNav(anchorDate);
     // Each sub-detail page has one or more tappable elements linking
@@ -195,6 +415,7 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
       });
     });
+    wireJournalSection(anchorDate, journalEntry);
   } catch (e) {
     container.innerHTML = `${renderDateNav("day", anchorDate)}<p class="status">Error loading sleep data: ${escapeHtml(e.message)}</p>`;
     wireSleepOverviewDateNav(anchorDate);

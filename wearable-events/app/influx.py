@@ -198,7 +198,7 @@ def write_event_points(*, user: str, tags: list[str], source: str, timestamp: da
 
 
 def write_sleep_point(*, user: str, session_start: datetime, sleep_date: str, score: int,
-                       qualifiers: dict, submission_ts: datetime):
+                       qualifiers: dict, pre_sleep_factors: dict | None = None, submission_ts: datetime):
     ''' One point per SESSION, not per date - anchored at the actual
     session start time, with a deterministic entry_id (see
     sleep_entry_id()) as the stable tag used for addressing edits/
@@ -215,6 +215,15 @@ def write_sleep_point(*, user: str, session_start: datetime, sleep_date: str, sc
     sleep_date is still written as a tag (not just a display label) -
     kept for date-range querying convenience ("all entries logged
     around Aug 31") even though it's no longer the uniqueness key.
+
+    pre_sleep_factors are a SEPARATE concept from qualifiers - things
+    that happened BEFORE sleep (read, had alcohol, late screen time,
+    ...) rather than how the sleep itself felt (groggy, vivid dreams,
+    ...). Written with a "factor_" field-name prefix specifically so
+    find_sleep_entries_in_range() can tell the two categories apart
+    purely from the field name, without needing to hardcode either
+    category's own known-key list on the backend (matching how
+    qualifiers already work generically today).
     '''
     entry_id = sleep_entry_id(user, session_start.isoformat())
     client = get_client()
@@ -229,6 +238,8 @@ def write_sleep_point(*, user: str, session_start: datetime, sleep_date: str, sc
         )
         for qualifier, value in qualifiers.items():
             p = p.field(qualifier, bool(value))
+        for factor, value in (pre_sleep_factors or {}).items():
+            p = p.field(f"factor_{factor}", bool(value))
 
         p = p.time(session_start)
 
@@ -238,12 +249,39 @@ def write_sleep_point(*, user: str, session_start: datetime, sleep_date: str, sc
     return entry_id
 
 
+def _split_sleep_entry_fields(values: dict) -> tuple[dict, dict]:
+    ''' Shared by find_sleep_entries_in_range() and find_sleep_entry_by_id()
+    - splits a pivoted sleep-entry row's boolean fields into qualifiers
+    (how the sleep itself felt) vs. pre_sleep_factors (what happened
+    before it), distinguished by the "factor_" field-name prefix (see
+    write_sleep_point's own comment on why). Extracted here specifically
+    so this splitting logic lives in exactly one place - it was
+    duplicated across both functions before pre_sleep_factors existed,
+    and duplicating it again would risk the two copies drifting apart
+    the next time either changes.
+    '''
+    KNOWN_NON_QUALIFIER_KEYS = {
+        "_time", "_start", "_stop", "_measurement", "result", "table",
+        "sleep_date", "user", "entry_id", "score", "logged_at",
+    }
+    qualifiers = {}
+    pre_sleep_factors = {}
+    for k, v in values.items():
+        if k in KNOWN_NON_QUALIFIER_KEYS or not isinstance(v, bool):
+            continue
+        if k.startswith("factor_"):
+            pre_sleep_factors[k[len("factor_"):]] = v
+        else:
+            qualifiers[k] = v
+    return qualifiers, pre_sleep_factors
+
+
 def find_sleep_entries_in_range(user: str, start: datetime, end: datetime) -> list[dict]:
     ''' Read-only query for subjective sleep entries in the given range.
     Unlike events, each sleep entry is a single point with all fields
-    (score, logged_at, qualifiers) together - no per-tag multi-point
-    reconstruction needed, just a pivot to combine the fields onto one
-    row per point.
+    (score, logged_at, qualifiers, pre-sleep factors) together - no
+    per-tag multi-point reconstruction needed, just a pivot to combine
+    the fields onto one row per point.
     '''
     client = get_client()
     query_api = client.query_api()
@@ -265,22 +303,11 @@ def find_sleep_entries_in_range(user: str, start: datetime, end: datetime) -> li
         logger.error(f"Failed to query sleep entries for user={user}: {e}")
         return []
 
-    # Keys that aren't qualifier fields - everything else on the pivoted
-    # row is treated as a qualifier, so new qualifier chips added later
-    # (a frontend-only concept) show up here with zero backend changes.
-    KNOWN_NON_QUALIFIER_KEYS = {
-        "_time", "_start", "_stop", "_measurement", "result", "table",
-        "sleep_date", "user", "entry_id", "score", "logged_at",
-    }
-
     results = []
     for table in tables:
         for record in table.records:
             values = record.values
-            qualifiers = {
-                k: v for k, v in values.items()
-                if k not in KNOWN_NON_QUALIFIER_KEYS and isinstance(v, bool)
-            }
+            qualifiers, pre_sleep_factors = _split_sleep_entry_fields(values)
             results.append({
                 "entry_id": values.get("entry_id"),
                 "sleep_date": values.get("sleep_date"),
@@ -288,6 +315,7 @@ def find_sleep_entries_in_range(user: str, start: datetime, end: datetime) -> li
                 "score": values.get("score"),
                 "logged_at": values.get("logged_at"),
                 "qualifiers": qualifiers,
+                "pre_sleep_factors": pre_sleep_factors,
             })
     return results
 
@@ -325,10 +353,7 @@ def find_sleep_entry_by_id(user: str, entry_id: str) -> dict | None:
     for table in tables:
         for record in table.records:
             values = record.values
-            qualifiers = {
-                k: v for k, v in values.items()
-                if k not in KNOWN_NON_QUALIFIER_KEYS and isinstance(v, bool)
-            }
+            qualifiers, pre_sleep_factors = _split_sleep_entry_fields(values)
             return {
                 "entry_id": values.get("entry_id"),
                 "sleep_date": values.get("sleep_date"),
@@ -336,8 +361,84 @@ def find_sleep_entry_by_id(user: str, entry_id: str) -> dict | None:
                 "score": values.get("score"),
                 "logged_at": values.get("logged_at"),
                 "qualifiers": qualifiers,
+                "pre_sleep_factors": pre_sleep_factors,
             }
     return None
+
+
+def find_sleep_entry_for_wake_date(user: str, wake_date: date) -> dict | None:
+    ''' The subjective sleep journal entry (if any) for the night that
+    woke up on `wake_date` - what the per-night Sleep Heart Rate/
+    Sleep Duration/etc. detail pages' own date-nav is already anchored
+    to, replacing the old flat "Recent nights" list (which showed every
+    logged entry across many nights at once, from before those per-
+    night pages existed).
+
+    Resolves the actual session for that night first (same primary-
+    device-session logic every other per-night Sleep function uses -
+    see _sleep_session_for_night()), then looks up the entry via the
+    SAME deterministic entry_id derivation write_sleep_point()/
+    sleep_entry_id() use (session_start.isoformat()) - not by
+    filtering on the entry's own "sleep_date" tag, which is the
+    BEDTIME's date (typically the day BEFORE wake_date) and would
+    otherwise require the caller to get that off-by-one-day mapping
+    right itself every time.
+
+    Returns None if there's no recorded session for this night at all,
+    OR a session exists but nothing has been logged for it yet - both
+    are "nothing to show/edit yet" from the caller's point of view, and
+    the caller already knows separately (from /sleep/overview) whether
+    a session exists at all.
+    '''
+    sessions = _sleep_session_for_night(user, wake_date)
+    if not sessions:
+        return None
+    _, session = _primary_device_session(sessions)
+    entry_id = sleep_entry_id(user, session["start_time"].isoformat())
+    return find_sleep_entry_by_id(user, entry_id)
+
+
+def write_sleep_entry_for_wake_date(user: str, wake_date: date, score: int, qualifiers: dict,
+                                     pre_sleep_factors: dict, submission_ts: datetime) -> dict | None:
+    ''' Writes a subjective sleep journal entry for the night that woke
+    up on `wake_date` - the write-side counterpart to
+    find_sleep_entry_for_wake_date(), used by the per-night Sleep Heart
+    Rate/Sleep Duration/etc. pages' own journal section to submit for
+    THIS SPECIFIC night, replacing the old behavior of always writing
+    against "whatever the most recently completed session happens to
+    be" (find_last_completed_sleep_session) - a real gap once several
+    different nights' pages could all be open/edited independently
+    rather than only ever the latest one.
+
+    write_sleep_point() itself is keyed by the session's own real start
+    time (see its own docstring), so re-submitting for the SAME night
+    correctly overwrites rather than duplicating - no separate
+    edit-vs-create distinction needed at this layer.
+
+    Returns None if there's no recorded session for this night at all
+    (caller's responsibility to turn that into an error response) - a
+    subjective entry can't be logged against a night with no session
+    to anchor it to.
+    '''
+    sessions = _sleep_session_for_night(user, wake_date)
+    if not sessions:
+        return None
+    _, session = _primary_device_session(sessions)
+    resolved_sleep_date = session["start_time"].strftime("%Y-%m-%d")
+    entry_id = write_sleep_point(
+        user=user,
+        session_start=session["start_time"],
+        sleep_date=resolved_sleep_date,
+        score=score,
+        qualifiers=qualifiers,
+        pre_sleep_factors=pre_sleep_factors,
+        submission_ts=submission_ts,
+    )
+    return {
+        "entry_id": entry_id,
+        "sleep_date": resolved_sleep_date,
+        "resolved_session_duration_s": session["duration_s"],
+    }
 
 
 def delete_sleep_entry(user: str, entry_id: str):

@@ -31,6 +31,7 @@ from app.influx import (
     find_manual_events_in_range,
     find_sleep_entries_in_range,
     find_sleep_entry_by_id,
+    find_sleep_entry_for_wake_date,
     get_activity_time_range_series,
     get_baseline_comparison,
     get_combined_activity_sessions,
@@ -57,6 +58,7 @@ from app.influx import (
     local_today_bounds,
     manual_event_id,
     write_event_points,
+    write_sleep_entry_for_wake_date,
     write_sleep_point,
 )
 from app.reprocess import compute_reclassification_diff
@@ -124,11 +126,13 @@ class CalendarEventTagsIn(BaseModel):
 class SleepIn(BaseModel):
     score: int  # 1-5
     qualifiers: dict[str, bool] = {}
+    pre_sleep_factors: dict[str, bool] = {}
 
 
 class SleepUpdateIn(BaseModel):
     score: int  # 1-5
     qualifiers: dict[str, bool] = {}
+    pre_sleep_factors: dict[str, bool] = {}
 
 
 class CalendarIn(BaseModel):
@@ -808,43 +812,71 @@ def get_activity_time_range_endpoint(period: str, end_date: str | None = None, c
 # --- sleep ---
 
 @app.post("/sleep")
-def post_sleep(payload: SleepIn, current_user: dict = Depends(get_current_user)):
+def post_sleep(payload: SleepIn, date: str, current_user: dict = Depends(get_current_user)):
+    ''' Log a subjective sleep journal entry for the night that woke up
+    on `date` - required now that each night has its own dedicated
+    page (Sleep Heart Rate/Duration/etc, all date-nav-driven), rather
+    than always writing against "whatever the most recently completed
+    session happens to be" (the old, pre-per-night-pages behavior,
+    which made it impossible to log/edit anything but the latest
+    night). See write_sleep_entry_for_wake_date()'s own docstring for
+    how the actual session gets resolved from this date.
+    '''
     if not (1 <= payload.score <= 5):
         raise HTTPException(400, "score must be between 1 and 5")
+    parsed_date = _parse_optional_date(date)
+    if parsed_date is None:
+        raise HTTPException(400, "date is required (YYYY-MM-DD)")
 
-    session = find_last_completed_sleep_session(current_user["username"])
-    if session is None:
+    result = write_sleep_entry_for_wake_date(
+        user=current_user["username"],
+        wake_date=parsed_date,
+        score=payload.score,
+        qualifiers=payload.qualifiers,
+        pre_sleep_factors=payload.pre_sleep_factors,
+        submission_ts=datetime.now(timezone.utc),
+    )
+    if result is None:
         raise HTTPException(
             409,
-            "No recent completed sleep session found - try again after your ring syncs "
+            f"No completed sleep session found for {date} - try again after your ring syncs "
             "(a session needs a recorded wake-up time and be long enough to not look like a nap). "
             "If this persists, check that your account username matches the GADGETBRIDGE_USER "
             "value configured for your ring parser instance."
         )
-
-    submission_ts = datetime.now(timezone.utc)
-    entry_id = write_sleep_point(
-        user=current_user["username"],
-        session_start=session["start_time"],
-        sleep_date=session["sleep_date"],
-        score=payload.score,
-        qualifiers=payload.qualifiers,
-        submission_ts=submission_ts,
-    )
     return {
-        "entry_id": entry_id,
-        "sleep_date": session["sleep_date"],
+        "entry_id": result["entry_id"],
+        "sleep_date": result["sleep_date"],
         "score": payload.score,
         "qualifiers": payload.qualifiers,
-        "resolved_session_duration_s": session["duration_s"],
+        "pre_sleep_factors": payload.pre_sleep_factors,
+        "resolved_session_duration_s": result["resolved_session_duration_s"],
     }
+
+
+@app.get("/sleep/entry")
+def get_sleep_entry_for_date(date: str, current_user: dict = Depends(get_current_user)):
+    ''' The subjective sleep journal entry (if any) for the night that
+    woke up on `date` - what each per-night Sleep page's own journal
+    section fetches to decide whether to show the submit form or the
+    existing entry (read-only, with an Edit option). Returns null
+    (not a 404) when nothing has been logged yet for this specific
+    night - a normal, expected state, not an error.
+    '''
+    parsed_date = _parse_optional_date(date)
+    if parsed_date is None:
+        raise HTTPException(400, "date is required (YYYY-MM-DD)")
+    return find_sleep_entry_for_wake_date(current_user["username"], parsed_date)
 
 
 @app.get("/sleep")
 def get_sleep_history(start: str | None = None, end: str | None = None, current_user: dict = Depends(get_current_user)):
-    ''' Read-only history of subjective sleep entries. Powers the
-    "Recent nights" list on the Sleep tab. start/end are ISO date
-    strings; defaults to the last 30 days through tomorrow.
+    ''' Read-only history of subjective sleep entries across a date
+    range. No longer powers a "Recent nights" list on the Sleep tab
+    (each night's own page now shows just its own entry, via
+    /sleep/entry) - kept as a general-purpose range query, e.g. for a
+    future review/export view. start/end are ISO date strings;
+    defaults to the last 30 days through tomorrow.
 
     Sorted by start_time (the session's own real timestamp), not
     sleep_date - multiple entries can share a sleep_date (see
@@ -865,15 +897,15 @@ def get_sleep_history(start: str | None = None, end: str | None = None, current_
 
 @app.patch("/sleep/{entry_id}")
 def patch_sleep(entry_id: str, payload: SleepUpdateIn, current_user: dict = Depends(get_current_user)):
-    ''' Edit an existing sleep entry's score/qualifiers, addressed by
-    its stable entry_id (not sleep_date - multiple entries can share a
-    date, see write_sleep_point's docstring). Relies on
+    ''' Edit an existing sleep entry's score/qualifiers/pre_sleep_factors,
+    addressed by its stable entry_id (not sleep_date - multiple entries
+    can share a date, see write_sleep_point's docstring). Relies on
     write_sleep_point's fixed-per-session timestamp to overwrite
     cleanly - no delete-and-rewrite needed, unlike event tag edits.
-    The caller (frontend) is expected to send every known qualifier
-    explicitly as true/false, not just the ones that are true -
-    InfluxDB only overwrites fields actually included in a write, so
-    an omitted qualifier that was previously true would otherwise
+    The caller (frontend) is expected to send every known qualifier AND
+    pre_sleep_factor explicitly as true/false, not just the ones that
+    are true - InfluxDB only overwrites fields actually included in a
+    write, so an omitted one that was previously true would otherwise
     silently persist instead of being cleared.
     '''
     if not (1 <= payload.score <= 5):
@@ -890,9 +922,16 @@ def patch_sleep(entry_id: str, payload: SleepUpdateIn, current_user: dict = Depe
         sleep_date=existing["sleep_date"],
         score=payload.score,
         qualifiers=payload.qualifiers,
+        pre_sleep_factors=payload.pre_sleep_factors,
         submission_ts=datetime.now(timezone.utc),
     )
-    return {"entry_id": new_entry_id, "sleep_date": existing["sleep_date"], "score": payload.score, "qualifiers": payload.qualifiers}
+    return {
+        "entry_id": new_entry_id,
+        "sleep_date": existing["sleep_date"],
+        "score": payload.score,
+        "qualifiers": payload.qualifiers,
+        "pre_sleep_factors": payload.pre_sleep_factors,
+    }
 
 
 @app.delete("/sleep/{entry_id}")

@@ -715,6 +715,31 @@ main {
   margin-bottom: 0.5rem;
 }
 
+.sleep-journal-card {
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.sleep-journal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.sleep-journal-subheading {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 0.85rem 0 0.4rem;
+}
+
+.sleep-journal-subheading:first-of-type {
+  margin-top: 0.5rem;
+}
+
 .sleep-summary-top {
   display: flex;
   align-items: baseline;
