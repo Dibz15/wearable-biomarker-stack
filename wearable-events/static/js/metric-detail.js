@@ -704,10 +704,28 @@ async function renderDetailPeriod(view, period, anchorDate) {
       // bars.
       const scatterSeries = {};
       devices.forEach(d => { scatterSeries[d] = series[d].map(p => ({ t: p.t, value: p.median })); });
+
+      // A real Y-axis margin beyond the raw min/max, rather than
+      // Chart.js's own auto-scaling putting the highest/lowest point
+      // flush against the chart's own edge - same fix already applied
+      // to Sleep Heart Rate/Respiratory Rate's own range-bar charts,
+      // for the same reason.
+      const allMedians = devices.flatMap(d => scatterSeries[d].map(p => p.value)).filter(v => v !== null && v !== undefined);
+      // Guards against Math.min/max(...[]) producing +/-Infinity if
+      // every device's series were somehow empty here - shouldn't
+      // happen given devices.length > 0 was already checked above and
+      // /vitals/range only ever includes days with real data, but
+      // falling back to Chart.js's own auto-scaling (leaving yMin/yMax
+      // undefined) is a safe default rather than risking an invalid
+      // axis range.
+      const scatterMargin = allMedians.length ? Math.max((Math.max(...allMedians) - Math.min(...allMedians)) * 0.15, 2) : 0;
+
       chart = buildTimeScatterChart(canvas, scatterSeries, devices, {
         connectLine: true,
         meanLabel: "Average",
         yTickCallback: (v) => formatNum(v, c.decimals),
+        yMin: allMedians.length ? Math.min(...allMedians) - scatterMargin : undefined,
+        yMax: allMedians.length ? Math.max(...allMedians) + scatterMargin : undefined,
       });
     } else {
       chart = buildRangeBarChart(canvas, series, devices, period, rollingMeanByField[c.field] || {}, c.yMin, c.decimals);
