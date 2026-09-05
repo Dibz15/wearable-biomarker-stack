@@ -623,6 +623,16 @@ def get_today_vitals(user: str, for_date: date | None = None) -> dict[str, dict]
         "stress": ("last", "mean"),
         "spo2": ("last", "min", "max"),
         "temperature": ("last",),
+        # Device-computed (not app-aggregated - see gadgetbridge_to_
+        # influxdb.py's own extraction of HUAMI_HEART_RATE_RESTING_SAMPLE),
+        # typically one reading a day - "last" only, same "a single
+        # reading isn't usefully averaged/ranged" reasoning as hrv/
+        # temperature above. Not in today.js's own METRIC_FIELDS
+        # allowlist, so this doesn't add a new card to the Today tab -
+        # added here specifically so the Sleep Heart Rate detail page
+        # can fetch a given wake-date's resting HR via this same,
+        # already-established endpoint rather than a new one.
+        "resting_heart_rate": ("last",),
     }
 
     result: dict[str, dict] = {}

@@ -1,6 +1,6 @@
 // --- Metric detail views (opened from a Today card, not a tab) ---
 import { escapeHtml, api, formatNum, dateToISO, isoToDate, todayISO, shiftISODate } from "./core.js";
-import { buildLineChart, buildRangeBarChart, buildDifferentialChart, buildTieredBarChart, buildTierPieChart, renderBandLegend, renderTierLegend } from "./metric-charts.js";
+import { buildLineChart, buildRangeBarChart, buildDifferentialChart, buildTieredBarChart, buildTierPieChart, buildTimeScatterChart, renderBandLegend, renderTierLegend } from "./metric-charts.js";
 
 let activeCharts = [];
 
@@ -40,7 +40,34 @@ const DETAIL_VIEWS = {
     title: "Heart Rate",
     charts: [
       { field: "heart_rate", label: "Heart Rate" },
-      { field: "resting_heart_rate", label: "Resting Heart Rate", showBaseline: true },
+      {
+        field: "resting_heart_rate",
+        label: "Resting Heart Rate",
+        showBaseline: true,
+        unit: "bpm",
+        // The single daily reading itself is already a clean whole
+        // number from the device, so this doesn't change its own
+        // display - but the week view's flat average line IS a
+        // computed mean of several days' readings (e.g. (50+53+52)/3
+        // = 51.666...), which without this was rendered completely
+        // unrounded (formatNum(v, undefined) returns v as-is - see
+        // its own implementation in core.js). Real bug found and
+        // fixed here (2026-09), reported directly.
+        decimals: 1,
+        // Device-computed, typically one reading a day (see
+        // gadgetbridge_to_influxdb.py's own extraction of
+        // HUAMI_HEART_RATE_RESTING_SAMPLE) - a day-view LINE chart of
+        // that single point is a chart of one dot, not something
+        // worth a whole canvas. Shows the reading itself instead (see
+        // renderDetailPeriod's own handling of this flag).
+        dayViewStyle: "single-value",
+        // Same reasoning for W/M/Y: a floating min-max bar per day is
+        // degenerate (min=max=median for a single daily reading), so
+        // a connected line of that one value per day, with a flat
+        // period-average line, is the more honest and more legible
+        // shape for what this data actually is.
+        chartStyle: "connected-scatter",
+      },
     ],
   },
   hrv: {
@@ -541,10 +568,38 @@ async function renderDetailPeriod(view, period, anchorDate) {
 
   const cardsHtml = view.charts.map((c, i) => {
     const series = seriesByField[c.field];
-    const stats = computeStatsFromSeries(series, period, c.decimals);
+    const isSingleValueDay = period === "day" && c.dayViewStyle === "single-value";
     const baselineHtml = (period === "day" && c.showBaseline)
       ? renderBaselineBar(baselineByField[c.field] || {}, BASELINE_DAYS, c.baseline || {})
       : "";
+
+    // A day-view single value (Resting Heart Rate: typically one
+    // device-reported reading a day - see this chart's own config
+    // comment) shows that reading directly instead of a chart-of-one-
+    // dot, and skips the Max/Min/Avg stats card entirely (degenerate
+    // for a single reading - all three would be identical).
+    if (isSingleValueDay) {
+      const devices = Object.keys(series);
+      const valueRows = devices.length
+        ? devices.map(device => {
+            const points = series[device] || [];
+            const latest = points.length ? points[points.length - 1].v : null;
+            return `
+              <div class="sleep-summary-top">
+                <span class="sleep-summary-duration">${latest !== null && latest !== undefined ? formatNum(latest, c.decimals) : "\u2013"}<span class="unit"> ${escapeHtml(c.unit || "")}</span></span>
+                <span class="sleep-summary-date">${escapeHtml(device)}</span>
+              </div>
+            `;
+          }).join("")
+        : `<p class="metric-card-empty">No data for this period</p>`;
+      return `
+        <p class="today-section-label">${c.label}</p>
+        <div class="sleep-summary-card">${valueRows}</div>
+        ${baselineHtml}
+      `;
+    }
+
+    const stats = computeStatsFromSeries(series, period, c.decimals);
     const manualCountHtml = (view.stressBreakdown && period !== "day" && manualCounts)
       ? Object.keys(manualCounts).map(device => `
           <div class="detail-stat-row">
@@ -609,6 +664,11 @@ async function renderDetailPeriod(view, period, anchorDate) {
   wireDetailControls((p, d) => renderDetailPeriod(view, p, d), period, anchorDate);
 
   view.charts.forEach((c, i) => {
+    // Single-value day views (Resting Heart Rate) never rendered a
+    // <canvas> at all for this chart (see cardsHtml above) - nothing
+    // to attach a chart to, and nothing further to do here.
+    if (period === "day" && c.dayViewStyle === "single-value") return;
+
     const series = seriesByField[c.field];
     const devices = Object.keys(series);
     const canvas = document.getElementById(`detail-chart-${i}`);
@@ -633,6 +693,22 @@ async function renderDetailPeriod(view, period, anchorDate) {
       chart = buildTieredBarChart(canvas, series, devices, view.stressBreakdown);
     } else if (isRawPoints) {
       chart = buildLineChart(canvas, series, devices, c.decimals);
+    } else if (c.chartStyle === "connected-scatter") {
+      // Resting Heart Rate's W/M/Y view: a floating min-max bar per
+      // period is degenerate for a field with typically one reading a
+      // day (min=max=median already) - a connected line of that one
+      // representative value (median - the same value the bar's own
+      // marker would have pointed at) plus a flat period-average line
+      // is the more honest, more legible shape for what this data
+      // actually is, rather than a chart of near-invisible zero-height
+      // bars.
+      const scatterSeries = {};
+      devices.forEach(d => { scatterSeries[d] = series[d].map(p => ({ t: p.t, value: p.median })); });
+      chart = buildTimeScatterChart(canvas, scatterSeries, devices, {
+        connectLine: true,
+        meanLabel: "Average",
+        yTickCallback: (v) => formatNum(v, c.decimals),
+      });
     } else {
       chart = buildRangeBarChart(canvas, series, devices, period, rollingMeanByField[c.field] || {}, c.yMin, c.decimals);
     }

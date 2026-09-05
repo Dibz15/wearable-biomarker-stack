@@ -1144,9 +1144,22 @@ export function buildTimeScatterChart(canvas, series, devices, config = {}) {
 
   const fmt = config.yTickCallback || ((v) => v);
 
+  // Optional flat mean line across the whole chart, same
+  // buildMeanLinePlugin factory buildRangeBarChart/buildTrendBarChart
+  // already use - only built when config.meanLabel is provided, so
+  // every existing caller (Sleep Regularity's own scatters, which
+  // don't ask for this) is unaffected.
+  let meanPlugin = null;
+  if (config.meanLabel) {
+    const allValues = devices.flatMap(d => series[d].map(p => p.value)).filter(v => v !== null && v !== undefined);
+    const mean = allValues.length ? allValues.reduce((a, b) => a + b, 0) / allValues.length : null;
+    meanPlugin = buildMeanLinePlugin("scatterMeanLine", mean, config.meanLabel, fmt);
+  }
+
   return new Chart(canvas, {
     type: "line",
     data: { labels, datasets },
+    plugins: [meanPlugin].filter(Boolean),
     options: {
       responsive: true,
       animation: false,

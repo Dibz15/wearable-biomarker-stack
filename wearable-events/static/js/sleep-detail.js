@@ -203,13 +203,22 @@ async function renderSleepVitalsDay(field, anchorDate) {
     // "Last 7 days" always ends at the night currently being viewed,
     // same reasoning as Sleep Duration's own trend window.
     const weekEnd = anchorDate;
-    const [overview, hypnogram, vitalsSeries, baseline, trend] = await Promise.all([
+    const fetches = [
       api(`/sleep/overview?date=${anchorDate}`),
       api(`/sleep/hypnogram?date=${anchorDate}`),
       api(`/sleep/vitals-series/${field}?date=${anchorDate}`),
       api(`/sleep/vitals-baseline/${field}?date=${anchorDate}`),
       api(`/sleep/vitals-trend/${field}?period=week&end_date=${weekEnd}`),
-    ]);
+    ];
+    // Resting HR is device-computed (not something this app aggregates
+    // itself - see get_today_vitals()'s own comment on
+    // HUAMI_HEART_RATE_RESTING_SAMPLE), and only meaningful for heart
+    // rate specifically, not respiratory rate - fetched via the same
+    // /today endpoint the Today tab itself uses (now including
+    // resting_heart_rate's own "last" reading), rather than a new
+    // endpoint just for this one value.
+    if (field === "heart_rate") fetches.push(api(`/today?date=${anchorDate}`));
+    const [overview, hypnogram, vitalsSeries, baseline, trend, todaySummary] = await Promise.all(fetches);
 
     if (overview === null) {
       content.innerHTML = `
@@ -230,6 +239,12 @@ async function renderSleepVitalsDay(field, anchorDate) {
     // entirely (e.g. no readings of this specific field that night).
     const vitalsPoints = Object.values(vitalsSeries)[0] || [];
 
+    // Same device as the rest of this page's own data (overview.device),
+    // not just "whichever device happened first" in the /today response.
+    const restingHr = (field === "heart_rate" && todaySummary && todaySummary.vitals && todaySummary.vitals.resting_heart_rate)
+      ? todaySummary.vitals.resting_heart_rate[overview.device]?.last
+      : undefined;
+
     content.innerHTML = `
       ${renderDateNav("day", anchorDate)}
       <div class="sleep-summary-card">
@@ -238,6 +253,14 @@ async function renderSleepVitalsDay(field, anchorDate) {
           <span class="sleep-summary-date">${escapeHtml(anchorDate)}</span>
         </div>
       </div>
+      ${restingHr !== undefined ? `
+        <div class="sleep-summary-card">
+          <div class="sleep-summary-top">
+            <span class="sleep-summary-duration">${restingHr}<span class="unit"> ${escapeHtml(cfg.unit)}</span></span>
+            <span class="sleep-summary-date">Resting HR</span>
+          </div>
+        </div>
+      ` : ""}
       ${renderBaselineBar(baseline, 7, { lowLabel: cfg.lowLabel, highLabel: cfg.highLabel, unit: cfg.unit, decimals: cfg.decimals })}
 
       <p class="today-section-label">${escapeHtml(cfg.title)}</p>
