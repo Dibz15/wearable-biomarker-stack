@@ -1265,6 +1265,51 @@ main {
   gap: 0.1rem;
 }
 
+/* --- Workout Detail page (opened from a tappable session row above) --- */
+
+.workout-zone-row {
+  padding: 0.65rem 0;
+}
+
+.workout-zone-row + .workout-zone-row {
+  border-top: 1px solid var(--surface-active);
+}
+
+.workout-zone-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 0.35rem;
+}
+
+.workout-zone-name {
+  font-weight: 700;
+}
+
+.workout-zone-bar-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--surface-active);
+  overflow: hidden;
+}
+
+.workout-zone-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  /* One flat accent color for every zone, deliberately - unlike the
+     Sleep tab's own multi-color stage bar, these rows are already
+     distinguished by name/position, and a single consistent fill
+     reads as "one continuous scale" rather than implying each zone
+     is its own unrelated category. */
+  background: #e88a8a;
+}
+
+.workout-zone-footer {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 0.3rem;
+}
+
 /* --- Sleep tab's objective-data overview --- */
 
 .sleep-hypnogram-card {

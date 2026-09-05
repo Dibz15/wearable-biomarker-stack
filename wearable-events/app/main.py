@@ -35,6 +35,8 @@ from app.influx import (
     get_activity_time_range_series,
     get_baseline_comparison,
     get_combined_activity_sessions,
+    get_workout_summary_detail,
+    get_workout_detail_series,
     get_hourly_activity_breakdown,
     get_manual_readings,
     get_nightly_baseline_comparison,
@@ -754,6 +756,39 @@ def get_activity_sessions_endpoint(date: str | None = None, current_user: dict =
     '''
     parsed_date = _parse_optional_date(date)
     return get_combined_activity_sessions(current_user["username"], for_date=parsed_date)
+
+
+@app.get("/activity/workout/{start_ms}")
+def get_workout_detail_endpoint(start_ms: int, current_user: dict = Depends(get_current_user)):
+    ''' Full detail for ONE specific precomputed workout (a
+    BASE_ACTIVITY_SUMMARY entry, i.e. a "source": "precomputed" row
+    from /activity/sessions - NOT a "derived" one, which has no
+    corresponding summary point to look up at all) - the Workout
+    Detail page's own entry point. `start_ms` is that entry's own
+    start time in epoch milliseconds - see get_workout_summary_detail's
+    own docstring for exactly how that identifies the right point.
+
+    404s if no matching workout exists at all (a stale/bad start_ms),
+    rather than returning an empty-but-200 body a frontend might
+    render as a blank page without explanation.
+    '''
+    detail = get_workout_summary_detail(current_user["username"], start_ms)
+    if detail is None:
+        raise HTTPException(404, f"no workout found for start_ms={start_ms}")
+    return detail
+
+
+@app.get("/activity/workout/{start_ms}/heart-rate")
+def get_workout_heart_rate_series_endpoint(start_ms: int, current_user: dict = Depends(get_current_user)):
+    ''' Per-sample heart rate for one specific workout, for the Workout
+    Detail page's own HR-over-time chart - see
+    get_workout_detail_series's own docstring for the full reasoning.
+    Returns an empty list (not a 404) when no FIT/GPX export exists for
+    this workout - a real, expected, already-documented case, not an
+    error; the page should just skip the chart, not treat this as
+    missing data the way a 404 on the summary endpoint above would be.
+    '''
+    return get_workout_detail_series(current_user["username"], start_ms, ["hr"])
 
 
 @app.get("/activity/sitting-minutes")

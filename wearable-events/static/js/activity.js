@@ -8,6 +8,7 @@ import {
   buildRangeBarChart, buildTieredBarChart, buildStackedMinutesChart,
   buildActivityTimeChart, renderTierLegend,
 } from "./metric-charts.js";
+import { openWorkoutDetail } from "./workout-detail.js";
 
 // Our own bands, anchored on real confirmed data (STAND_INTENSITY_THRESHOLD=50,
 // confirmed against the watch's own hourly Stand display; the ~0-255
@@ -64,8 +65,16 @@ function renderSessionList(sessions) {
     const start = new Date(s.start).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     const end = new Date(s.end).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     const hrText = (s.avg_heart_rate === null || s.avg_heart_rate === undefined) ? "" : `${s.avg_heart_rate} bpm avg`;
+    // Only "precomputed" entries (a real BASE_ACTIVITY_SUMMARY row)
+    // have a Workout Detail page to open at all - a "derived" session
+    // (inferred from the raw per-minute stream, no summary point of
+    // its own) has nothing further to show, so it stays a plain,
+    // non-tappable row.
+    const isTappable = s.source === "precomputed" && s.start_ms !== null && s.start_ms !== undefined;
+    const rowClass = isTappable ? "activity-session-row metric-card-tappable" : "activity-session-row";
+    const attrs = isTappable ? `data-workout-start-ms="${s.start_ms}" role="button" tabindex="0"` : "";
     return `
-      <div class="activity-session-row">
+      <div class="${rowClass}" ${attrs}>
         <div class="activity-session-main">
           <span class="activity-session-label">${renderSessionLabel(s)}</span>
           <span class="metric-sub">${escapeHtml(start)} \u2013 ${escapeHtml(end)}</span>
@@ -78,6 +87,16 @@ function renderSessionList(sessions) {
     `;
   }).join("");
   return `<div class="activity-session-list">${rows}</div>`;
+}
+
+function wireSessionList(container) {
+  container.querySelectorAll("[data-workout-start-ms]").forEach(el => {
+    const open = () => openWorkoutDetail(Number(el.dataset.workoutStartMs));
+    el.addEventListener("click", open);
+    el.addEventListener("keydown", e => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+    });
+  });
 }
 
 function replaceWithEmptyState(canvasId, message) {
@@ -174,6 +193,7 @@ async function renderActivityDay(anchorDate) {
   `;
 
   wireActivityControls("day", anchorDate);
+  wireSessionList(content);
 
   if (intensityDevices.length > 0) {
     registerActiveChart(buildTieredBarChart(

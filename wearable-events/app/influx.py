@@ -1139,6 +1139,7 @@ def get_precomputed_activity_sessions(user: str, for_date: date | None = None) -
             avg_hr = hr_by_device.get(device)
             sessions.append({
                 "start": entry_start.isoformat(),
+                "start_ms": int(entry_start.timestamp() * 1000),
                 "end": entry_end.isoformat(),
                 "device": device,
                 "name": record.values.get("name"),
@@ -1176,9 +1177,18 @@ def get_combined_activity_sessions(user: str, for_date: date | None = None) -> l
     same as no name at all, not displayed literally.
 
     Returns a list of dicts, sorted chronologically:
-    {"start": <ISO8601>, "end": <ISO8601>, "device": <str>,
-     "label": <str>, "raw_code": <int|str|None>,
+    {"start": <ISO8601>, "start_ms": <int|None>, "end": <ISO8601>,
+     "device": <str>, "label": <str>, "raw_code": <int|str|None>,
      "avg_heart_rate": <float|None>, "source": "derived"|"precomputed"}
+
+    `start_ms` (this entry's own BASE_ACTIVITY_SUMMARY.START_TIME, in
+    epoch milliseconds) is only ever present for "precomputed" entries
+    - the identifier the Workout Detail page's own
+    /activity/workout/{start_ms} endpoint expects, since only those
+    entries HAVE a corresponding workout to look up at all. None for
+    "derived" entries - the frontend should treat those as not
+    tappable through to a detail page, not attempt the same link with
+    a missing identifier.
     '''
     derived = get_activity_sessions(user, for_date)
     precomputed = get_precomputed_activity_sessions(user, for_date)
@@ -1187,6 +1197,7 @@ def get_combined_activity_sessions(user: str, for_date: date | None = None) -> l
     for s in derived:
         combined.append({
             "start": s["start"],
+            "start_ms": None,  # no BASE_ACTIVITY_SUMMARY row to look up - not tappable
             "end": s["end"],
             "device": s["device"],
             "label": s["activity_kind_label"],
@@ -1199,6 +1210,7 @@ def get_combined_activity_sessions(user: str, for_date: date | None = None) -> l
         has_real_name = name is not None and name != "Unset"
         combined.append({
             "start": s["start"],
+            "start_ms": s["start_ms"],
             "end": s["end"],
             "device": s["device"],
             "label": name if has_real_name else "unknown",
@@ -1209,6 +1221,225 @@ def get_combined_activity_sessions(user: str, for_date: date | None = None) -> l
 
     combined.sort(key=lambda s: s["start"])
     return combined
+
+
+# Firstbeat's own publicly documented Training Effect scale
+# (firstbeat.com/en/science-and-physiology/epoc-and-training-effect) -
+# confirmed against real data this app already extracts (both 0.9 and
+# 0.6 correctly land in "No effect"; 3.2 lands in "Improving effect",
+# consistent with Zepp's own simplified "Good" wording over the same
+# underlying scale) and independently reinforced by Amazfit's own
+# "Running Technology" page describing the same 0-5 range. Applies
+# identically to both aerobic and anaerobic values per Firstbeat's own
+# documentation. Same "individually cited, not a blended/invented
+# score" spirit as get_sleep_duration_recommendation()'s own NSF
+# citation - a real published scale, not a guess.
+TRAINING_EFFECT_SCALE = [
+    (0.9, "No effect"),
+    (1.9, "Minor effect"),
+    (2.9, "Maintaining effect"),
+    (3.9, "Improving effect"),
+    (4.9, "Highly improving effect"),
+    (5.0, "Overreaching effect"),
+]
+
+
+def get_training_effect_label(value: float | None) -> dict | None:
+    ''' Firstbeat's own 0-5 Training Effect scale (see
+    TRAINING_EFFECT_SCALE's own comment for the citation and the real
+    cross-checks against this app's own data) - returns the matching
+    label alongside the raw value, or None if value itself is None
+    (a workout with no HasField("trainingEffect") at all in its own
+    RAW_SUMMARY_DATA, not the same as a genuine 0.0).
+    '''
+    if value is None:
+        return None
+    for upper_bound, label in TRAINING_EFFECT_SCALE:
+        if value <= upper_bound:
+            return {"value": value, "label": label, "source": "Firstbeat Technologies EPOC/Training Effect scale"}
+    return {"value": value, "label": TRAINING_EFFECT_SCALE[-1][1], "source": "Firstbeat Technologies EPOC/Training Effect scale"}
+
+
+# The person's own real watch setting (Zepp: Settings -> interval type
+# -> "lactate threshold heart rate zone") - confirmed to change BOTH
+# the zone names AND the actual BPM thresholds (see
+# parser/activefit/FIELD_RESEARCH.md's own hr_zone_*_max_bpm entry).
+# This naming is a deliberate choice matching what the person actually
+# sees on their own watch/app, not Gadgetbridge's own generic internal
+# names (Warm-Up/Fat Burn/Aerobic/Anaerobic/Extreme) - see
+# UI_DESIGN_NOTES.md's own zone-naming table for the full mapping
+# between the two.
+HR_ZONE_DISPLAY_NAMES = {
+    "na": "N/A",
+    "warm_up": "Active Recovery",
+    "fat_burn": "Efficient Fat Burning",
+    "aerobic": "Aerobic Endurance",
+    "anaerobic": "Lactate Threshold",
+    "extreme": "Anaerobic Endurance",
+}
+HR_ZONE_ORDER = ["na", "warm_up", "fat_burn", "aerobic", "anaerobic", "extreme"]
+
+
+def get_workout_summary_detail(user: str, start_ms: int) -> dict | None:
+    ''' The full field set for ONE specific workout's own
+    sample_type="activity_summary" point (written by the parser's
+    extract_base_activity_summary_rows/flatten_workout_summary), keyed
+    by its own start time in epoch milliseconds - the same value
+    already returned as `start` (as an ISO string) by
+    get_combined_activity_sessions()/get_precomputed_activity_sessions(),
+    and the same raw value the parser's own `workout_start_time` tag on
+    workout_detail/workout_lap points is derived from (both are the
+    exact same BASE_ACTIVITY_SUMMARY.START_TIME value, just represented
+    differently - one as this point's own InfluxDB timestamp, one as a
+    string tag on the SEPARATE per-sample/per-lap points) - see
+    get_workout_detail_series()'s own docstring for how that
+    correlation is used to fetch those separately.
+
+    A tight (+/- 1 second) window around the exact millisecond is used
+    rather than an exact-instant match, since real-world clock/
+    precision differences between how a timestamp was originally
+    constructed and how it's now being queried back are a more robust
+    assumption than expecting bit-exact equality - workouts are
+    naturally spaced apart in real time by more than a second, so this
+    window is not expected to ever match more than one point.
+
+    Returns None if no matching point exists at all (a bad/stale
+    identifier, or the workout was somehow removed) - the caller should
+    treat this as a 404, not silently render an empty page.
+    '''
+    client = get_client()
+    query_api = client.query_api()
+
+    center = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
+    start_iso = (center - timedelta(seconds=1)).isoformat()
+    stop_iso = (center + timedelta(seconds=1)).isoformat()
+
+    flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: {start_iso}, stop: {stop_iso})
+      |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+      |> filter(fn: (r) => r.user == "{user}")
+      |> filter(fn: (r) => r.sample_type == "activity_summary")
+      |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+    '''
+
+    try:
+        tables = query_api.query(flux)
+    except Exception as e:
+        logger.error(f"Failed to query workout summary detail for user={user}, start_ms={start_ms}: {e}")
+        return None
+
+    for table in tables:
+        for record in table.records:
+            values = record.values
+            name = values.get("name")
+            has_real_name = name is not None and name != "Unset"
+
+            zones = []
+            for zone_key in HR_ZONE_ORDER:
+                seconds = values.get(f"hr_zone_{zone_key}_seconds")
+                max_bpm = values.get(f"hr_zone_{zone_key}_max_bpm")
+                if seconds is None and max_bpm is None:
+                    continue
+                zones.append({
+                    "key": zone_key,
+                    "display_name": HR_ZONE_DISPLAY_NAMES[zone_key],
+                    "seconds": seconds,
+                    "max_bpm": max_bpm,
+                })
+
+            return {
+                "start": record.get_time().isoformat(),
+                "device": values.get("device"),
+                "name": name if has_real_name else None,
+                "activity_kind_summary": values.get("activity_kind_summary"),
+                "duration_s": values.get("duration_s"),
+                "active_seconds": values.get("active_seconds"),
+                "calories_kcal": values.get("calories_kcal"),
+                "hr_avg": values.get("hr_avg"),
+                "hr_max": values.get("hr_max"),
+                "hr_min": values.get("hr_min"),
+                "training_load": values.get("training_load"),
+                "steps": values.get("steps"),
+                "distance_m": values.get("distance_m"),
+                "avg_speed_mps": values.get("avg_speed_mps"),
+                "max_speed_mps": values.get("max_speed_mps"),
+                "avg_cadence_per_min": values.get("avg_cadence_per_min"),
+                "max_cadence_per_min": values.get("max_cadence_per_min"),
+                "altitude_avg_m": values.get("altitude_avg_m"),
+                "altitude_min_m": values.get("altitude_min_m"),
+                "altitude_max_m": values.get("altitude_max_m"),
+                "elevation_gain_m": values.get("elevation_gain_m"),
+                "elevation_loss_m": values.get("elevation_loss_m"),
+                "aerobic_training_effect": get_training_effect_label(values.get("aerobic_training_effect")),
+                "anaerobic_training_effect": get_training_effect_label(values.get("anaerobic_training_effect")),
+                "hr_zones": zones,
+            }
+    return None
+
+
+def get_workout_detail_series(user: str, start_ms: int, fields: list[str]) -> list[dict]:
+    ''' Per-sample points (sample_type="workout_detail", written by the
+    parser's extract_workout_detail_points from a real FIT/GPX export -
+    see parser/activefit/FIELD_RESEARCH.md) for ONE specific workout,
+    correlated by its own `workout_start_time` tag - the SAME raw
+    BASE_ACTIVITY_SUMMARY.START_TIME value get_workout_summary_detail()
+    is keyed by, just carried as a string tag on these separate points
+    rather than as their own timestamp (each workout_detail point's own
+    timestamp is instead when THAT SPECIFIC SAMPLE was taken).
+
+    Returns an EMPTY list (not None) when no per-sample export exists
+    for this workout - a real, expected, and already-documented case
+    (no FIT/GPX automation enabled at all, or the workout predates
+    enabling it), not an error - the caller should treat this as "no
+    chart to show", falling back to the summary-only fields already
+    returned by get_workout_summary_detail().
+
+    Only the given `fields` are requested/returned per point (e.g.
+    ["hr"] for a simple HR-over-time chart) - a real sample may not
+    carry every requested field (see flatten_fit_records's own
+    docstring on this), so a point's own dict here may have some keys
+    missing, not zeroed.
+    '''
+    client = get_client()
+    query_api = client.query_api()
+    field_filter = " or ".join(f'r._field == "{f}"' for f in fields)
+
+    # Bounded around start_ms itself (generous +24h to comfortably
+    # cover even a very long workout) rather than a blanket lookback -
+    # the workout's own start time is already known here, no need to
+    # scan further than that to find its own samples.
+    center = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
+    start_iso = (center - timedelta(hours=1)).isoformat()
+    stop_iso = (center + timedelta(hours=24)).isoformat()
+
+    flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: {start_iso}, stop: {stop_iso})
+      |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+      |> filter(fn: (r) => r.user == "{user}")
+      |> filter(fn: (r) => r.sample_type == "workout_detail")
+      |> filter(fn: (r) => r.workout_start_time == "{start_ms}")
+      |> filter(fn: (r) => {field_filter})
+      |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+      |> sort(columns: ["_time"])
+    '''
+
+    try:
+        tables = query_api.query(flux)
+    except Exception as e:
+        logger.warning(f"Failed to query workout detail series for user={user}, start_ms={start_ms}: {e}")
+        return []
+
+    results = []
+    for table in tables:
+        for record in table.records:
+            point = {"time": record.get_time().isoformat()}
+            for f in fields:
+                if f in record.values:
+                    point[f] = record.values[f]
+            results.append(point)
+    return results
 
 
 # Excluded from "sitting" time even though their intensity is
