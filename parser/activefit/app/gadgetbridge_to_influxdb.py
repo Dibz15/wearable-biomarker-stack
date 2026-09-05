@@ -437,17 +437,41 @@ def flatten_workout_summary(raw_summary_data: bytes) -> dict:
         # Aerobic, Anaerobic, Extreme) - the same guard
         # ZeppOsActivitySummaryParser.java's own code applies before
         # touching zoneTime at all ("Unexpected number of HR zones").
-        # zoneMax itself is never read by Gadgetbridge's own parser
-        # either (visibly unused in that file), so only zoneTime is
-        # extracted here, matching what's actually confirmed meaningful.
         zone_time = list(summary.heartRateZones.zoneTime)
+        zone_max = list(summary.heartRateZones.zoneMax)
+        zone_names = ["na", "warm_up", "fat_burn", "aerobic", "anaerobic", "extreme"]
         if len(zone_time) == 6:
-            zone_names = ["na", "warm_up", "fat_burn", "aerobic", "anaerobic", "extreme"]
             for name, seconds in zip(zone_names, zone_time):
                 fields[f"hr_zone_{name}_seconds"] = seconds
         else:
             logger.warning(f"BASE_ACTIVITY_SUMMARY.RAW_SUMMARY_DATA: expected 6 HR zones, "
-                            f"got {len(zone_time)} - skipping hr_zone_* fields for this row")
+                            f"got {len(zone_time)} - skipping hr_zone_*_seconds fields for this row")
+
+        # zoneMax is never read by Gadgetbridge's own parser (visibly
+        # unused in ZeppOsActivitySummaryParser.java) - but it's a real
+        # field in the schema, and decoding it directly against a real
+        # workout confirmed it holds each zone's own upper BPM bound,
+        # cross-checked exactly against that same workout's real Zepp
+        # screenshot (zoneMax [106,132,144,152,162,178] matches the
+        # shown 106-131/132-143/144-151/152-161/162-178 ranges exactly,
+        # accounting for an inclusive/exclusive boundary convention -
+        # zoneMax[i] is zone i's own upper bound; its lower bound is
+        # zoneMax[i-1]). Genuinely useful precisely because the zone
+        # SYSTEM/naming Zepp uses (max HR / heart rate reserve /
+        # lactate threshold - person-configurable, confirmed changes
+        # both the zone NAMES and the actual thresholds) isn't reported
+        # anywhere else at all - these are the REAL computed thresholds
+        # for THIS workout, correct regardless of which zone system was
+        # active or what the person's own calibration inputs (e.g.
+        # lactate threshold HR) were at the time, with no need to know
+        # or reproduce that formula ourselves.
+        if len(zone_max) == 6:
+            for name, bpm in zip(zone_names, zone_max):
+                fields[f"hr_zone_{name}_max_bpm"] = bpm
+        else:
+            logger.warning(f"BASE_ACTIVITY_SUMMARY.RAW_SUMMARY_DATA: expected 6 HR zone "
+                            f"thresholds, got {len(zone_max)} - skipping hr_zone_*_max_bpm "
+                            f"fields for this row")
 
     if summary.HasField("swimmingData"):
         sd = summary.swimmingData
@@ -463,15 +487,42 @@ def flatten_workout_summary(raw_summary_data: bytes) -> dict:
             fields["lane_length_unit"] = "meter" if sd.laneLengthUnit == 0 else "yard"
 
     if summary.HasField("pace"):
-        # NOT scaled - ZeppOsActivitySummaryParser.java applies a
-        # DIFFERENT scaling depending on whether the activity is a
-        # swim (*100, seconds-per-100m) or not (*1000 for avg only,
-        # best used as-is, seconds-per-km/seconds-per-m) - determining
-        # that split requires ZeppOsActivityType's own code->kind
-        # mapping table, which isn't available here. Stored raw and
-        # clearly labeled rather than guessing which scaling applies.
+        # Raw values kept for transparency/debugging - and because the
+        # scaling below is now CONFIRMED (2026-09) directly against a
+        # real outdoor Walking workout's own known ground truth:
+        # Gadgetbridge's own SUMMARY_DATA JSON (averageKMPaceSeconds:
+        # 648.9649, maxPace: 0.568) AND Zepp's own displayed 3.45/3.94
+        # mph both match exactly once converted (see below) - not a
+        # guess anymore.
         fields["pace_avg_raw"] = summary.pace.avg
         fields["pace_best_raw"] = summary.pace.best
+
+        # ZeppOsActivitySummaryParser.java applies a DIFFERENT scaling
+        # for swim activities (*100 -> seconds-per-100m) than every
+        # other activity kind (*1000 for avg -> seconds-per-km; best
+        # used directly, unscaled -> seconds-per-m). Determining that
+        # split from activity_type_code alone isn't possible (no
+        # confirmed code->kind mapping exists in this codebase) - but
+        # `summary.HasField("swimmingData")` is a reliable, DIRECT
+        # proxy for the exact same branch: that field is only ever
+        # populated for a genuine swim workout in the first place, so
+        # checking it sidesteps needing the activity-code mapping at
+        # all for this specific purpose.
+        is_swim = summary.HasField("swimmingData")
+        if is_swim:
+            pace_avg_seconds = summary.pace.avg * 100  # seconds per 100m
+            pace_best_seconds = summary.pace.best * 100
+        else:
+            pace_avg_seconds = summary.pace.avg * 1000  # seconds per km
+            pace_best_seconds = summary.pace.best  # already seconds per m, unscaled
+        # avg_speed_mps/max_speed_mps use the SAME unit (m/s) regardless
+        # of activity kind, matching the per-sample workout-detail
+        # fields' own speed_mps naming - a consumer doesn't need to
+        # know which scaling branch applied to use these directly.
+        if pace_avg_seconds:
+            fields["avg_speed_mps"] = (100 if is_swim else 1000) / pace_avg_seconds
+        if pace_best_seconds:
+            fields["max_speed_mps"] = (100 if is_swim else 1) / pace_best_seconds
 
     if summary.HasField("movementEvaluation"):
         me = summary.movementEvaluation
@@ -513,6 +564,7 @@ def flatten_workout_summary(raw_summary_data: bytes) -> dict:
 # real examples - see find_workout_detail_export()'s own docstring).
 
 WORKOUT_DETAIL_MEASUREMENT_SAMPLE_TYPE = "workout_detail"
+WORKOUT_LAP_MEASUREMENT_SAMPLE_TYPE = "workout_lap"
 
 # FIT field name -> (influx field name, optional transform function).
 # Deliberately a known-fields allowlist (skip anything else) rather
@@ -633,6 +685,87 @@ def flatten_fit_records(fit_messages) -> list[dict]:
         if not fields:
             continue
         results.append({"timestamp": timestamp, "fields": fields})
+    return results
+
+
+# FIT lap field name -> (influx field name, optional transform). A
+# "lap" is a per-SEGMENT summary (one per manual lap press or auto-
+# segment, confirmed both Hybrid Training's and Walking's own real Zepp
+# screenshots show a small number of these per workout, not a per-
+# sample rate) - a genuinely different message type from "record"
+# above, confirmed present in real exported .fit files (both the
+# person's own real Yoga/Walking exports and fitparse's own official
+# test fixture all contain real "lap" messages).
+FIT_LAP_FIELD_MAP = {
+    "avg_heart_rate": ("avg_hr", None),
+    "max_heart_rate": ("max_hr", None),
+    "avg_cadence": ("avg_cadence_rpm", None),
+    "max_cadence": ("max_cadence_rpm", None),
+    "total_distance": ("distance_m", None),
+    "total_calories": ("calories_kcal", None),
+    # total_timer_time (active/moving time, pauses excluded) preferred
+    # over total_elapsed_time (real wall-clock time, pauses included) -
+    # matches this app's own existing "active_seconds" convention
+    # elsewhere (workout summary's own activeSeconds vs totalDuration).
+    "total_timer_time": ("duration_s", None),
+    "enhanced_avg_speed": ("avg_speed_mps", None),
+    "avg_speed": ("avg_speed_mps", None),
+    "enhanced_max_speed": ("max_speed_mps", None),
+    "max_speed": ("max_speed_mps", None),
+    "total_ascent": ("ascent_m", None),
+    "total_descent": ("descent_m", None),
+}
+
+
+def flatten_fit_laps(fit_messages) -> list[dict]:
+    ''' Converts a parsed FIT file's own "lap" messages into the same
+    [{"timestamp": <datetime>, "fields": {...}}, ...] shape
+    flatten_fit_records() produces for per-sample data - a SEPARATE,
+    much coarser-grained series (one point per lap, not per sample),
+    meant to be written to its own sample_type (see
+    WORKOUT_LAP_MEASUREMENT_SAMPLE_TYPE), not merged into
+    workout_detail's own per-sample points.
+
+    Same enhanced_*-preferred-over-plain rule as flatten_fit_records()
+    for avg/max speed. `lap_number` is 1-indexed (FIT's own
+    message_index is 0-indexed) to match both Zepp's and Gadgetbridge's
+    own real "No. 1, 2, ..." lap numbering seen directly in their
+    screenshots. A lap with none of the known fields present (should
+    be rare - a real lap always carries at least a duration - but
+    handled the same defensively as an empty record) is skipped.
+    '''
+    results = []
+    for message in fit_messages:
+        if message.name != "lap":
+            continue
+        start_time = message.get_value("start_time")
+        if start_time is None:
+            continue
+
+        raw_values = {}
+        for field in message:
+            if field.value is not None:
+                raw_values[field.name] = field.value
+
+        fields = {}
+        for fit_name in ("enhanced_avg_speed", "avg_speed", "enhanced_max_speed", "max_speed"):
+            if fit_name in raw_values:
+                influx_name, transform = FIT_LAP_FIELD_MAP[fit_name]
+                if influx_name not in fields:
+                    fields[influx_name] = transform(raw_values[fit_name]) if transform else raw_values[fit_name]
+        for fit_name, (influx_name, transform) in FIT_LAP_FIELD_MAP.items():
+            if fit_name in ("enhanced_avg_speed", "avg_speed", "enhanced_max_speed", "max_speed"):
+                continue
+            if fit_name in raw_values:
+                fields[influx_name] = transform(raw_values[fit_name]) if transform else raw_values[fit_name]
+
+        message_index = message.get_value("message_index")
+        if message_index is not None:
+            fields["lap_number"] = message_index + 1
+
+        if not fields:
+            continue
+        results.append({"timestamp": start_time, "fields": fields})
     return results
 
 
@@ -763,12 +896,16 @@ def extract_workout_detail_points(webdav_client, export_tracks_path, base_activi
     already_processed_starts, looks for a matching FIT (preferred) or
     GPX export in export_tracks_path (see find_workout_detail_export's
     own docstring for the correlation approach), downloads + parses
-    whichever is found, and returns one InfluxDB point PER SAMPLE -
+    whichever is found, and returns InfluxDB points for BOTH per-
+    sample data (sample_type "workout_detail", one point per sample -
     NOT one point per workout, unlike every other section of this
-    parser. Each point carries a `workout_start_time` tag (the parent
-    workout's own START_TIME, as a string) linking it back to that
-    workout's own summary point, so a frontend can query "every sample
-    for this specific workout" directly.
+    parser) AND, when the export is FIT specifically (GPX has no
+    confirmed lap equivalent), per-lap summaries (sample_type
+    "workout_lap", one point per lap - see flatten_fit_laps()). Both
+    carry a `workout_start_time` tag (the parent workout's own
+    START_TIME, as a string) linking them back to that workout's own
+    summary point, so a frontend can query "every sample/lap for this
+    specific workout" directly.
 
     A row with no matching export at all is silently skipped here -
     NOT an error, and not this function's concern to log loudly about,
@@ -813,16 +950,26 @@ def extract_workout_detail_points(webdav_client, export_tracks_path, base_activi
             try:
                 if kind == "fit":
                     fitfile = fitparse.FitFile(local_path)
-                    samples = flatten_fit_records(fitfile.get_messages())
+                    # Materialized once (fitparse's own get_messages()
+                    # is otherwise a single-pass generator) so both
+                    # per-sample records AND laps can be extracted from
+                    # the same parse, without re-reading the file.
+                    fit_messages = list(fitfile.get_messages())
+                    samples = flatten_fit_records(fit_messages)
+                    laps = flatten_fit_laps(fit_messages)
                 else:
                     with open(local_path, "rb") as f:
                         samples = parse_gpx_track_points(f.read())
+                    laps = []  # GPX has no standard lap concept, and
+                    # Gadgetbridge's own GPX export hasn't been
+                    # confirmed to embed one via any extension either -
+                    # not assumed present without a real file to check.
             except Exception as e:
                 logger.warning(f"Failed to parse workout detail export {filename!r} ({kind}): {e}")
                 continue
 
-        if not samples:
-            logger.info(f"Workout detail export {filename!r} ({kind}) parsed but yielded no usable samples")
+        if not samples and not laps:
+            logger.info(f"Workout detail export {filename!r} ({kind}) parsed but yielded no usable samples or laps")
             continue
 
         device_specific_tags = device_tags(device_id)
@@ -837,8 +984,19 @@ def extract_workout_detail_points(webdav_client, export_tracks_path, base_activi
                     "source_format": kind,
                 }
             })
-        logger.info(f"Workout detail: extracted {len(samples)} sample(s) from {filename!r} ({kind}) "
-                    f"for workout starting {start_time}")
+        for lap in laps:
+            results.append({
+                "timestamp": datetime_to_nanos(lap["timestamp"]),
+                "fields": lap["fields"],
+                "tags": {
+                    **device_specific_tags,
+                    "workout_start_time": start_time_str,
+                    "sample_type": WORKOUT_LAP_MEASUREMENT_SAMPLE_TYPE,
+                    "source_format": kind,
+                }
+            })
+        logger.info(f"Workout detail: extracted {len(samples)} sample(s) and {len(laps)} lap(s) "
+                    f"from {filename!r} ({kind}) for workout starting {start_time}")
 
     return results
 

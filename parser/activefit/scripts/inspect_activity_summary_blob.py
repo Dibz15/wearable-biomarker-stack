@@ -21,6 +21,17 @@ destination filename matters (don't shadow a stdlib module name).
 
 Requires the same WEBDAV_* env vars the parser itself uses.
 
+Dumps the FULL blob as hex (not just a head/tail preview) for any blob
+up to FULL_DUMP_MAX_BYTES - a real gap found and fixed here: an
+earlier version only ever printed the first/last 64 bytes, which
+happened to cover a 118-byte blob completely (the two windows
+overlapped) but silently left a real gap in the middle for anything
+larger (e.g. a 248-byte blob has a 120-byte hole neither window
+touches) - discovered when a person's own real outdoor-workout blob
+turned out to be exactly this larger case, and the missing middle
+bytes were the ones actually needed to solve a real question (the
+Pace field's own scaling formula).
+
 What to look for in the output:
   - RAW_SUMMARY_DATA is NULL or 0 bytes: this row genuinely has no
     richer breakdown to extract - matches the parser's own new
@@ -61,6 +72,7 @@ WEBDAV_PASS = os.getenv("WEBDAV_PASS", False)
 EXPORT_FILE = os.getenv("EXPORT_FILENAME", "Gadgetbridge.db")
 
 HEX_DUMP_BYTES = 64
+FULL_DUMP_MAX_BYTES = 2000
 
 
 def hex_dump(data: bytes) -> str:
@@ -114,10 +126,28 @@ def main():
             version = data[0] | (data[1] << 8)
             print(f"    version header (first 2 bytes, little-endian): 0x{version:04x} "
                   + ("(matches the expected 0x8000)" if version == 0x8000 else "(UNEXPECTED - expected 0x8000)"))
-        head = data[:HEX_DUMP_BYTES]
-        print(f"  First {len(head)} bytes (hex): {hex_dump(head)}")
-        if len(data) > HEX_DUMP_BYTES:
+        # Full dump, not just head/tail - a real gap found and fixed
+        # here: these blobs are consistently small (under a couple
+        # hundred bytes in every real example seen so far), but an
+        # earlier version of this script only dumped the first/last
+        # HEX_DUMP_BYTES, which happened to work for a 118-byte blob
+        # (the two 64-byte windows overlapped, covering everything)
+        # but left a real, silent GAP in the middle for anything
+        # larger (e.g. a 248-byte blob leaves a 120-byte hole neither
+        # window touches) - reconstructing "first 64 + last 64" for
+        # such a blob is missing real data, not just cosmetically
+        # incomplete. A hard ceiling (FULL_DUMP_MAX_BYTES) still
+        # guards against flooding the terminal if a genuinely huge
+        # blob ever shows up, falling back to the old head/tail view
+        # only in that unexpected case.
+        if len(data) <= FULL_DUMP_MAX_BYTES:
+            print(f"  Full blob (hex): {hex_dump(data)}")
+        else:
+            head = data[:HEX_DUMP_BYTES]
             tail = data[-HEX_DUMP_BYTES:]
+            print(f"  Blob exceeds {FULL_DUMP_MAX_BYTES} bytes - showing head/tail only "
+                  f"(a real gap in the middle - ask for a fuller dump if this range matters):")
+            print(f"  First {len(head)} bytes (hex): {hex_dump(head)}")
             print(f"  Last {len(tail)} bytes (hex): {hex_dump(tail)}")
 
     print("\n" + "=" * 90)
