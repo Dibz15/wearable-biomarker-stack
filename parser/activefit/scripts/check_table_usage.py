@@ -65,6 +65,7 @@ EXPORT_FILE = os.getenv("EXPORT_FILENAME", "Gadgetbridge.db")
 # source-parsing logic in a one-off diagnostic script.
 ALREADY_IMPLEMENTED = {
     # parser/activefit
+    "BASE_ACTIVITY_SUMMARY",
     "GENERIC_HRV_VALUE_SAMPLE",
     "GENERIC_TEMPERATURE_SAMPLE",
     "HUAMI_ACTIVITY_SAMPLE",

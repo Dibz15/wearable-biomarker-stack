@@ -51,7 +51,7 @@
 # their names suggest (see the SLEEP/REM_SLEEP/DEEP_SLEEP caveat
 # above).
 #
-# pip install webdavclient3 influxdb-client loguru
+# pip install webdavclient3 influxdb-client loguru protobuf
 
 import os
 import shutil
@@ -61,6 +61,8 @@ from datetime import datetime, timezone
 
 from loguru import logger
 from webdav3.client import Client
+
+import huami_pb2
 
 from common.webdav import fetch_database, open_database
 from common.devices import run_query, fetch_devices, device_tags_factory
@@ -297,10 +299,174 @@ def compute_query_start_bound(checkpoint_ns, now_seconds, fallback_bound_seconds
     return bound_scaled
 
 
+def flatten_workout_summary(raw_summary_data: bytes) -> dict:
+    ''' Decodes BASE_ACTIVITY_SUMMARY.RAW_SUMMARY_DATA (Zepp OS devices
+    only - confirmed via ZeppOsActivitySummaryParser.java, 2026-09) and
+    flattens it into a flat {field_name: value} dict ready to merge
+    into an InfluxDB point's own "fields". Uses the REAL protobuf
+    library (huami_pb2, generated from proto/huami.proto) rather than
+    a hand-rolled decoder - see the commit history for why a hand-
+    rolled version was built, tested, and then deliberately replaced:
+    for a real, well-defined proto3 schema (as opposed to an ad-hoc
+    binary format with no schema, like decode_sleep_session_blob()
+    below), the official library is less code to maintain here and
+    can't have a subtly-wrong wire-format bug of its own.
+
+    Every scaling factor applied below is copied directly from
+    ZeppOsActivitySummaryParser.java's own real parsing code (NOT the
+    .proto file's own inline comments, which turned out to disagree in
+    one case - see the module-level note near the imports on
+    baseLatitude/baseLongitude specifically). Only fields that
+    Gadgetbridge's own real parser actually reads and uses are
+    extracted here - the .proto defines a couple of fields
+    (Location.startTimestamp; Altitude.totalClimbing) that exist in
+    the wire format but that Gadgetbridge's own code never reads
+    (visibly marked "// TODO" in the Java source) - skipped here too,
+    since there's no confirmed meaning to attach to them yet.
+
+    Returns {} (not None) for a summary with no recognizable fields at
+    all, so the caller can always safely merge this dict in without a
+    None-check - an InfluxDB point just ends up with only its base
+    fields (duration_s) if nothing else decoded.
+    '''
+    fields = {}
+    try:
+        version = raw_summary_data[0] | (raw_summary_data[1] << 8)
+        if version != 0x8000:
+            logger.warning(f"BASE_ACTIVITY_SUMMARY.RAW_SUMMARY_DATA: unexpected version "
+                            f"0x{version:04x} (expected 0x8000) - attempting to parse anyway, "
+                            f"matching Gadgetbridge's own tolerant behavior here")
+        summary = huami_pb2.WorkoutSummary()
+        summary.ParseFromString(raw_summary_data[2:])
+    except Exception as e:
+        logger.warning(f"BASE_ACTIVITY_SUMMARY.RAW_SUMMARY_DATA: failed to decode "
+                        f"({len(raw_summary_data)} byte blob) - {e}")
+        return fields
+
+    if summary.HasField("type"):
+        fields["activity_type_code"] = summary.type.type
+        # summary.type.ai ("0 = normal, 1 = ai/automatic" per the
+        # .proto's own comment) not extracted - Gadgetbridge's own
+        # parser never reads it either.
+
+    if summary.HasField("time"):
+        fields["active_seconds"] = summary.time.workoutDuration
+        fields["total_duration_s"] = summary.time.totalDuration
+        fields["pause_duration_s"] = summary.time.pauseDuration
+
+    if summary.HasField("heartRate"):
+        fields["hr_avg"] = summary.heartRate.avg
+        fields["hr_max"] = summary.heartRate.max
+        fields["hr_min"] = summary.heartRate.min
+
+    if summary.HasField("steps"):
+        fields["steps"] = summary.steps.steps
+        fields["avg_stride_cm"] = summary.steps.avgStride
+        # *60: steps/sec -> steps/min, exactly as
+        # ZeppOsActivitySummaryParser.java's own addCadenceAvg/Max calls do.
+        fields["avg_cadence_per_min"] = summary.steps.avgCadence * 60
+        fields["max_cadence_per_min"] = summary.steps.maxCadence * 60
+
+    if summary.HasField("distance"):
+        fields["distance_m"] = summary.distance.distance
+
+    if summary.HasField("count"):
+        fields["total_jumps"] = summary.count.totalJumps
+
+    if summary.HasField("calories"):
+        fields["calories_kcal"] = summary.calories.calories
+
+    if summary.HasField("frequency"):
+        # Not scaled - used directly as a cadence in the Java source
+        # (addCadenceAvg/Max with no multiplier), unlike Steps' own
+        # avgCadence/maxCadence above which ARE *60'd there.
+        fields["avg_frequency_per_min"] = summary.frequency.avgFrequency
+        fields["max_frequency_per_min"] = summary.frequency.maxFrequency
+
+    if summary.HasField("trainingEffect"):
+        fields["aerobic_training_effect"] = summary.trainingEffect.aerobicTrainingEffect
+        fields["anaerobic_training_effect"] = summary.trainingEffect.anaerobicTrainingEffect
+        fields["training_load"] = summary.trainingEffect.currentWorkoutLoad
+        fields["vo2max"] = summary.trainingEffect.maximumOxygenUptake
+
+    if summary.HasField("altitude"):
+        # /200 and /100 confirmed directly from the Java source's own
+        # division, not the .proto's "// cm" comments (elevationGain/
+        # Loss) - the CODE divides those by 100 too, consistent with
+        # cm->m, so both sources agree there; only totalClimbing is
+        # skipped (Java: "// TODO totalClimbing" - never read).
+        fields["altitude_max_m"] = summary.altitude.maxAltitude / 200
+        fields["altitude_min_m"] = summary.altitude.minAltitude / 200
+        fields["altitude_avg_m"] = summary.altitude.avgAltitude / 200
+        fields["elevation_gain_m"] = summary.altitude.elevationGain / 100
+        fields["elevation_loss_m"] = summary.altitude.elevationLoss / 100
+
+    if summary.HasField("elevation"):
+        fields["ascent_seconds"] = summary.elevation.uphillTime
+        fields["descent_seconds"] = summary.elevation.downhillTime
+
+    if summary.HasField("temperature"):
+        fields["temperature_avg_c"] = summary.temperature.avg
+        fields["temperature_max_c"] = summary.temperature.max
+        fields["temperature_min_c"] = summary.temperature.min
+
+    if summary.HasField("heartRateZones"):
+        # Only trusted with exactly 6 zones (N/A, Warm-up, Fat-burn,
+        # Aerobic, Anaerobic, Extreme) - the same guard
+        # ZeppOsActivitySummaryParser.java's own code applies before
+        # touching zoneTime at all ("Unexpected number of HR zones").
+        # zoneMax itself is never read by Gadgetbridge's own parser
+        # either (visibly unused in that file), so only zoneTime is
+        # extracted here, matching what's actually confirmed meaningful.
+        zone_time = list(summary.heartRateZones.zoneTime)
+        if len(zone_time) == 6:
+            zone_names = ["na", "warm_up", "fat_burn", "aerobic", "anaerobic", "extreme"]
+            for name, seconds in zip(zone_names, zone_time):
+                fields[f"hr_zone_{name}_seconds"] = seconds
+        else:
+            logger.warning(f"BASE_ACTIVITY_SUMMARY.RAW_SUMMARY_DATA: expected 6 HR zones, "
+                            f"got {len(zone_time)} - skipping hr_zone_* fields for this row")
+
+    if summary.HasField("swimmingData"):
+        sd = summary.swimmingData
+        fields["laps"] = sd.laps
+        fields["strokes"] = sd.strokes
+        fields["swim_style_code"] = sd.style
+        fields["stroke_rate_avg_per_min"] = sd.avgStrokeRate
+        fields["stroke_rate_max_per_min"] = sd.maxStrokeRate
+        fields["stroke_distance_avg_cm"] = sd.avgDps
+        fields["swolf_index"] = sd.swolf
+        if sd.laneLengthUnit in (0, 1):
+            fields["lane_length"] = sd.laneLength
+            fields["lane_length_unit"] = "meter" if sd.laneLengthUnit == 0 else "yard"
+
+    if summary.HasField("pace"):
+        # NOT scaled - ZeppOsActivitySummaryParser.java applies a
+        # DIFFERENT scaling depending on whether the activity is a
+        # swim (*100, seconds-per-100m) or not (*1000 for avg only,
+        # best used as-is, seconds-per-km/seconds-per-m) - determining
+        # that split requires ZeppOsActivityType's own code->kind
+        # mapping table, which isn't available here. Stored raw and
+        # clearly labeled rather than guessing which scaling applies.
+        fields["pace_avg_raw"] = summary.pace.avg
+        fields["pace_best_raw"] = summary.pace.best
+
+    if summary.HasField("movementEvaluation"):
+        me = summary.movementEvaluation
+        fields["movement_consistency"] = me.consistency
+        fields["movement_stability"] = me.stability
+        fields["movement_continuity"] = me.continuity
+        fields["movement_rhythm"] = me.rhythm
+        fields["movement_speed_decay"] = me.speedDecay
+
+    return fields
+
+
 def extract_base_activity_summary_rows(rows, device_tags) -> list[dict]:
     ''' Turns raw BASE_ACTIVITY_SUMMARY rows (START_TIME, END_TIME,
-    DEVICE_ID, NAME, ACTIVITY_KIND - in that column order, matching the
-    SELECT in extract_data()) into the same {"timestamp", "fields",
+    DEVICE_ID, NAME, ACTIVITY_KIND, BASE_LONGITUDE, BASE_LATITUDE,
+    BASE_ALTITUDE, RAW_SUMMARY_DATA - in that column order, matching
+    the SELECT in extract_data()) into the same {"timestamp", "fields",
     "tags"} dict shape every other section builds for write_results().
 
     `device_tags` is the same per-run closure extract_data() builds via
@@ -323,6 +489,28 @@ def extract_base_activity_summary_rows(rows, device_tags) -> list[dict]:
     separate raw tag (activity_kind_summary), not run through
     HUAMI_ACTIVITY_KIND_MAP.
 
+    BASE_LONGITUDE/BASE_LATITUDE are extracted RAW (unscaled) - the
+    .proto's own inline comment claims a /6000000 (/-6000000 for
+    longitude) conversion to real coordinates, but
+    ZeppOsActivitySummaryParser.java's real code stores these
+    completely unscaled, with no confirmation anywhere that a
+    downstream consumer applies that division either. Storing raw
+    rather than guessing that scaling is real. BASE_ALTITUDE, in
+    contrast, genuinely IS pre-scaled to meters already by the time it
+    reaches this column (Gadgetbridge's own code divides by 2 - the
+    SAME division flatten_workout_summary() applies when reading
+    altitude straight from the blob - before calling setBaseAltitude()),
+    so it's extracted as base_altitude_m directly, no further division
+    applied here.
+
+    RAW_SUMMARY_DATA (the richer per-workout breakdown) is decoded via
+    flatten_workout_summary() when present and non-empty - see that
+    function's own docstring for the full field list and every
+    confirmed scaling factor. A row with no blob (SUMMARY_DATA/
+    RAW_SUMMARY_DATA are both known to sometimes be entirely absent -
+    see FIELD_RESEARCH.md) still gets its basic duration_s field, just
+    without the richer breakdown.
+
     Rows with a missing END_TIME (an in-progress/unfinished workout, or
     a malformed row) are skipped with a warning, not written with a
     missing duration_s - an InfluxDB point needs at least one field,
@@ -332,6 +520,7 @@ def extract_base_activity_summary_rows(rows, device_tags) -> list[dict]:
     results = []
     for r in rows:
         start_time, end_time, device_id, name, activity_kind = r[0], r[1], r[2], r[3], r[4]
+        base_longitude, base_latitude, base_altitude, raw_summary_data = r[5], r[6], r[7], r[8]
         if end_time is None:
             logger.warning(f"BASE_ACTIVITY_SUMMARY: row with no END_TIME "
                            f"(device_id={device_id}, start_time={start_time}) - skipping")
@@ -339,9 +528,32 @@ def extract_base_activity_summary_rows(rows, device_tags) -> list[dict]:
         row_ts = to_nanos(start_time, BASE_ACTIVITY_SUMMARY_TIMESTAMPS_ARE_MS)
         unit_divisor = 1000 if BASE_ACTIVITY_SUMMARY_TIMESTAMPS_ARE_MS else 1
         duration_s = (end_time - start_time) / unit_divisor
+
+        fields = {"duration_s": duration_s}
+        if base_longitude is not None:
+            fields["base_longitude_raw"] = base_longitude
+        if base_latitude is not None:
+            fields["base_latitude_raw"] = base_latitude
+        if base_altitude is not None:
+            fields["base_altitude_m"] = base_altitude
+        if raw_summary_data:
+            fields.update(flatten_workout_summary(bytes(raw_summary_data)))
+        else:
+            # A genuinely distinct case from "blob present but failed to
+            # decode" (which flatten_workout_summary() itself already
+            # warns about) - this row simply has no RAW_SUMMARY_DATA at
+            # all (NULL or empty). Logged explicitly rather than
+            # silently, since from the outside (e.g. checking InfluxDB
+            # afterward) the two cases look identical - only duration_s
+            # written either way - and telling them apart matters for
+            # debugging why a given workout has no rich breakdown.
+            logger.info(f"BASE_ACTIVITY_SUMMARY: row has no RAW_SUMMARY_DATA at all "
+                        f"(device_id={device_id}, start_time={start_time}, name={name!r}) - "
+                        f"writing duration_s only, no richer breakdown available for this row")
+
         results.append({
             "timestamp": row_ts,
-            "fields": {"duration_s": duration_s},
+            "fields": fields,
             "tags": {
                 **device_tags(device_id),
                 "name": "Unset" if name is None else name,
@@ -891,19 +1103,24 @@ def extract_data(cur, client):
     # "Workout/Activity summaries" entry for the full reasoning behind
     # that conclusion).
     #
-    # Deliberately NOT extracting SUMMARY_DATA/RAW_SUMMARY_DATA (the
-    # richer per-workout breakdown - HR zones, laps, etc.) here - their
-    # actual content has never been inspected against a real row, so
-    # writing extraction code against a guessed shape risks silently
-    # extracting nothing or the wrong thing. NAME/START_TIME/END_TIME/
-    # ACTIVITY_KIND are all simple, directly-typed columns needing no
-    # such guessing, and are all this feature (the Activity page's
-    # session list) actually needs - average heart rate is computed
-    # downstream by wearable-events from the already-extracted per-
-    # minute heart_rate field over each entry's [start, end) window,
-    # not duplicated here.
+    # RAW_SUMMARY_DATA (the richer per-workout breakdown - HR zones,
+    # training load, laps, etc.) is now decoded via flatten_workout_summary()
+    # - confirmed against Gadgetbridge's own real source (both
+    # proto/huami.proto and ZeppOsActivitySummaryParser.java, 2026-09),
+    # not a guessed shape. SUMMARY_DATA (the plaintext JSON alternative)
+    # is deliberately still NOT extracted - independently confirmed
+    # (a Gadgetbridge maintainer, via a third-party blog post) that
+    # Gadgetbridge strips this column before writing to the DB to save
+    # space, so it's expected to be empty/null in practice; the real
+    # content lives in RAW_SUMMARY_DATA only. BASE_LONGITUDE/
+    # BASE_LATITUDE/BASE_ALTITUDE (separate, simple top-level columns,
+    # no blob parsing needed) are also now extracted - see
+    # extract_base_activity_summary_rows()'s own docstring for why only
+    # BASE_ALTITUDE is stored pre-scaled to meters while the lat/lon
+    # pair is stored raw.
     rows = run_query(cur, "BASE_ACTIVITY_SUMMARY",
-        "SELECT START_TIME, END_TIME, DEVICE_ID, NAME, ACTIVITY_KIND "
+        "SELECT START_TIME, END_TIME, DEVICE_ID, NAME, ACTIVITY_KIND, "
+        "BASE_LONGITUDE, BASE_LATITUDE, BASE_ALTITUDE, RAW_SUMMARY_DATA "
         "FROM BASE_ACTIVITY_SUMMARY "
         f"WHERE START_TIME >= {base_activity_summary_query_start_bound_scaled} ORDER BY START_TIME ASC")
     if rows is not None:
