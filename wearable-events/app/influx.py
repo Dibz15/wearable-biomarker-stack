@@ -47,7 +47,7 @@ def calendar_event_id(calendar: str, start_time: str, title: str) -> str:
     return hashlib.sha1(raw).hexdigest()[:12]
 
 
-def sleep_entry_id(user: str, session_start_iso: str) -> str:
+def sleep_entry_id(user: str, session_start: datetime) -> str:
     ''' Deterministic id for a subjective sleep score entry, derived
     from the underlying sleep SESSION's own start time - not from
     sleep_date. Same pattern as calendar_event_id() above.
@@ -63,8 +63,27 @@ def sleep_entry_id(user: str, session_start_iso: str) -> str:
     submission for the SAME session (same start time) produces the
     same id and correctly overwrites - two different sessions, even
     on the same calendar date, get different ids and coexist.
+
+    Takes the datetime directly (not a pre-formatted ISO string) and
+    normalizes to UTC before hashing - a SECOND real bug, reported
+    directly ("editing doesn't preserve changes") and found here: the
+    exact same instant produces a DIFFERENT isoformat() string
+    depending on which timezone the datetime object happens to carry.
+    session["start_time"] from a fresh sensor-session query comes back
+    in this app's configured LOCAL timezone, but InfluxDB's own query
+    results - e.g. find_sleep_entry_by_id()'s "start_time", read back
+    from the journal entry itself - always come back UTC-parsed
+    (confirmed via influxdb_client's own date_utils.py), regardless of
+    what timezone the point was originally written with. Without
+    normalizing first, a PATCH computed its entry_id from the UTC-
+    parsed round-tripped timestamp while the ORIGINAL entry had been
+    tagged with the id from the local-timezone one - two different
+    strings for the same real instant - so an edit silently wrote a
+    brand-new, orphaned point instead of overwriting the original,
+    which is exactly why saved edits appeared not to stick.
     '''
-    raw = f"{user}|{session_start_iso}".encode()
+    normalized = session_start.astimezone(timezone.utc).isoformat()
+    raw = f"{user}|{normalized}".encode()
     return hashlib.sha1(raw).hexdigest()[:12]
 
 
@@ -225,7 +244,7 @@ def write_sleep_point(*, user: str, session_start: datetime, sleep_date: str, sc
     category's own known-key list on the backend (matching how
     qualifiers already work generically today).
     '''
-    entry_id = sleep_entry_id(user, session_start.isoformat())
+    entry_id = sleep_entry_id(user, session_start)
     client = get_client()
     with client.write_api(write_options=SYNCHRONOUS) as write_api:
         p = (
@@ -378,11 +397,12 @@ def find_sleep_entry_for_wake_date(user: str, wake_date: date) -> dict | None:
     device-session logic every other per-night Sleep function uses -
     see _sleep_session_for_night()), then looks up the entry via the
     SAME deterministic entry_id derivation write_sleep_point()/
-    sleep_entry_id() use (session_start.isoformat()) - not by
-    filtering on the entry's own "sleep_date" tag, which is the
-    BEDTIME's date (typically the day BEFORE wake_date) and would
-    otherwise require the caller to get that off-by-one-day mapping
-    right itself every time.
+    sleep_entry_id() use (the session's own start time, normalized to
+    UTC before hashing - see sleep_entry_id()'s own docstring for why
+    that normalization matters) - not by filtering on the entry's own
+    "sleep_date" tag, which is the BEDTIME's date (typically the day
+    BEFORE wake_date) and would otherwise require the caller to get
+    that off-by-one-day mapping right itself every time.
 
     Returns None if there's no recorded session for this night at all,
     OR a session exists but nothing has been logged for it yet - both
@@ -394,7 +414,7 @@ def find_sleep_entry_for_wake_date(user: str, wake_date: date) -> dict | None:
     if not sessions:
         return None
     _, session = _primary_device_session(sessions)
-    entry_id = sleep_entry_id(user, session["start_time"].isoformat())
+    entry_id = sleep_entry_id(user, session["start_time"])
     return find_sleep_entry_by_id(user, entry_id)
 
 
