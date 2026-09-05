@@ -18,7 +18,7 @@
 FROM python:slim-bullseye
 
 RUN pip install --upgrade pip \
-    && pip install webdavclient3 influxdb-client loguru protobuf
+    && pip install webdavclient3 influxdb-client loguru protobuf fitparse
 
 # activefit/app/huami_pb2.py is PRE-COMPILED (not generated at build
 # time here) from activefit/proto/huami.proto - Gadgetbridge's own
