@@ -194,38 +194,48 @@ export async function openWorkoutDetail(startMs) {
   `;
 
   // Per-sample HR chart, only if a real FIT/GPX export exists for this
-  // workout (an empty series here is a real, expected, already-
-  // documented case - not every workout has one - so this quietly
-  // does nothing rather than showing an error or an empty chart card).
+  // workout. An empty series here is a real, expected, already-
+  // documented case - most commonly a workout recorded BEFORE
+  // Gadgetbridge's own "Auto export GPX/FIT tracks" automations were
+  // enabled at all (that export only fires when a NEW activity syncs,
+  // never retroactively for one already recorded - confirmed directly
+  // this session against two real workouts, one from before enabling
+  // the automations and one from after). The message says as much,
+  // rather than a bare "no data" that reads like something's broken -
+  // Zepp/Gadgetbridge's own apps can still show a chart for that same
+  // older workout because they read the raw per-workout details file
+  // directly and locally; this app can only reach that data via the
+  // separate export automation, which has nothing to export for a
+  // workout that predates it.
+  const showHrPlaceholder = (message) => {
+    const canvas = document.getElementById("workout-hr-chart");
+    if (canvas) {
+      canvas.replaceWith(Object.assign(document.createElement("p"), {
+        className: "metric-card-empty", textContent: message,
+      }));
+    }
+  };
+  const NO_HR_DATA_MESSAGE = "No per-sample heart rate data for this workout \u2013 likely recorded before GPX/FIT export was enabled";
+
   if (workout.hr_avg !== null && workout.hr_avg !== undefined) {
     try {
       const hrSeries = await api(`/activity/workout/${startMs}/heart-rate`);
       const canvas = document.getElementById("workout-hr-chart");
-      if (canvas && hrSeries.length > 0) {
-        const points = hrSeries.filter(p => p.hr !== undefined).map(p => ({ t: p.time, v: p.hr }));
-        if (points.length > 0) {
-          const deviceName = workout.device || "device";
-          registerActiveChart(buildLineChart(canvas, { [deviceName]: points }, [deviceName], 0));
-        } else if (canvas) {
-          canvas.replaceWith(Object.assign(document.createElement("p"), {
-            className: "metric-card-empty", textContent: "No per-sample heart rate data for this workout",
-          }));
-        }
-      } else if (canvas) {
-        canvas.replaceWith(Object.assign(document.createElement("p"), {
-          className: "metric-card-empty", textContent: "No per-sample heart rate data for this workout",
-        }));
+      const points = hrSeries.filter(p => p.hr !== undefined).map(p => ({ t: p.time, v: p.hr }));
+      if (canvas && points.length > 0) {
+        const deviceName = workout.device || "device";
+        registerActiveChart(buildLineChart(canvas, { [deviceName]: points }, [deviceName], 0));
+      } else {
+        showHrPlaceholder(NO_HR_DATA_MESSAGE);
       }
     } catch (e) {
       // A failed per-sample fetch shouldn't take down the whole page -
       // the summary content above is already rendered and useful on
-      // its own.
-      const canvas = document.getElementById("workout-hr-chart");
-      if (canvas) {
-        canvas.replaceWith(Object.assign(document.createElement("p"), {
-          className: "metric-card-empty", textContent: "Could not load per-sample heart rate data",
-        }));
-      }
+      // its own. Deliberately a DIFFERENT message than the "no data"
+      // case above - this one means the request itself broke
+      // (network/server error), not that the export simply doesn't
+      // exist for this workout.
+      showHrPlaceholder("Could not load per-sample heart rate data");
     }
   }
 }

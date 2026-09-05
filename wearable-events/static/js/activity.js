@@ -57,36 +57,65 @@ function renderSessionLabel(session) {
   return `${escapeHtml(text)}${escapeHtml(code)}`;
 }
 
-function renderSessionList(sessions) {
-  if (!sessions.length) {
-    return `<p class="metric-card-empty">No activity sessions recorded for this day</p>`;
-  }
-  const rows = sessions.map(s => {
-    const start = new Date(s.start).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    const end = new Date(s.end).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    const hrText = (s.avg_heart_rate === null || s.avg_heart_rate === undefined) ? "" : `${s.avg_heart_rate} bpm avg`;
-    // Only "precomputed" entries (a real BASE_ACTIVITY_SUMMARY row)
-    // have a Workout Detail page to open at all - a "derived" session
-    // (inferred from the raw per-minute stream, no summary point of
-    // its own) has nothing further to show, so it stays a plain,
-    // non-tappable row.
-    const isTappable = s.source === "precomputed" && s.start_ms !== null && s.start_ms !== undefined;
-    const rowClass = isTappable ? "activity-session-row metric-card-tappable" : "activity-session-row";
-    const attrs = isTappable ? `data-workout-start-ms="${s.start_ms}" role="button" tabindex="0"` : "";
-    return `
-      <div class="${rowClass}" ${attrs}>
-        <div class="activity-session-main">
-          <span class="activity-session-label">${renderSessionLabel(s)}</span>
-          <span class="metric-sub">${escapeHtml(start)} \u2013 ${escapeHtml(end)}</span>
-        </div>
-        <div class="activity-session-side">
-          ${hrText ? `<span class="metric-sub">${escapeHtml(hrText)}</span>` : ""}
-          <span class="metric-device-name">${escapeHtml(s.device)}</span>
-        </div>
+function renderSessionRow(s) {
+  const start = new Date(s.start).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const end = new Date(s.end).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const hrText = (s.avg_heart_rate === null || s.avg_heart_rate === undefined) ? "" : `${s.avg_heart_rate} bpm avg`;
+  // Only "precomputed" entries (a real BASE_ACTIVITY_SUMMARY row) have
+  // a Workout Detail page to open at all - a "derived" session
+  // (inferred from the raw per-minute stream, no summary point of its
+  // own) has nothing further to show, so it stays a plain, non-tappable
+  // row.
+  const isTappable = s.source === "precomputed" && s.start_ms !== null && s.start_ms !== undefined;
+  const rowClass = isTappable ? "activity-session-row metric-card-tappable" : "activity-session-row";
+  const attrs = isTappable ? `data-workout-start-ms="${s.start_ms}" role="button" tabindex="0"` : "";
+  return `
+    <div class="${rowClass}" ${attrs}>
+      <div class="activity-session-main">
+        <span class="activity-session-label">${renderSessionLabel(s)}</span>
+        <span class="metric-sub">${escapeHtml(start)} \u2013 ${escapeHtml(end)}</span>
       </div>
-    `;
-  }).join("");
+      <div class="activity-session-side">
+        ${hrText ? `<span class="metric-sub">${escapeHtml(hrText)}</span>` : ""}
+        <span class="metric-device-name">${escapeHtml(s.device)}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderSessionSublist(sessions, emptyMessage) {
+  if (!sessions.length) {
+    return `<p class="metric-card-empty">${escapeHtml(emptyMessage)}</p>`;
+  }
+  // Most recent first within this sublist - same reasoning as the
+  // earlier single-list reversal (the backend's own sort is
+  // chronological ascending; newest-at-top is a display-only choice
+  // matching ordinary feed/timeline convention).
+  const rows = [...sessions].reverse().map(renderSessionRow).join("");
   return `<div class="activity-session-list">${rows}</div>`;
+}
+
+// Splits the Activity page's combined session list (both automatic
+// sessions derived from raw per-minute data, and precomputed workout
+// entries from BASE_ACTIVITY_SUMMARY - see get_combined_activity_sessions's
+// own docstring) into two SEPARATE lists, per the person's own
+// request: a deliberately-started ("manual") workout is a genuinely
+// different category from activity merely inferred after the fact
+// from ambient movement, and blending both into one chronological
+// list made it hard to scan either one at a glance. Manual workouts
+// are shown FIRST (they're also the only entries with a Workout
+// Detail page to open at all), each sublist independently sorted
+// newest-first.
+function renderSessionLists(sessions) {
+  const manual = sessions.filter(s => s.source === "precomputed");
+  const detected = sessions.filter(s => s.source === "derived");
+  return `
+    <p class="today-section-label">Workouts</p>
+    ${renderSessionSublist(manual, "No workouts logged for this day")}
+
+    <p class="today-section-label">Detected Activity</p>
+    ${renderSessionSublist(detected, "No other activity detected for this day")}
+  `;
 }
 
 function wireSessionList(container) {
@@ -188,8 +217,7 @@ async function renderActivityDay(anchorDate) {
       <canvas id="activity-hourly-chart"></canvas>
     </div>
 
-    <p class="today-section-label">Activities Today</p>
-    ${renderSessionList(sessions)}
+    ${renderSessionLists(sessions)}
   `;
 
   wireActivityControls("day", anchorDate);
