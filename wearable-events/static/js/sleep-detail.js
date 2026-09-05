@@ -247,12 +247,20 @@ async function renderSleepVitalsDay(field, anchorDate) {
 
     content.innerHTML = `
       ${renderDateNav("day", anchorDate)}
+      <p class="today-section-label">${escapeHtml(cfg.title)}</p>
       <div class="sleep-summary-card">
         <div class="sleep-summary-top">
           <span class="sleep-summary-duration">${avgValue !== null && avgValue !== undefined ? avgValue : "\u2013"}<span class="unit"> ${escapeHtml(cfg.unit)}</span></span>
           <span class="sleep-summary-date">${escapeHtml(anchorDate)}</span>
         </div>
       </div>
+
+      <div class="sleep-hypnogram-card">
+        ${vitalsPoints.length > 0 && hypnogram.length > 0
+          ? buildVitalsHypnogramSVG(vitalsPoints, hypnogram, { width: 800, height: 180 })
+          : `<p class="metric-card-empty">No data for this night</p>`}
+      </div>
+
       ${restingHr !== undefined ? `
         <div class="sleep-summary-card">
           <div class="sleep-summary-top">
@@ -261,19 +269,13 @@ async function renderSleepVitalsDay(field, anchorDate) {
           </div>
         </div>
       ` : ""}
-      ${renderBaselineBar(baseline, 7, { lowLabel: cfg.lowLabel, highLabel: cfg.highLabel, unit: cfg.unit, decimals: cfg.decimals })}
-
-      <p class="today-section-label">${escapeHtml(cfg.title)}</p>
-      <div class="sleep-hypnogram-card">
-        ${vitalsPoints.length > 0 && hypnogram.length > 0
-          ? buildVitalsHypnogramSVG(vitalsPoints, hypnogram, { width: 800, height: 180 })
-          : `<p class="metric-card-empty">No data for this night</p>`}
-      </div>
 
       <p class="today-section-label">Last 7 Days</p>
       <div class="detail-chart-card">
         <canvas id="sleep-vitals-trend-chart"></canvas>
       </div>
+
+      ${renderBaselineBar(baseline, 7, { lowLabel: cfg.lowLabel, highLabel: cfg.highLabel, unit: cfg.unit, decimals: cfg.decimals })}
     `;
     wireSubDetailDateNav(anchorDate, renderFn);
 

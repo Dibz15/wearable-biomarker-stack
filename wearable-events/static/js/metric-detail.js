@@ -67,6 +67,12 @@ const DETAIL_VIEWS = {
         // period-average line, is the more honest and more legible
         // shape for what this data actually is.
         chartStyle: "connected-scatter",
+        // Resting HR is fundamentally an overnight/sleep-adjacent
+        // metric - links this single-value card over to the richer
+        // Sleep Heart Rate page (full-night chart, its own baseline
+        // gauge, 7-day trend) for the same date being viewed, rather
+        // than leaving this as a dead-end single number.
+        linkTo: "sleep-heart-rate",
       },
     ],
   },
@@ -592,9 +598,19 @@ async function renderDetailPeriod(view, period, anchorDate) {
             `;
           }).join("")
         : `<p class="metric-card-empty">No data for this period</p>`;
+      // c.linkTo (Resting Heart Rate -> Sleep Heart Rate) makes the
+      // whole card tappable - wired up after content.innerHTML is set
+      // below, via a dynamic import of sleep-detail.js specifically to
+      // avoid a circular STATIC import (sleep-detail.js already
+      // imports several things from this file) - confirmed a dynamic
+      // import here resolves fine since by click-time both modules are
+      // already fully loaded and evaluated.
+      const cardOpenAttrs = c.linkTo
+        ? `class="sleep-summary-card metric-card-tappable" data-link-to="${escapeHtml(c.linkTo)}" role="button" tabindex="0"`
+        : `class="sleep-summary-card"`;
       return `
         <p class="today-section-label">${c.label}</p>
-        <div class="sleep-summary-card">${valueRows}</div>
+        <div ${cardOpenAttrs}>${valueRows}</div>
         ${baselineHtml}
       `;
     }
@@ -662,6 +678,27 @@ async function renderDetailPeriod(view, period, anchorDate) {
 
   content.innerHTML = renderPeriodButtons(period, view.periods) + renderDateNav(period, anchorDate) + cardsHtml + differentialHtml + stressBreakdownHtml;
   wireDetailControls((p, d) => renderDetailPeriod(view, p, d), period, anchorDate);
+
+  // Wire up any card that opted into linking elsewhere (currently just
+  // Resting Heart Rate -> Sleep Heart Rate) - a map from linkTo value
+  // to its opener, matching the same pattern sleep-overview.js uses
+  // for its own multiple detail-page links, rather than hardcoding one
+  // querySelector per linkTo value.
+  const LINK_TO_OPENERS = {
+    "sleep-heart-rate": async (d) => {
+      const { openSleepHeartRateDetail } = await import("./sleep-detail.js");
+      return openSleepHeartRateDetail(d);
+    },
+  };
+  content.querySelectorAll("[data-link-to]").forEach(el => {
+    const open = LINK_TO_OPENERS[el.dataset.linkTo];
+    if (!open) return;
+    const handler = () => open(anchorDate);
+    el.addEventListener("click", handler);
+    el.addEventListener("keydown", e => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handler(); }
+    });
+  });
 
   view.charts.forEach((c, i) => {
     // Single-value day views (Resting Heart Rate) never rendered a

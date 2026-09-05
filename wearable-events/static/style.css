@@ -755,6 +755,15 @@ main {
   font-size: 0.85rem;
 }
 
+/* Same tap-affordance gap as .sleep-summary-duration's/.sleep-stat-item's
+   own earlier fixes - .metric-card-tappable's chevron only fires on
+   .metric-card-label elements, which this card's "label" text (the
+   device name, here doubling as the link target's own hint) isn't. */
+.sleep-summary-card.metric-card-tappable .sleep-summary-date::after {
+  content: " \203a";
+  color: var(--muted);
+}
+
 /* Stage proportion bar - one segment per stage, width proportional to
    its share of the session. Colors deliberately match the palette
    Zepp itself uses for the same four stages (see
