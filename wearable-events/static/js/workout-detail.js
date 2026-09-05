@@ -165,8 +165,8 @@ function renderTrainingEffectCard(workout) {
   `;
 }
 
-export async function openWorkoutDetail(startMs) {
-  openDetailScreen("Workout");
+export async function openWorkoutDetail(startMs, onBack = null) {
+  openDetailScreen("Workout", onBack);
   const content = document.getElementById("detail-content");
   content.innerHTML = `<p class="muted">Loading...</p>`;
   clearActiveCharts();

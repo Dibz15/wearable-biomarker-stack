@@ -118,9 +118,23 @@ function renderSessionLists(sessions) {
   `;
 }
 
-function wireSessionList(container) {
+function wireSessionList(container, anchorDate) {
   container.querySelectorAll("[data-workout-start-ms]").forEach(el => {
-    const open = () => openWorkoutDetail(Number(el.dataset.workoutStartMs));
+    // "Back" from the Workout Detail page returns to THIS exact
+    // Activity day view (same anchorDate), not the main tabs - see
+    // metric-detail.js's own openDetailScreen/back-stack comment for
+    // why this needs passing through explicitly at all. Also resets
+    // the overlay's own title back to "Activity" - openWorkoutDetail's
+    // own openDetailScreen("Workout", ...) call overwrote it, and
+    // renderActivityPeriod/renderActivityDay never set it themselves
+    // (they only touch #detail-content, correctly assuming the title
+    // is already right from whenever the Activity page was FIRST
+    // opened) - without this, the title would stay stuck on "Workout"
+    // after going back, a real gap caught before shipping this fix.
+    const open = () => openWorkoutDetail(Number(el.dataset.workoutStartMs), () => {
+      openDetailScreen("Activity");
+      renderActivityPeriod("day", anchorDate);
+    });
     el.addEventListener("click", open);
     el.addEventListener("keydown", e => {
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
@@ -221,7 +235,7 @@ async function renderActivityDay(anchorDate) {
   `;
 
   wireActivityControls("day", anchorDate);
-  wireSessionList(content);
+  wireSessionList(content, anchorDate);
 
   if (intensityDevices.length > 0) {
     registerActiveChart(buildTieredBarChart(

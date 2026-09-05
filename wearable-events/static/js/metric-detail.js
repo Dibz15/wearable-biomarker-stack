@@ -4,6 +4,23 @@ import { buildLineChart, buildRangeBarChart, buildDifferentialChart, buildTiered
 
 let activeCharts = [];
 
+// A small back-stack, not just a single close action - added
+// specifically because the Workout Detail page is opened FROM WITHIN
+// the Activity page's own session list, both sharing this SAME
+// overlay (title/content/back-button) rather than being genuinely
+// separate screens. Without this, pressing back from Workout Detail
+// had no way to distinguish "go back to the Activity list I came
+// from" from "close the whole overlay back to the main tabs" - it
+// always did the latter, a real reported navigation bug. Every
+// EXISTING single-level caller (Sleep Duration, Sleep Heart Rate, the
+// Activity page itself when opened from a Today card, etc.) still
+// calls openDetailScreen(title) with no second argument, so this
+// stack stays empty for them and "back" still means "close entirely",
+// exactly as before - this is purely additive for the one genuinely
+// nested case (Workout Detail), not a behavior change for anything
+// else.
+let backStack = [];
+
 // The detail-screen overlay (title, back button, chart cleanup) is
 // shared UI, not specific to the metric-detail views defined in this
 // file - the Activity page (its own module, not one of the
@@ -11,9 +28,19 @@ let activeCharts = [];
 // than duplicating the overlay toggling or - more importantly -
 // tracking a second, separate set of live Chart.js instances that the
 // shared back button wouldn't know to destroy.
-export function openDetailScreen(title) {
+//
+// `onBack`, when given, is what pressing the shared back button does
+// INSTEAD OF closing the overlay entirely - e.g. Workout Detail passes
+// a callback that re-renders the Activity day view it was opened from,
+// so "back" returns to that list rather than jumping all the way out
+// to the main tabs. Omitted (the default, for every single-level
+// caller) means "back" closes the overlay, exactly as it always has.
+export function openDetailScreen(title, onBack = null) {
   document.getElementById("detail-title").textContent = title;
   document.getElementById("detail-screen").style.display = "block";
+  if (onBack) {
+    backStack.push(onBack);
+  }
 }
 
 export function registerActiveChart(chart) {
@@ -26,6 +53,17 @@ export function clearActiveCharts() {
 }
 
 function closeDetailScreen() {
+  // Pop one level and re-render it, rather than closing, whenever a
+  // nested screen registered a way back - the whole point of the
+  // stack above. Charts still need clearing either way (the screen
+  // being left behind, nested or not, may have live Chart.js
+  // instances the destination render doesn't know about).
+  if (backStack.length > 0) {
+    const goBack = backStack.pop();
+    clearActiveCharts();
+    goBack();
+    return;
+  }
   document.getElementById("detail-screen").style.display = "none";
   clearActiveCharts();
 }
