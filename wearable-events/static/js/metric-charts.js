@@ -828,6 +828,69 @@ const HYPNOGRAM_STAGE_ORDER_TOP_TO_BOTTOM = ["awake", "rem", "light", "deep"];
 const HYPNOGRAM_STAGE_COLORS = { deep: "#7c6ce8", light: "#6ea8fe", rem: "#4fd8b8", awake: "#e88a8a" };
 const HYPNOGRAM_STAGE_LABELS = { deep: "Deep", light: "Light", rem: "REM", awake: "Awake" };
 
+// Per-night sleep-stage composition across a week/month/year - the
+// Sleep Duration page's own week/month/year rollup view (see
+// UI_DESIGN_NOTES.md's "Time Asleep (advanced)" page notes - Zepp's
+// own version of this same chart). Takes get_sleep_stage_trend()'s own
+// real shape directly ([{date, stages_min: {light,deep,rem,awake}}]) -
+// already one row per night with a single, already-resolved primary
+// device (see that function's own docstring), so unlike
+// buildStackedMinutesChart above this needs no device-keyed series
+// grouping at all. Same stage order/colors/labels as the hypnogram
+// elsewhere in this app (HYPNOGRAM_STAGE_COLORS/LABELS), stacked
+// bottom-to-top as Deep/Light/REM/Awake - reading a stacked bar
+// bottom-up as "deepest sleep first" mirrors the hypnogram's own
+// top-to-bottom depth convention, not an arbitrary new order.
+export function buildSleepStageStackedChart(canvas, stageTrend, config) {
+  const labels = stageTrend.map(entry => formatBucketLabel(entry.date, config.labelFormat));
+  const stageKeys = ["deep", "light", "rem", "awake"];
+
+  const datasets = stageKeys.map(stage => ({
+    label: HYPNOGRAM_STAGE_LABELS[stage],
+    data: stageTrend.map(entry => entry.stages_min[stage] ?? 0),
+    backgroundColor: HYPNOGRAM_STAGE_COLORS[stage],
+    stack: "stages",
+    borderRadius: 2,
+  }));
+
+  return new Chart(canvas, {
+    type: "bar",
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      animation: false,
+      scales: {
+        x: {
+          stacked: true,
+          ticks: { color: "#8a8d99", maxRotation: 0, autoSkip: true, autoSkipPadding: 16 },
+          grid: { display: false },
+        },
+        y: {
+          stacked: true,
+          min: 0,
+          ticks: { color: "#8a8d99" },
+          grid: { color: "#2a2d38" },
+          title: { display: true, text: "minutes", color: "#8a8d99" },
+        },
+      },
+      plugins: {
+        legend: { display: true, labels: { color: "#e8e9ed" } },
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const v = item.parsed.y;
+              if (!v) return "";
+              const h = Math.floor(v / 60);
+              const m = Math.round(v % 60);
+              return `${item.dataset.label}: ${h > 0 ? `${h}h ` : ""}${m}m`;
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
 // Builds a rounded-rect SVG path with SELECTIVE per-corner rounding -
 // a plain <rect rx> only supports uniform rounding on all 4 corners,
 // which is the wrong tool here: a bar whose edge connects to a

@@ -3,8 +3,8 @@
 // the main Sleep tab, opened in the shared detail-screen overlay
 // (same one metric-detail.js's DETAIL_VIEWS and activity.js use).
 import { escapeHtml, api, todayISO, shiftISODate } from "./core.js";
-import { openDetailScreen, registerActiveChart, clearActiveCharts, renderDateNav, renderBaselineBar } from "./metric-detail.js";
-import { buildTrendBarChart, buildVitalsHypnogramSVG, buildRangeBarChart, buildTimeScatterChart } from "./metric-charts.js";
+import { openDetailScreen, registerActiveChart, clearActiveCharts, renderDateNav, renderBaselineBar, renderPeriodButtons, wireDetailControls } from "./metric-detail.js";
+import { buildTrendBarChart, buildVitalsHypnogramSVG, buildRangeBarChart, buildTimeScatterChart, buildSleepStageStackedChart } from "./metric-charts.js";
 
 function formatHoursMinutes(hours) {
   const totalMin = Math.round(hours * 60);
@@ -44,15 +44,34 @@ function renderDurationLabel(rec) {
   return `<span class="duration-tier duration-tier-attention">Above Recommended</span>`;
 }
 
+// Only day/week/month offered here for now, deliberately - "year"
+// needs its own monthly-aggregation pass (get_sleep_stage_trend
+// returns one row per NIGHT regardless of period, which is exactly
+// right for week (7 bars) and month (28-31 bars, matching
+// UI_DESIGN_NOTES.md's own "Time Asleep (advanced)" spec precisely)
+// but would mean up to 365 raw bars for a year - not usable, and not
+// what that same spec calls for either ("Y collapses to one entry per
+// month"). Left out rather than shipped in a form that doesn't match
+// its own documented target.
+const SLEEP_DURATION_PERIODS = ["day", "week", "month"];
+
 export async function openSleepDurationDetail(anchorDate = todayISO()) {
   openDetailScreen("Sleep Duration");
-  await renderSleepDurationDay(anchorDate);
+  await renderSleepDurationPeriod("day", anchorDate);
+}
+
+async function renderSleepDurationPeriod(period, anchorDate) {
+  if (period === "day") {
+    await renderSleepDurationDay(anchorDate);
+  } else {
+    await renderSleepDurationRollup(period, anchorDate);
+  }
 }
 
 async function renderSleepDurationDay(anchorDate) {
   const content = document.getElementById("detail-content");
-  content.innerHTML = `${renderDateNav("day", anchorDate)}<p class="muted">Loading...</p>`;
-  wireSubDetailDateNav(anchorDate, renderSleepDurationDay);
+  content.innerHTML = `${renderPeriodButtons("day", SLEEP_DURATION_PERIODS)}${renderDateNav("day", anchorDate)}<p class="muted">Loading...</p>`;
+  wireDetailControls(renderSleepDurationPeriod, "day", anchorDate);
 
   clearActiveCharts();
 
@@ -68,12 +87,13 @@ async function renderSleepDurationDay(anchorDate) {
 
     if (overview === null) {
       content.innerHTML = `
+        ${renderPeriodButtons("day", SLEEP_DURATION_PERIODS)}
         ${renderDateNav("day", anchorDate)}
         <div class="sleep-summary-card">
           <p class="metric-card-empty">No sleep session recorded for this night.</p>
         </div>
       `;
-      wireSubDetailDateNav(anchorDate, renderSleepDurationDay);
+      wireDetailControls(renderSleepDurationPeriod, "day", anchorDate);
       return;
     }
 
@@ -81,6 +101,7 @@ async function renderSleepDurationDay(anchorDate) {
     const goalHours = overview.duration_goal_s / 3600;
 
     content.innerHTML = `
+      ${renderPeriodButtons("day", SLEEP_DURATION_PERIODS)}
       ${renderDateNav("day", anchorDate)}
       <div class="sleep-summary-card">
         <div class="sleep-summary-top">
@@ -98,7 +119,7 @@ async function renderSleepDurationDay(anchorDate) {
         <canvas id="sleep-duration-trend-chart"></canvas>
       </div>
     `;
-    wireSubDetailDateNav(anchorDate, renderSleepDurationDay);
+    wireDetailControls(renderSleepDurationPeriod, "day", anchorDate);
 
     if (trend.length > 0) {
       // Group by each night's own reporting device, not assumed to
@@ -122,8 +143,72 @@ async function renderSleepDurationDay(anchorDate) {
       }));
     }
   } catch (e) {
-    content.innerHTML = `${renderDateNav("day", anchorDate)}<p class="status">Error loading sleep duration data: ${escapeHtml(e.message)}</p>`;
-    wireSubDetailDateNav(anchorDate, renderSleepDurationDay);
+    content.innerHTML = `${renderPeriodButtons("day", SLEEP_DURATION_PERIODS)}${renderDateNav("day", anchorDate)}<p class="status">Error loading sleep duration data: ${escapeHtml(e.message)}</p>`;
+    wireDetailControls(renderSleepDurationPeriod, "day", anchorDate);
+  }
+}
+
+async function renderSleepDurationRollup(period, anchorDate) {
+  const content = document.getElementById("detail-content");
+  content.innerHTML = `${renderPeriodButtons(period, SLEEP_DURATION_PERIODS)}${renderDateNav(period, anchorDate)}<p class="muted">Loading...</p>`;
+  wireDetailControls(renderSleepDurationPeriod, period, anchorDate);
+
+  clearActiveCharts();
+
+  try {
+    const [timingTrend, stageTrend] = await Promise.all([
+      api(`/sleep/timing-trend?period=${period}&end_date=${anchorDate}`),
+      api(`/sleep/stage-trend?period=${period}&end_date=${anchorDate}`),
+    ]);
+
+    if (timingTrend.length === 0) {
+      content.innerHTML = `
+        ${renderPeriodButtons(period, SLEEP_DURATION_PERIODS)}
+        ${renderDateNav(period, anchorDate)}
+        <div class="sleep-summary-card">
+          <p class="metric-card-empty">No sleep sessions recorded for this period.</p>
+        </div>
+      `;
+      wireDetailControls(renderSleepDurationPeriod, period, anchorDate);
+      return;
+    }
+
+    // A straight mean across however many nights actually have a
+    // recorded session - nights with no session are already omitted
+    // by get_sleep_timing_trend() itself, not zero-filled, so this
+    // isn't skewed toward 0 by missing nights.
+    const avgHours = timingTrend.reduce((sum, t) => sum + t.duration_s, 0) / timingTrend.length / 3600;
+
+    content.innerHTML = `
+      ${renderPeriodButtons(period, SLEEP_DURATION_PERIODS)}
+      ${renderDateNav(period, anchorDate)}
+      <div class="sleep-summary-card">
+        <div class="sleep-summary-top">
+          <span class="sleep-summary-duration">${formatHoursMinutes(avgHours)}</span>
+          <span class="sleep-summary-date">Average \u00b7 ${timingTrend.length} night${timingTrend.length === 1 ? "" : "s"}</span>
+        </div>
+      </div>
+
+      <p class="today-section-label">Sleep Composition</p>
+      <div class="detail-chart-card">
+        <canvas id="sleep-stage-stacked-chart"></canvas>
+      </div>
+    `;
+    wireDetailControls(renderSleepDurationPeriod, period, anchorDate);
+
+    if (stageTrend.length > 0) {
+      const chart = buildSleepStageStackedChart(
+        document.getElementById("sleep-stage-stacked-chart"), stageTrend, { labelFormat: "day" }
+      );
+      if (chart) registerActiveChart(chart);
+    } else {
+      document.getElementById("sleep-stage-stacked-chart").replaceWith(Object.assign(document.createElement("p"), {
+        className: "metric-card-empty", textContent: "No sleep stage data for this period",
+      }));
+    }
+  } catch (e) {
+    content.innerHTML = `${renderPeriodButtons(period, SLEEP_DURATION_PERIODS)}${renderDateNav(period, anchorDate)}<p class="status">Error loading sleep composition data: ${escapeHtml(e.message)}</p>`;
+    wireDetailControls(renderSleepDurationPeriod, period, anchorDate);
   }
 }
 
