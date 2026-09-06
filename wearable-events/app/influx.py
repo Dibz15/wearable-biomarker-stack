@@ -1442,6 +1442,74 @@ def get_workout_detail_series(user: str, start_ms: int, fields: list[str]) -> li
     return results
 
 
+# Every field flatten_fit_laps() (parser/activefit) can possibly write
+# - a fixed allowlist rather than pivoting and returning whatever keys
+# happen to appear, so the shape of what this function returns doesn't
+# silently change if the parser's own field set ever changes; any
+# genuinely new field would need adding here deliberately, matching
+# this codebase's own general "known fields, not whatever shows up"
+# convention.
+WORKOUT_LAP_FIELDS = [
+    "lap_number", "avg_hr", "max_hr", "avg_cadence_rpm", "max_cadence_rpm",
+    "distance_m", "calories_kcal", "duration_s", "avg_speed_mps", "max_speed_mps",
+    "ascent_m", "descent_m",
+]
+
+
+def get_workout_laps(user: str, start_ms: int) -> list[dict]:
+    ''' Per-lap summaries (sample_type="workout_lap", written by the
+    parser's flatten_fit_laps - see parser/activefit/FIELD_RESEARCH.md)
+    for one workout, correlated the same way get_workout_detail_series()
+    is (the shared workout_start_time tag). FIT's own "lap" message
+    type only exists for FIT exports specifically - a GPX-sourced
+    workout (see extract_workout_detail_points's own source-priority
+    reasoning) has no lap concept at all, so this returns an empty list
+    for those, same "empty, not an error" convention as
+    get_workout_detail_series().
+
+    Sorted by each lap's own `lap_number` (1-indexed, matching both
+    Zepp's and Gadgetbridge's own real "No. 1, 2, ..." lap numbering) -
+    NOT by _time, since a lap's own point uses its start_time as its
+    timestamp, and while these should always agree in practice, sorting
+    by the semantically real ordering field is more robust than relying
+    on that coincidence.
+    '''
+    client = get_client()
+    query_api = client.query_api()
+
+    center = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
+    start_iso = (center - timedelta(hours=1)).isoformat()
+    stop_iso = (center + timedelta(hours=24)).isoformat()
+
+    flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: {start_iso}, stop: {stop_iso})
+      |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+      |> filter(fn: (r) => r.user == "{user}")
+      |> filter(fn: (r) => r.sample_type == "workout_lap")
+      |> filter(fn: (r) => r.workout_start_time == "{start_ms}")
+      |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+    '''
+
+    try:
+        tables = query_api.query(flux)
+    except Exception as e:
+        logger.warning(f"Failed to query workout laps for user={user}, start_ms={start_ms}: {e}")
+        return []
+
+    laps = []
+    for table in tables:
+        for record in table.records:
+            lap = {}
+            for f in WORKOUT_LAP_FIELDS:
+                if f in record.values:
+                    lap[f] = record.values[f]
+            if lap:
+                laps.append(lap)
+    laps.sort(key=lambda l: l.get("lap_number", 0))
+    return laps
+
+
 # Excluded from "sitting" time even though their intensity is
 # typically low too (see the real per-activity-kind distribution in
 # FIELD_RESEARCH.md - sleep's median intensity was 0, charging's was

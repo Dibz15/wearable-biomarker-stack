@@ -37,6 +37,7 @@ from app.influx import (
     get_combined_activity_sessions,
     get_workout_summary_detail,
     get_workout_detail_series,
+    get_workout_laps,
     get_hourly_activity_breakdown,
     get_manual_readings,
     get_nightly_baseline_comparison,
@@ -778,17 +779,34 @@ def get_workout_detail_endpoint(start_ms: int, current_user: dict = Depends(get_
     return detail
 
 
-@app.get("/activity/workout/{start_ms}/heart-rate")
-def get_workout_heart_rate_series_endpoint(start_ms: int, current_user: dict = Depends(get_current_user)):
-    ''' Per-sample heart rate for one specific workout, for the Workout
-    Detail page's own HR-over-time chart - see
-    get_workout_detail_series's own docstring for the full reasoning.
-    Returns an empty list (not a 404) when no FIT/GPX export exists for
-    this workout - a real, expected, already-documented case, not an
-    error; the page should just skip the chart, not treat this as
-    missing data the way a 404 on the summary endpoint above would be.
+@app.get("/activity/workout/{start_ms}/samples")
+def get_workout_samples_endpoint(start_ms: int, current_user: dict = Depends(get_current_user)):
+    ''' Every per-sample field the Workout Detail page's own charts
+    need (HR, cadence, distance, altitude, speed, GPS position, step
+    length) for one specific workout, fetched in a SINGLE call rather
+    than one request per chart - see get_workout_detail_series's own
+    docstring for the full reasoning on what this data is and when
+    it's genuinely absent. Returns an empty list (not a 404) when no
+    FIT/GPX export exists for this workout - a real, expected, already-
+    documented case, not an error; the page should just skip whichever
+    charts have nothing to show, not treat this as missing data the
+    way a 404 on the summary endpoint above would be.
     '''
-    return get_workout_detail_series(current_user["username"], start_ms, ["hr"])
+    fields = ["hr", "cadence_rpm", "distance_m", "altitude_m", "speed_mps",
+              "latitude", "longitude", "step_length_mm"]
+    return get_workout_detail_series(current_user["username"], start_ms, fields)
+
+
+@app.get("/activity/workout/{start_ms}/laps")
+def get_workout_laps_endpoint(start_ms: int, current_user: dict = Depends(get_current_user)):
+    ''' Per-lap summaries for one specific workout, for the Workout
+    Detail page's own Lap Details table - see get_workout_laps's own
+    docstring. Returns an empty list (not a 404) when the workout's own
+    export has no lap data at all - either a GPX-sourced workout (no
+    lap concept in GPX at all) or, less commonly, a FIT export that
+    genuinely recorded none.
+    '''
+    return get_workout_laps(current_user["username"], start_ms)
 
 
 @app.get("/activity/sitting-minutes")

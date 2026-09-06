@@ -3,11 +3,12 @@
 // entries, i.e. real BASE_ACTIVITY_SUMMARY rows, have one of these to
 // open at all) ---
 //
-// CORE SUBSET ONLY, deliberately - summary stats, HR Zone breakdown,
-// Training Effect, and an HR-over-time chart (when per-sample data
-// exists). Deferred to a later pass: laps table, elevation/speed/
-// cadence charts, GPS map (see wearable-events/UI_DESIGN_NOTES.md's
-// own "Individual Activity/Workout detail" page notes for the full
+// Originally a deliberately smaller core subset (summary stats, HR
+// Zone breakdown, Training Effect, HR-over-time chart); this pass
+// adds the deferred pieces - Lap Details table, elevation/speed/
+// cadence charts, and a real GPS map (Leaflet + OpenStreetMap tiles,
+// loaded via CDN in index.html - see UI_DESIGN_NOTES.md's own
+// "Individual Activity/Workout detail" page notes for the full
 // documented layout this is working toward).
 import { escapeHtml, api, formatNum } from "./core.js";
 import { openDetailScreen, registerActiveChart, clearActiveCharts } from "./metric-detail.js";
@@ -19,6 +20,16 @@ import { buildLineChart } from "./metric-charts.js";
 // applies this naming, so this frontend module just renders whatever
 // `display_name` each zone comes back with rather than hardcoding a
 // second copy of the mapping here.
+
+// Speed is stored (and comes back from the API) in m/s regardless of
+// source (summary-level avg_speed_mps/max_speed_mps, or per-sample
+// speed_mps) - converted to mph only here, at display time, matching
+// what the person's own real Zepp screenshots show them (their device
+// is configured for mph, confirmed directly against real workout
+// screenshots earlier this session) - this app has no other existing
+// distance/speed unit convention to match instead.
+const MPS_TO_MPH = 2.23694;
+const METERS_TO_MILES = 1 / 1609.344;
 
 function formatSecondsAsMinSec(totalSeconds) {
   const m = Math.floor(totalSeconds / 60);
@@ -165,6 +176,80 @@ function renderTrainingEffectCard(workout) {
   `;
 }
 
+// Lap Details table. Columns are a deliberately smaller, fixed subset
+// of what a lap can carry (see WORKOUT_LAP_FIELDS in app/influx.py for
+// the full list) - Lap/Duration/Distance/Avg HR/Avg Speed, matching
+// the spirit of both Zepp's and Gadgetbridge's own real lap tables
+// (which also show a handful of columns, not every field at once).
+// Distance/Speed columns are only shown at all if AT LEAST ONE lap has
+// that data - an indoor workout's own laps (HR/duration only, no GPS)
+// shouldn't show two permanently-empty columns.
+function renderLapsTable(laps) {
+  if (!laps || laps.length === 0) return "";
+  const hasDistance = laps.some(l => l.distance_m !== undefined);
+  const hasSpeed = laps.some(l => l.avg_speed_mps !== undefined);
+  const hasHr = laps.some(l => l.avg_hr !== undefined);
+
+  const headerCells = ["Lap", "Time"];
+  if (hasDistance) headerCells.push("Distance");
+  if (hasHr) headerCells.push("Avg HR");
+  if (hasSpeed) headerCells.push("Avg Speed");
+
+  const rows = laps.map(l => {
+    const cells = [
+      String(l.lap_number !== undefined ? l.lap_number : ""),
+      l.duration_s !== undefined ? formatSecondsAsMinSec(l.duration_s) : "\u2013",
+    ];
+    if (hasDistance) cells.push(l.distance_m !== undefined ? `${formatNum(l.distance_m * METERS_TO_MILES, 2)} mi` : "\u2013");
+    if (hasHr) cells.push(l.avg_hr !== undefined ? `${l.avg_hr} bpm` : "\u2013");
+    if (hasSpeed) cells.push(l.avg_speed_mps !== undefined ? `${formatNum(l.avg_speed_mps * MPS_TO_MPH, 1)} mph` : "\u2013");
+    return `<tr>${cells.map(c => `<td>${escapeHtml(c)}</td>`).join("")}</tr>`;
+  }).join("");
+
+  return `
+    <p class="today-section-label">Lap Details</p>
+    <div class="sleep-summary-card workout-laps-card">
+      <table class="workout-laps-table">
+        <thead><tr>${headerCells.map(h => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+// A single reusable chart-card shape for the three per-sample charts
+// below (Elevation/Speed/Cadence) - same "canvas now, filled in or
+// replaced with a message once the actual per-sample fetch resolves"
+// pattern the HR chart already established. Returns "" (renders
+// nothing at all, not an empty-state message) when the field is
+// completely absent from every sample - an indoor workout's own
+// Yoga/Hybrid Training session genuinely has no elevation/speed data
+// at all, and showing an empty "no data" card for something that was
+// never going to exist for that activity type would just be noise
+// (unlike HR, which is expected for virtually every workout and so
+// gets its own explanatory placeholder instead of disappearing).
+function renderPerSampleChartCard(canvasId, title, samples, field) {
+  const hasAny = samples.some(p => p[field] !== undefined);
+  if (!hasAny) return "";
+  return `
+    <p class="today-section-label">${escapeHtml(title)}</p>
+    <div class="detail-chart-card">
+      <canvas id="${canvasId}"></canvas>
+    </div>
+  `;
+}
+
+function renderGpsMapCard(samples) {
+  const hasGps = samples.some(p => p.latitude !== undefined && p.longitude !== undefined);
+  if (!hasGps) return "";
+  return `
+    <p class="today-section-label">Route</p>
+    <div class="detail-chart-card workout-map-card">
+      <div id="workout-map"></div>
+    </div>
+  `;
+}
+
 export async function openWorkoutDetail(startMs, onBack = null) {
   openDetailScreen("Workout", onBack);
   const content = document.getElementById("detail-content");
@@ -185,12 +270,40 @@ export async function openWorkoutDetail(startMs, onBack = null) {
     weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
   });
 
+  // Both fetched up front, in parallel, before any of the per-sample/
+  // per-lap sections are rendered - lets renderPerSampleChartCard/
+  // renderGpsMapCard/renderLapsTable decide up front whether a given
+  // section has anything to show at all (and skip it entirely,
+  // rather than rendering a card and then immediately replacing it),
+  // and avoids the earlier version's own pattern of only fetching HR
+  // after the rest of the page was already drawn.
+  let samples = [];
+  let laps = [];
+  if (workout.hr_avg !== null && workout.hr_avg !== undefined) {
+    try {
+      [samples, laps] = await Promise.all([
+        api(`/activity/workout/${startMs}/samples`),
+        api(`/activity/workout/${startMs}/laps`),
+      ]);
+    } catch (e) {
+      // A failed per-sample/lap fetch shouldn't take down the whole
+      // page - the summary content above is still useful on its own.
+      // samples/laps just stay empty, which every render function
+      // below already treats as "nothing to show for this section".
+    }
+  }
+
   content.innerHTML = `
     <p class="metric-sub" style="margin-bottom: 0.75rem;">${escapeHtml(dateLabel)} \u00b7 ${escapeHtml(workout.device || "")}</p>
     ${renderStatsRow(workout)}
     ${renderHeartRateSummary(workout)}
     ${renderHeartRateZones(workout.hr_zones)}
     ${renderTrainingEffectCard(workout)}
+    ${renderGpsMapCard(samples)}
+    ${renderPerSampleChartCard("workout-elevation-chart", "Elevation", samples, "altitude_m")}
+    ${renderPerSampleChartCard("workout-speed-chart", "Speed", samples, "speed_mps")}
+    ${renderPerSampleChartCard("workout-cadence-chart", "Cadence", samples, "cadence_rpm")}
+    ${renderLapsTable(laps)}
   `;
 
   // Per-sample HR chart, only if a real FIT/GPX export exists for this
@@ -207,35 +320,69 @@ export async function openWorkoutDetail(startMs, onBack = null) {
   // directly and locally; this app can only reach that data via the
   // separate export automation, which has nothing to export for a
   // workout that predates it.
-  const showHrPlaceholder = (message) => {
-    const canvas = document.getElementById("workout-hr-chart");
-    if (canvas) {
-      canvas.replaceWith(Object.assign(document.createElement("p"), {
-        className: "metric-card-empty", textContent: message,
-      }));
-    }
-  };
-  const NO_HR_DATA_MESSAGE = "No per-sample heart rate data for this workout \u2013 likely recorded before GPX/FIT export was enabled";
-
+  //
+  // HR gets this explanatory treatment (unlike elevation/speed/
+  // cadence/GPS below, which simply don't render a card at all when
+  // absent) because it's the one per-sample series expected for
+  // virtually every workout, indoor or outdoor - a missing HR chart
+  // is worth explaining, a missing elevation chart for a Yoga session
+  // is not.
   if (workout.hr_avg !== null && workout.hr_avg !== undefined) {
-    try {
-      const hrSeries = await api(`/activity/workout/${startMs}/heart-rate`);
-      const canvas = document.getElementById("workout-hr-chart");
-      const points = hrSeries.filter(p => p.hr !== undefined).map(p => ({ t: p.time, v: p.hr }));
-      if (canvas && points.length > 0) {
+    const hrCanvas = document.getElementById("workout-hr-chart");
+    if (hrCanvas) {
+      const points = samples.filter(p => p.hr !== undefined).map(p => ({ t: p.time, v: p.hr }));
+      if (points.length > 0) {
         const deviceName = workout.device || "device";
-        registerActiveChart(buildLineChart(canvas, { [deviceName]: points }, [deviceName], 0));
+        registerActiveChart(buildLineChart(hrCanvas, { [deviceName]: points }, [deviceName], 0, "bpm"));
       } else {
-        showHrPlaceholder(NO_HR_DATA_MESSAGE);
+        hrCanvas.replaceWith(Object.assign(document.createElement("p"), {
+          className: "metric-card-empty",
+          textContent: "No per-sample heart rate data for this workout \u2013 likely recorded before GPX/FIT export was enabled",
+        }));
       }
-    } catch (e) {
-      // A failed per-sample fetch shouldn't take down the whole page -
-      // the summary content above is already rendered and useful on
-      // its own. Deliberately a DIFFERENT message than the "no data"
-      // case above - this one means the request itself broke
-      // (network/server error), not that the export simply doesn't
-      // exist for this workout.
-      showHrPlaceholder("Could not load per-sample heart rate data");
     }
   }
+
+  renderPerSampleChart("workout-elevation-chart", samples, "altitude_m", workout.device, v => v, "m");
+  renderPerSampleChart("workout-speed-chart", samples, "speed_mps", workout.device, v => v * MPS_TO_MPH, "mph");
+  renderPerSampleChart("workout-cadence-chart", samples, "cadence_rpm", workout.device, v => v, "spm");
+  renderGpsMap(samples);
+}
+
+// Fills in one of the three optional per-sample chart canvases -
+// mirrors the HR chart's own buildLineChart call above, just
+// parameterized over field/unit-conversion so the three don't need
+// three near-identical copies of this logic. Does nothing if the
+// canvas doesn't exist at all (renderPerSampleChartCard already
+// decided not to render it, because this field is completely absent
+// for this workout - Yoga has no elevation/speed data, for instance).
+function renderPerSampleChart(canvasId, samples, field, deviceName, convert, unit) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const points = samples.filter(p => p[field] !== undefined).map(p => ({ t: p.time, v: convert(p[field]) }));
+  if (points.length === 0) return;
+  registerActiveChart(buildLineChart(canvas, { [deviceName || "device"]: points }, [deviceName || "device"], 1, unit));
+}
+
+// Renders the real GPS track on a Leaflet map (OpenStreetMap tiles,
+// loaded via CDN in index.html - the person's own explicit choice
+// over a track-only/no-basemap rendering) - does nothing if the map
+// container doesn't exist (renderGpsMapCard already decided this
+// workout has no GPS data at all).
+function renderGpsMap(samples) {
+  const container = document.getElementById("workout-map");
+  if (!container) return;
+  const points = samples
+    .filter(p => p.latitude !== undefined && p.longitude !== undefined)
+    .map(p => [p.latitude, p.longitude]);
+  if (points.length === 0) return;
+
+  const map = L.map(container, { attributionControl: true });
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "\u00a9 OpenStreetMap contributors",
+  }).addTo(map);
+
+  const polyline = L.polyline(points, { color: "#e88a8a", weight: 4 }).addTo(map);
+  map.fitBounds(polyline.getBounds(), { padding: [16, 16] });
 }

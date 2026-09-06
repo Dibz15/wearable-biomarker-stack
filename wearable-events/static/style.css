@@ -1310,6 +1310,52 @@ main {
   margin-top: 0.3rem;
 }
 
+.workout-laps-card {
+  padding: 0.25rem 1rem;
+  overflow-x: auto;
+}
+
+.workout-laps-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.workout-laps-table th {
+  text-align: left;
+  font-weight: 700;
+  padding: 0.6rem 0.5rem 0.4rem 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  border-bottom: 1px solid var(--surface-active);
+}
+
+.workout-laps-table td {
+  padding: 0.5rem 0.5rem 0.5rem 0;
+  white-space: nowrap;
+}
+
+.workout-laps-table tr + tr td {
+  border-top: 1px solid var(--surface-active);
+}
+
+/* Leaflet needs its own container to have a real, non-zero computed
+   size before it will lay out tiles correctly - .detail-chart-card's
+   own fixed height is inherited by .workout-map-card, but the inner
+   #workout-map div (what Leaflet actually binds to) needs its own
+   explicit height/width to fill that, since it's a plain div with no
+   content of its own to size itself by. */
+.workout-map-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+#workout-map {
+  height: 100%;
+  width: 100%;
+  border-radius: 12px;
+}
+
 /* --- Sleep tab's objective-data overview --- */
 
 .sleep-hypnogram-card {

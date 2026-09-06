@@ -4,7 +4,7 @@ import { isoToDate, formatNum, escapeHtml } from "./core.js";
 // are ever more devices than colors defined here, rather than erroring.
 const DEVICE_CHART_COLORS = ["#e88a8a", "#6ea8fe", "#4fd8b8", "#f0c674"];
 
-export function buildLineChart(canvas, series, devices, decimals) {
+export function buildLineChart(canvas, series, devices, decimals, yAxisLabel = null) {
   const datasets = devices.map((device, i) => ({
     label: device,
     // Epoch milliseconds, not the raw ISO string - lets Chart.js's
@@ -52,6 +52,11 @@ export function buildLineChart(canvas, series, devices, decimals) {
             callback: (v) => formatNum(v, decimals),
           },
           grid: { color: "#2a2d38" },
+          // Optional (existing callers don't pass this and get the
+          // same unlabeled axis as before) - a short unit label (e.g.
+          // "bpm", "mph") next to the axis itself, since a bare column
+          // of numbers doesn't say what they're numbers OF.
+          title: yAxisLabel ? { display: true, text: yAxisLabel, color: "#8a8d99" } : { display: false },
         },
       },
       plugins: {
