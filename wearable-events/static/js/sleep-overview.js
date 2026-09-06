@@ -358,10 +358,11 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
   journalEditingExisting = false;
 
   try {
-    const [overview, hypnogram, journalEntry] = await Promise.all([
+    const [overview, hypnogram, journalEntry, regularityIndex] = await Promise.all([
       api(`/sleep/overview?date=${anchorDate}`),
       api(`/sleep/hypnogram?date=${anchorDate}`),
       api(`/sleep/entry?date=${anchorDate}`),
+      api(`/sleep/regularity-index?end_date=${anchorDate}`),
     ]);
 
     if (overview === null) {
@@ -391,7 +392,10 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
       ${renderSleepStatsRow(overview)}
       ${renderSleepQuality(overview.sleep_quality)}
       <div class="sleep-summary-card metric-card-tappable" data-detail-field="sleep-regularity" role="button" tabindex="0">
-        <span class="metric-card-label">Sleep Regularity</span>
+        <div class="sleep-summary-top">
+          <span class="metric-card-label">Sleep Regularity</span>
+          <span class="sleep-stat-value">${regularityIndex !== null ? regularityIndex.sri : "\u2013"}</span>
+        </div>
       </div>
       <div class="sleep-summary-card metric-card-tappable" data-detail-field="sleep-reports" role="button" tabindex="0">
         <span class="metric-card-label">Sleep Reports</span>
