@@ -1326,3 +1326,71 @@ export function buildTimeScatterChart(canvas, series, devices, config = {}) {
     },
   });
 }
+
+// Fell-asleep and woke-up times overlaid on ONE chart (two smooth
+// curves) rather than as two separate scatter charts - the Sleep
+// Regularity page's own richer "Time Asleep (advanced)" treatment
+// (see UI_DESIGN_NOTES.md's own note that this reads noticeably
+// better than two separate charts for seeing the two curves converge/
+// diverge together). A dedicated function rather than reusing
+// buildTimeScatterChart's own per-DEVICE series shape for this - that
+// function's "devices" axis doesn't fit two different METRICS
+// (bedtime, waketime) cleanly, and this app's own sleep-timing data
+// already resolves to at most one row per night regardless of device
+// (get_sleep_timing_trend's own primary-device-per-night selection),
+// so there's no real multi-device case this needs to handle the way
+// buildTimeScatterChart's callers elsewhere in this app do.
+export function buildBedtimeWaketimeChart(canvas, trend, config) {
+  const labels = trend.map(t => new Date(t.date).toLocaleDateString([], { month: "short", day: "numeric" }));
+  const fmt = config.yTickCallback || ((v) => v);
+
+  const series = [
+    { label: "Fell Asleep", color: "#6ea8fe", values: trend.map(config.bedtimeValue) },
+    { label: "Woke Up", color: "#f0c674", values: trend.map(config.waketimeValue) },
+  ];
+  const datasets = series.map(s => ({
+    type: "line",
+    label: s.label,
+    data: s.values,
+    borderColor: s.color,
+    backgroundColor: "transparent",
+    borderWidth: 2,
+    tension: 0.3,
+    spanGaps: true,
+    pointRadius: 4,
+    pointBackgroundColor: s.color,
+    pointBorderColor: s.color,
+  }));
+
+  return new Chart(canvas, {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      animation: false,
+      scales: {
+        x: {
+          ticks: { color: "#8a8d99", maxRotation: 0, autoSkip: true },
+          grid: { display: false },
+        },
+        y: {
+          ticks: { color: "#8a8d99", callback: fmt },
+          grid: { color: "#2a2d38" },
+          min: config.yMin,
+          max: config.yMax,
+        },
+      },
+      plugins: {
+        legend: { display: true, labels: { color: "#e8e9ed" } },
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const v = item.parsed.y;
+              return v === null || v === undefined ? "" : `${item.dataset.label}: ${fmt(v)}`;
+            },
+          },
+        },
+      },
+    },
+  });
+}

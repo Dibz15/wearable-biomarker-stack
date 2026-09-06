@@ -4,7 +4,7 @@
 // (same one metric-detail.js's DETAIL_VIEWS and activity.js use).
 import { escapeHtml, api, todayISO, shiftISODate } from "./core.js";
 import { openDetailScreen, registerActiveChart, clearActiveCharts, renderDateNav, renderBaselineBar, renderPeriodButtons, wireDetailControls } from "./metric-detail.js";
-import { buildTrendBarChart, buildVitalsHypnogramSVG, buildRangeBarChart, buildTimeScatterChart, buildSleepStageStackedChart } from "./metric-charts.js";
+import { buildTrendBarChart, buildVitalsHypnogramSVG, buildRangeBarChart, buildSleepStageStackedChart, buildBedtimeWaketimeChart } from "./metric-charts.js";
 
 function formatHoursMinutes(hours) {
   const totalMin = Math.round(hours * 60);
@@ -538,14 +538,9 @@ async function renderSleepRegularityDay(anchorDate) {
         <canvas id="sleep-regularity-window-chart"></canvas>
       </div>
 
-      <p class="today-section-label">Went to Bed</p>
+      <p class="today-section-label">Went to Bed / Got Up</p>
       <div class="detail-chart-card">
-        <canvas id="sleep-regularity-bedtime-chart"></canvas>
-      </div>
-
-      <p class="today-section-label">Get Up</p>
-      <div class="detail-chart-card">
-        <canvas id="sleep-regularity-waketime-chart"></canvas>
+        <canvas id="sleep-regularity-bedtime-waketime-chart"></canvas>
       </div>
     `;
     wireSubDetailDateNav(anchorDate, renderSleepRegularityDay);
@@ -588,25 +583,28 @@ async function renderSleepRegularityDay(anchorDate) {
     );
     if (windowChart) registerActiveChart(windowChart);
 
-    const [bedtimeMin, bedtimeMax] = marginRange(bedtimes, 0.5);
-    const bedtimeSeries = {};
-    devices.forEach(d => { bedtimeSeries[d] = []; });
-    trend.forEach(t => { bedtimeSeries[t.device].push({ t: t.date, value: noonAnchoredHour(t.start_time) }); });
-    const bedtimeChart = buildTimeScatterChart(
-      document.getElementById("sleep-regularity-bedtime-chart"), bedtimeSeries, devices,
-      { yTickCallback: formatClockTime, connectLine: true, yMin: bedtimeMin, yMax: bedtimeMax }
+    // Fell-asleep and woke-up times overlaid on one chart, rather than
+    // as two separate scatter charts as before - UI_DESIGN_NOTES.md's
+    // own "Time Asleep (advanced)" notes describe this combined
+    // treatment as noticeably nicer than two separate charts for
+    // seeing the two curves converge/diverge together. trend already
+    // resolves to at most one row per night (get_sleep_timing_trend's
+    // own primary-device-per-night selection), so this doesn't need
+    // per-device grouping the way the window chart above does. Same
+    // [windowMin, windowMax] axis range as the window chart above -
+    // both plot the identical underlying bedtime/waketime values, just
+    // shaped differently (a floating range bar there, two point-lines
+    // here), so there's no reason for the two to disagree about scale.
+    const bedtimeWaketimeChart = buildBedtimeWaketimeChart(
+      document.getElementById("sleep-regularity-bedtime-waketime-chart"), trend,
+      {
+        bedtimeValue: t => noonAnchoredHour(t.start_time),
+        waketimeValue: t => noonAnchoredHour(t.end_time),
+        yTickCallback: formatClockTime,
+        yMin: windowMin, yMax: windowMax,
+      }
     );
-    if (bedtimeChart) registerActiveChart(bedtimeChart);
-
-    const [waketimeMin, waketimeMax] = marginRange(waketimes, 0.5);
-    const waketimeSeries = {};
-    devices.forEach(d => { waketimeSeries[d] = []; });
-    trend.forEach(t => { waketimeSeries[t.device].push({ t: t.date, value: noonAnchoredHour(t.end_time) }); });
-    const waketimeChart = buildTimeScatterChart(
-      document.getElementById("sleep-regularity-waketime-chart"), waketimeSeries, devices,
-      { yTickCallback: formatClockTime, connectLine: true, yMin: waketimeMin, yMax: waketimeMax }
-    );
-    if (waketimeChart) registerActiveChart(waketimeChart);
+    if (bedtimeWaketimeChart) registerActiveChart(bedtimeWaketimeChart);
   } catch (e) {
     content.innerHTML = `${renderDateNav("day", anchorDate)}<p class="status">Error loading sleep regularity data: ${escapeHtml(e.message)}</p>`;
     wireSubDetailDateNav(anchorDate, renderSleepRegularityDay);
