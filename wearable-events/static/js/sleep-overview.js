@@ -419,6 +419,24 @@ function hypnogramToZoomSeries(segments) {
   const lastEndMs = new Date(last.start).getTime() + last.duration_min * 60000;
   points.push({ t: new Date(lastEndMs).toISOString(), v: STAGE_DEPTH[last.stage] ?? 1 });
 
+  // Real per-stage colored bands for the zoom view's own overview
+  // strip - a direct report that the earlier plain single-color
+  // sparkline read as a meaningless zig-zag, nothing like the real
+  // hypnogram. depth is normalized 0-1 (awake=1/top, deep=0/bottom),
+  // matching STAGE_DEPTH's own 0-3 encoding divided by its max, so the
+  // compressed overview bars land at the same relative row the real
+  // full-size hypnogram's own bars use.
+  const maxDepth = Math.max(...Object.values(STAGE_DEPTH));
+  const bands = segments.map(seg => {
+    const startMs = new Date(seg.start).getTime();
+    return {
+      startMs,
+      endMs: startMs + seg.duration_min * 60000,
+      color: HYPNOGRAM_STAGE_COLORS[seg.stage] || "#8a8d99",
+      depth: (STAGE_DEPTH[seg.stage] ?? 1) / maxDepth,
+    };
+  });
+
   return {
     key: "hypnogram",
     label: "Sleep Stage",
@@ -427,6 +445,7 @@ function hypnogramToZoomSeries(segments) {
     stepped: true,
     valueLabels: STAGE_DEPTH_LABELS,
     points,
+    bands,
   };
 }
 
@@ -531,7 +550,7 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
         if (respPoints.length > 0) {
           series.push({ key: "resp", label: "Respiratory Rate", color: ZOOM_RESP_COLOR, unit: "brpm", decimals: 1, defaultOn: false, points: respPoints });
         }
-        openZoomChart({ title: "Sleep Stage", series, windowMinutes: 120 });
+        openZoomChart({ title: "Sleep Stage", series, windowMinutes: 180 });
       });
     }
 

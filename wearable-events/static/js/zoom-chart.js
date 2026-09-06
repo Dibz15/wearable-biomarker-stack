@@ -24,10 +24,21 @@ let activeState = null;
  * @param {object} config
  * @param {string} config.title - shown in the header.
  * @param {Array<{key: string, label: string, color: string, unit?: string,
- *   decimals?: number, defaultOn?: boolean, points: Array<{t: string|number|Date, v: number}>}>} config.series
+ *   decimals?: number, defaultOn?: boolean, stepped?: boolean,
+ *   valueLabels?: Record<number,string>,
+ *   bands?: Array<{startMs: number, endMs: number, color: string, depth: number}>,
+ *   points: Array<{t: string|number|Date, v: number}>}>} config.series
  *   - one entry per toggleable series. `points` need not be pre-sorted
  *   or pre-filtered to any particular range - the full available range
  *   across every series' own points becomes the pannable range.
+ *   `stepped` draws a stepped (not smoothed) line on the main chart.
+ *   `valueLabels` maps encoded numeric values to display names (e.g.
+ *   sleep stage depth 0-3 to Deep/Light/REM/Awake) for both the axis
+ *   ticks and the readout. `bands`, if provided on the FIRST series
+ *   only, replaces the overview strip's default sparkline with real
+ *   colored segments positioned by depth (0=bottom, 1=top) - used for
+ *   the sleep hypnogram so the compressed overview actually resembles
+ *   the real full-size hypnogram instead of a generic line.
  * @param {number} [config.windowMinutes] - initial zoom window width,
  *   clamped to the full available range if the range is narrower.
  * @param {() => void} [config.onBack] - called after the view closes.
@@ -132,33 +143,109 @@ function renderOverview(state) {
   const { fullStart, fullEnd, windowStart, windowMs, series } = state;
   const span = fullEnd - fullStart;
 
-  // Sparkline of the FIRST series only - the overview strip is for
-  // "where am I in the whole range" context, not precise reading, so
-  // it deliberately stays visually constant regardless of which
-  // series are currently toggled on the main chart below.
+  // Sparkline (or banded strip, see below) of the FIRST series only -
+  // the overview is for "where am I in the whole range" context, not
+  // precise reading, so it deliberately stays visually constant
+  // regardless of which series are currently toggled on the main
+  // chart below.
   const primary = series[0];
-  let pathD = "";
-  if (primary && primary.points.length > 1) {
+  let content = "";
+
+  if (primary && primary.bands && primary.bands.length > 0) {
+    // Banded style - real per-segment colors positioned at a vertical
+    // depth (0=bottom, 1=top), e.g. the sleep hypnogram's own colored
+    // stage bars (awake near top, deep near bottom, exactly like the
+    // real full-size hypnogram) - a real reported problem with the
+    // plain single-color sparkline this replaces: it read as a
+    // meaningless zig-zag that didn't visually resemble sleep staging
+    // at all. bands is optional and series-supplied - this stays
+    // generic (any series could provide it), not hardcoded to sleep
+    // specifically.
+    const barHeight = 10;
+    const usableHeight = 60 - barHeight;
+    content = primary.bands
+      .map(b => {
+        const x = ((b.startMs - fullStart) / span) * 300;
+        const w = Math.max(((b.endMs - b.startMs) / span) * 300, 1);
+        const y = (1 - b.depth) * usableHeight;
+        return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${barHeight}" rx="2" fill="${b.color}"/>`;
+      })
+      .join("");
+  } else if (primary && primary.points.length > 1) {
     const values = primary.points.map(p => p.v);
     const minV = Math.min(...values);
     const maxV = Math.max(...values);
     const rangeV = maxV - minV || 1;
-    pathD = primary.points
+    const pathD = primary.points
       .map((p, i) => {
         const x = ((pointTimeMs(p) - fullStart) / span) * 300;
         const y = 55 - ((p.v - minV) / rangeV) * 50;
         return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
       })
       .join(" ");
+    content = `<path d="${pathD}" fill="none" stroke="${primary.color}" stroke-width="1.5" opacity="0.6"/>`;
   }
 
   const winX = ((windowStart - fullStart) / span) * 300;
   const winW = Math.max((windowMs / span) * 300, 2);
 
   svg.innerHTML = `
-    ${pathD ? `<path d="${pathD}" fill="none" stroke="${primary.color}" stroke-width="1.5" opacity="0.6"/>` : ""}
+    ${content}
     <rect class="zoom-window-rect" x="${winX.toFixed(1)}" y="0" width="${winW.toFixed(1)}" height="60"/>
   `;
+}
+
+function computeFullSeriesRange(s) {
+  if (!s.points.length) return { min: 0, max: 1 };
+  const values = s.points.map(p => p.v);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  if (s.valueLabels) {
+    // A categorical/encoded series (e.g. sleep stage depth) - use the
+    // exact label range with a small fixed pad so the top/bottom step
+    // doesn't touch the chart edge, not a percentage-of-range grace
+    // (a percentage of a 0-3 range would barely pad it at all).
+    const labelKeys = Object.keys(s.valueLabels).map(Number);
+    return { min: Math.min(...labelKeys) - 0.5, max: Math.max(...labelKeys) + 0.5 };
+  }
+  const range = max - min || 1;
+  const grace = range * 0.1;
+  return { min: min - grace, max: max + grace };
+}
+
+// Points strictly inside [windowStart, windowEnd], PLUS one point just
+// outside each edge (the last one before windowStart, the first one
+// after windowEnd) if they exist. A real reported problem with a
+// strict in-window-only filter: a segment that STARTS before the
+// window (e.g. a sleep stage that began 10 minutes before the visible
+// window) had its own start point excluded, so a stepped line had no
+// value at all at the left edge until the NEXT segment's start
+// scrolled into view - whole stretches visibly vanished while
+// scrubbing even though the underlying stage never actually stopped.
+// Including one padding point past each edge lets the line (stepped
+// or smooth) draw continuously across the full visible width,
+// clipped by the chart's own x min/max rather than by this filter.
+// Single pass, points assumed chronologically ordered (true for every
+// real caller so far).
+function windowedPointsWithPadding(points, windowStart, windowEnd) {
+  let beforeIdx = -1;
+  let afterIdx = -1;
+  const within = [];
+  for (let i = 0; i < points.length; i++) {
+    const t = pointTimeMs(points[i]);
+    if (t < windowStart) {
+      beforeIdx = i; // keeps advancing to the LATEST point still before the window
+    } else if (t > windowEnd) {
+      if (afterIdx === -1) afterIdx = i; // only the FIRST point past the window
+    } else {
+      within.push(points[i]);
+    }
+  }
+  const result = [];
+  if (beforeIdx !== -1) result.push(points[beforeIdx]);
+  result.push(...within);
+  if (afterIdx !== -1) result.push(points[afterIdx]);
+  return result;
 }
 
 function renderMainChart(state) {
@@ -174,10 +261,7 @@ function renderMainChart(state) {
   if (enabledSeries.length === 0) return;
 
   const datasets = enabledSeries.map(s => {
-    const windowed = s.points.filter(p => {
-      const t = pointTimeMs(p);
-      return t >= state.windowStart && t <= windowEnd;
-    });
+    const windowed = windowedPointsWithPadding(s.points, state.windowStart, windowEnd);
     return {
       label: s.label,
       seriesKey: s.key,
@@ -199,6 +283,12 @@ function renderMainChart(state) {
       max: windowEnd,
       ticks: {
         color: "#8a8d99",
+        // Capped explicitly - a real reported problem with Chart.js's
+        // own default auto-tick count reading as cluttered on a
+        // mobile-width chart. A handful of time labels is plenty for
+        // orienting within a window that's also directly readable via
+        // tap-to-inspect.
+        maxTicksLimit: 4,
         callback: (val) => new Date(val).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       },
       grid: { color: "#2a2d38" },
@@ -215,10 +305,22 @@ function renderMainChart(state) {
   // sleep hypnogram, whose points are a numeric stage-depth encoding,
   // not a real physical quantity) gets those as its own axis tick
   // labels instead of raw numbers, when it's the visible one.
+  //
+  // min/max are computed from the series' FULL data (computeFullSeriesRange),
+  // not just whatever's currently windowed - a real reported problem
+  // with an earlier version, where scrubbing panned into a locally-flat
+  // stretch and the auto-scaled axis kept rescaling to fit just that
+  // stretch, making the line visually jump even though nothing about
+  // the underlying data actually changed. A fixed range computed once
+  // up front keeps the same line looking the same regardless of which
+  // window is currently in view.
   enabledSeries.forEach((s, i) => {
+    const range = computeFullSeriesRange(s);
     scales[`y-${s.key}`] = {
       position: i === 0 ? "left" : "right",
       display: i === 0,
+      min: range.min,
+      max: range.max,
       grid: { display: i === 0, color: "#2a2d38" },
       ticks: {
         color: "#8a8d99",
