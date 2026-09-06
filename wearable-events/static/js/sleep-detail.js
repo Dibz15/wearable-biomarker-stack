@@ -546,10 +546,17 @@ async function renderSleepRegularityDay(anchorDate) {
     // axis here) with a little breathing room on each side so a point
     // sitting exactly at the real min/max isn't drawn flush against the
     // chart's own edge.
-    function marginRange(values, marginHours) {
+    // Margin is 10% of the actual bedtime/waketime range, not a flat
+    // fixed amount - a real reported gap, the old fixed 0.5h margin
+    // read as too tight relative to a typical multi-hour bedtime/
+    // waketime spread. Floored at 0.5h so a genuinely tight week
+    // (bedtime barely varying) still gets a visibly real margin
+    // rather than one that shrinks toward nothing.
+    function marginRange(values, minMarginHours = 0.5) {
       const min = Math.min(...values);
       const max = Math.max(...values);
-      return [min - marginHours, max + marginHours];
+      const margin = Math.max((max - min) * 0.1, minMarginHours);
+      return [min - margin, max + margin];
     }
 
     const midpoints = trend.map((t, i) => (bedtimes[i] + waketimes[i]) / 2);

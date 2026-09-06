@@ -825,7 +825,7 @@ export function buildActivityTimeChart(canvas, series, devices, config) {
 // than a separate palette invented just for this chart, so the same
 // stage reads as the same color everywhere in the app.
 const HYPNOGRAM_STAGE_ORDER_TOP_TO_BOTTOM = ["awake", "rem", "light", "deep"];
-const HYPNOGRAM_STAGE_COLORS = { deep: "#7c6ce8", light: "#6ea8fe", rem: "#4fd8b8", awake: "#e88a8a" };
+export const HYPNOGRAM_STAGE_COLORS = { deep: "#7c6ce8", light: "#6ea8fe", rem: "#4fd8b8", awake: "#e88a8a" };
 const HYPNOGRAM_STAGE_LABELS = { deep: "Deep", light: "Light", rem: "REM", awake: "Awake" };
 
 // Per-night sleep-stage composition across a week/month/year - the
@@ -1086,7 +1086,14 @@ export function buildTrendBarChart(canvas, series, devices, config = {}) {
       type: "bar",
       label: device,
       data: allPeriods.map(t => (t in byPeriod ? byPeriod[t] : null)),
-      backgroundColor: DEVICE_CHART_COLORS[i % DEVICE_CHART_COLORS.length],
+      // colorOverride - same reasoning as buildLineChart/
+      // buildTimeScatterChart's own versions: device-index cycling is
+      // right for comparing several real devices' readings of one
+      // metric, wrong for a page like Sleep Reports where each of
+      // Deep/REM/Awake is its own chart with exactly one "device" (a
+      // metric label, not a real device), and all three would
+      // otherwise land on the identical DEVICE_CHART_COLORS[0].
+      backgroundColor: config.colorOverride || DEVICE_CHART_COLORS[i % DEVICE_CHART_COLORS.length],
       borderRadius: 4,
     };
   });
@@ -1257,7 +1264,16 @@ export function buildTimeScatterChart(canvas, series, devices, config = {}) {
 
   const datasets = devices.map((device, i) => {
     const byPeriod = Object.fromEntries(series[device].map(p => [p.t, p.value]));
-    const color = DEVICE_CHART_COLORS[i % DEVICE_CHART_COLORS.length];
+    // colorOverride behaves the same way buildLineChart's own version
+    // does - device-index cycling makes sense when comparing several
+    // devices' readings of the SAME metric (this function's main use
+    // elsewhere), but is the wrong axis for a page like Sleep Reports,
+    // where every chart has exactly one "device" (a metric name used
+    // as a series key, not a real device) and wants each DIFFERENT
+    // chart to have its own distinct color instead of all landing on
+    // DEVICE_CHART_COLORS[0] - a real reported gap, same root cause as
+    // the one already fixed once for the Workout Detail page.
+    const color = config.colorOverride || DEVICE_CHART_COLORS[i % DEVICE_CHART_COLORS.length];
     return {
       type: "line",
       label: device,
@@ -1311,6 +1327,16 @@ export function buildTimeScatterChart(canvas, series, devices, config = {}) {
           grid: { display: false },
         },
         y: {
+          // "grace" pads the auto-computed min/max range - only takes
+          // effect when yMin/yMax aren't explicitly passed (Chart.js's
+          // own documented precedence: explicit min/max always win).
+          // The Sleep Reports page's own HR/Respiratory charts don't
+          // pass explicit bounds, so this is what actually gives them
+          // real breathing room - a reported gap, these had none at
+          // all before (tight to the exact data min/max), same class
+          // of issue already fixed once for the Workout Detail page's
+          // own line charts.
+          grace: "10%",
           ticks: { color: "#8a8d99", callback: fmt },
           grid: { color: "#2a2d38" },
           min: config.yMin,
