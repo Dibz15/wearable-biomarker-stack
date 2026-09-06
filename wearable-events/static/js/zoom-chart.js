@@ -248,6 +248,29 @@ function windowedPointsWithPadding(points, windowStart, windowEnd) {
   return result;
 }
 
+// Explicit, evenly-spaced tick positions across [min, max] - NOT left
+// to Chart.js's own "linear" scale default, which picks "nice round
+// NUMBERS" (e.g. step sizes like 1e5, 5e5, 1e6 ms) with no awareness
+// that these values are actually timestamps. A real reported bug this
+// caused: depending on exactly where the current window's min/max
+// happened to fall, sometimes ZERO of those round-number positions
+// landed inside the visible range, sometimes just one - so as the
+// window panned, the tick count flickered between 0 and 1 rather than
+// staying stable, and the one tick that DID show jumped around
+// unpredictably rather than sliding smoothly with the window. Evenly
+// dividing the CURRENT window itself into `count` fixed fractions
+// (0%, 1/3, 2/3, 100% for count=4) guarantees a stable count and
+// smooth, proportional movement regardless of the absolute timestamp
+// values involved.
+function computeEvenTicks(min, max, count) {
+  const ticks = [];
+  const step = (max - min) / (count - 1);
+  for (let i = 0; i < count; i++) {
+    ticks.push({ value: min + step * i });
+  }
+  return ticks;
+}
+
 function renderMainChart(state) {
   const canvas = document.getElementById("zoom-main-chart");
   if (!canvas) return;
@@ -281,14 +304,15 @@ function renderMainChart(state) {
       type: "linear",
       min: state.windowStart,
       max: windowEnd,
+      // Overrides Chart.js's own auto-tick algorithm entirely (see
+      // computeEvenTicks's own comment for why the default was unstable
+      // here) with exactly 4 evenly-spaced positions across the current
+      // window - stable count, smooth movement while panning.
+      afterBuildTicks: (axis) => {
+        axis.ticks = computeEvenTicks(state.windowStart, windowEnd, 4);
+      },
       ticks: {
         color: "#8a8d99",
-        // Capped explicitly - a real reported problem with Chart.js's
-        // own default auto-tick count reading as cluttered on a
-        // mobile-width chart. A handful of time labels is plenty for
-        // orienting within a window that's also directly readable via
-        // tap-to-inspect.
-        maxTicksLimit: 4,
         callback: (val) => new Date(val).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       },
       grid: { color: "#2a2d38" },

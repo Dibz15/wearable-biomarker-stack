@@ -116,8 +116,9 @@ function renderStatsRow(workout, samples) {
   `;
 }
 
-function renderHeartRateSummary(workout) {
+function renderHeartRateSummary(workout, samples) {
   if (workout.hr_avg === null && workout.hr_max === null && workout.hr_min === null) return "";
+  const hasChart = samples.some(p => p.hr !== undefined);
   const cell = (label, value) => `
     <div class="activity-stat-item">
       <span class="activity-stat-label">${escapeHtml(label)}</span>
@@ -133,6 +134,7 @@ function renderHeartRateSummary(workout) {
     </div>
     <div class="detail-chart-card">
       <canvas id="workout-hr-chart"></canvas>
+      ${hasChart ? zoomTriggerHtml("hr") : ""}
     </div>
   `;
 }
@@ -286,13 +288,28 @@ function renderLapsTable(laps) {
 // never going to exist for that activity type would just be noise
 // (unlike HR, which is expected for virtually every workout and so
 // gets its own explanatory placeholder instead of disappearing).
-function renderPerSampleChartCard(canvasId, title, samples, field) {
+// Small per-panel zoom trigger - an overlay INSIDE the chart card
+// itself (see .detail-chart-zoom-btn's own comment in style.css for
+// why: a direct report that a button placed below the card looked
+// visually disconnected from the chart it belongs to). Every button
+// opens the SAME shared multi-series zoom view (all 5 metrics still
+// toggleable together there, per the original spec) - the
+// data-zoom-key just decides which series starts focused/visible when
+// THAT particular panel's own button was the one tapped, wired
+// generically below via a single querySelectorAll rather than one
+// bespoke handler per panel.
+function zoomTriggerHtml(key) {
+  return `<button class="detail-chart-zoom-btn workout-zoom-trigger" data-zoom-key="${escapeHtml(key)}">Zoom \u2197</button>`;
+}
+
+function renderPerSampleChartCard(canvasId, title, samples, field, zoomKey = null) {
   const hasAny = samples.some(p => p[field] !== undefined);
   if (!hasAny) return "";
   return `
     <p class="today-section-label">${escapeHtml(title)}</p>
     <div class="detail-chart-card">
       <canvas id="${canvasId}"></canvas>
+      ${zoomKey ? zoomTriggerHtml(zoomKey) : ""}
     </div>
   `;
 }
@@ -325,6 +342,7 @@ function renderElevationPanel(workout, samples) {
   const chartHtml = hasChart ? `
     <div class="detail-chart-card">
       <canvas id="workout-elevation-chart"></canvas>
+      ${zoomTriggerHtml("elevation")}
     </div>
   ` : "";
 
@@ -357,6 +375,7 @@ function renderCadencePanel(workout, samples) {
   const chartHtml = hasChart ? `
     <div class="detail-chart-card">
       <canvas id="workout-cadence-chart"></canvas>
+      ${zoomTriggerHtml("cadence")}
     </div>
   ` : "";
 
@@ -455,6 +474,7 @@ function renderStridePanel(workout, samples) {
   const chartHtml = hasChart ? `
     <div class="detail-chart-card">
       <canvas id="workout-stride-chart"></canvas>
+      ${zoomTriggerHtml("stride")}
     </div>
   ` : "";
 
@@ -496,46 +516,58 @@ export async function openWorkoutDetail(startMs, onBack = null) {
     weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
   });
 
-  // Both fetched up front, in parallel, before any of the per-sample/
-  // per-lap sections are rendered - lets renderPerSampleChartCard/
+  // Fetched up front, in parallel, before any of the per-sample/per-lap
+  // sections are rendered - lets renderPerSampleChartCard/
   // renderGpsMapCard/renderLapsTable decide up front whether a given
-  // section has anything to show at all (and skip it entirely,
-  // rather than rendering a card and then immediately replacing it),
-  // and avoids the earlier version's own pattern of only fetching HR
-  // after the rest of the page was already drawn.
+  // section has anything to show at all (and skip it entirely, rather
+  // than rendering a card and then immediately replacing it), and
+  // avoids an earlier version's own pattern of only fetching HR after
+  // the rest of the page was already drawn.
+  //
+  // Always attempted, regardless of workout.hr_avg - a real bug found
+  // and fixed here: an earlier version gated this ENTIRE fetch on
+  // workout.hr_avg being set, using it as a proxy for "this workout
+  // likely has per-sample data worth fetching at all". That's an
+  // imperfect proxy - hr_avg is a SUMMARY stat, independent of whether
+  // a GPX/FIT export with per-sample data exists (see the HR chart's
+  // own comment below on that same distinction) - so a workout with
+  // real per-sample elevation/speed/cadence data but no HR sensor
+  // paired (e.g. an outdoor walk tracked by GPS alone) would never get
+  // its samples fetched at all, silently hiding EVERY per-sample chart
+  // AND the zoom trigger below, not just the HR one. The existing
+  // try/catch and every render function's own "empty means nothing to
+  // show" handling already degrade gracefully for a workout with truly
+  // no per-sample data at all, so there's no real downside to always
+  // attempting this.
   let samples = [];
   let laps = [];
-  if (workout.hr_avg !== null && workout.hr_avg !== undefined) {
-    try {
-      [samples, laps] = await Promise.all([
-        api(`/activity/workout/${startMs}/samples`),
-        api(`/activity/workout/${startMs}/laps`),
-      ]);
-    } catch (e) {
-      // A failed per-sample/lap fetch shouldn't take down the whole
-      // page - the summary content above is still useful on its own.
-      // samples/laps just stay empty, which every render function
-      // below already treats as "nothing to show for this section".
-    }
+  try {
+    [samples, laps] = await Promise.all([
+      api(`/activity/workout/${startMs}/samples`),
+      api(`/activity/workout/${startMs}/laps`),
+    ]);
+  } catch (e) {
+    // A failed per-sample/lap fetch shouldn't take down the whole
+    // page - the summary content above is still useful on its own.
+    // samples/laps just stay empty, which every render function
+    // below already treats as "nothing to show for this section".
   }
 
   content.innerHTML = `
     <p class="metric-sub" style="margin-bottom: 0.75rem;">${escapeHtml(dateLabel)} \u00b7 ${escapeHtml(workout.device || "")}</p>
     ${renderStatsRow(workout, samples)}
-    ${renderHeartRateSummary(workout)}
+    ${renderHeartRateSummary(workout, samples)}
     ${renderHeartRateZones(workout.hr_zones)}
     ${renderTrainingEffectCard(workout)}
     ${renderGpsMapCard(samples)}
     ${renderElevationPanel(workout, samples)}
     ${renderGradientDistribution(workout)}
-    ${renderPerSampleChartCard("workout-speed-chart", "Speed", samples, "speed_mps")}
+    ${renderPerSampleChartCard("workout-speed-chart", "Speed", samples, "speed_mps", "speed")}
     ${renderCadencePanel(workout, samples)}
     ${renderStridePanel(workout, samples)}
-    ${samples.length > 0 ? `
-      <div class="sleep-summary-card metric-card-tappable" id="workout-zoom-trigger" role="button" tabindex="0">
-        <span class="metric-card-label">Zoom & Compare</span>
-      </div>
-    ` : ""}
+    ${samples.length === 0
+      ? `<p class="metric-card-empty">No per-sample data recorded for this workout \u2013 likely recorded before GPX/FIT export was enabled</p>`
+      : ""}
     ${renderLapsTable(laps)}
   `;
 
@@ -583,15 +615,27 @@ export async function openWorkoutDetail(startMs, onBack = null) {
   renderGpsMap(samples);
   renderGradientChart(workout);
 
-  const zoomTrigger = document.getElementById("workout-zoom-trigger");
-  if (zoomTrigger) {
-    zoomTrigger.onclick = () => {
-      openZoomChart({
-        title: workout.name || "Workout",
-        series: buildWorkoutZoomSeries(workout, samples),
-      });
-    };
-  }
+  document.querySelectorAll(".workout-zoom-trigger").forEach(btn => {
+    btn.onclick = () => openWorkoutZoom(workout, samples, btn.dataset.zoomKey);
+  });
+}
+
+// Opens the shared zoom view for a workout, focused on whichever
+// panel's own button was tapped - all 5 metrics are still toggleable
+// together there (the original spec this shares with the sleep
+// hypnogram's zoom), `focusKey` just decides which one starts already
+// visible instead of requiring an extra tap to see the very chart the
+// person was just looking at. HR stays on too whenever it's available
+// and isn't already the focus, as a familiar baseline reference (the
+// same pairing buildWorkoutZoomSeries's own default-on set already
+// used) - so tapping "Zoom" on Cadence, say, opens with HR + Cadence
+// visible, not Cadence alone.
+function openWorkoutZoom(workout, samples, focusKey) {
+  const series = buildWorkoutZoomSeries(workout, samples).map(s => ({
+    ...s,
+    defaultOn: s.key === focusKey || (s.key === "hr" && focusKey !== "hr"),
+  }));
+  openZoomChart({ title: workout.name || "Workout", series, windowMinutes: 15 });
 }
 
 // Fills in the Gradient Distribution pie chart, if its own card was
@@ -627,12 +671,13 @@ function renderPerSampleChart(canvasId, samples, field, deviceName, convert, uni
 // The zoom view's own series config for a workout - one entry per
 // per-sample metric this workout actually has data for (a Yoga
 // session has no elevation/speed/cadence/stride at all, so those are
-// simply omitted rather than offered as an empty toggle). HR and
-// Elevation default on (the two most commonly meaningful together -
-// "how did effort/terrain relate"); Speed/Cadence/Stride start off,
-// available to add via their own checkboxes. Colors match
+// simply omitted rather than offered as an empty toggle). Colors match
 // WORKOUT_COLORS exactly, so a series looks the same whether it's
 // shown in its own dedicated card above or overlaid in the zoom view.
+// defaultOn here (HR + Elevation) is only the FALLBACK - openWorkoutZoom
+// overrides it per call based on which panel's own button was tapped,
+// so this only matters if this function is ever called directly
+// without going through that.
 function buildWorkoutZoomSeries(workout, samples) {
   const fieldConfigs = [
     { key: "hr", label: "Heart Rate", color: WORKOUT_COLORS.hr, unit: "bpm", field: "hr", convert: v => v, decimals: 0, defaultOn: true },

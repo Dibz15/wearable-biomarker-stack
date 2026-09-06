@@ -411,21 +411,43 @@ const ZOOM_RESP_COLOR = "#6ea8fe";
 // series here, not one of the optional toggles.
 function hypnogramToZoomSeries(segments) {
   if (!segments || segments.length === 0) return null;
-  const points = segments.map(seg => ({ t: seg.start, v: STAGE_DEPTH[seg.stage] ?? 1 }));
-  // Extend one more point to the LAST segment's own end, so the
+
+  // Only segments with a RECOGNIZED stage become stepped-line points.
+  // Real bug found and fixed here: the parser falls back to a label
+  // like "stage_6" for any raw stage code outside the 4 it maps
+  // (HUAMI_SLEEP_STAGE_MAP's own fallback, gadgetbridge_to_influxdb.py) -
+  // an earlier version of this function silently treated any such
+  // unrecognized label as depth 1 ("light") via `?? 1`, which mixed
+  // genuinely-unknown segments in with real light-sleep time
+  // indistinguishably. Reported symptom matched exactly: the line
+  // looked like it was bouncing erratically between 0 and 1 rather
+  // than reflecting real REM/Awake time elsewhere in the night.
+  // Skipping unrecognized segments here instead lets Chart.js's own
+  // stepped interpolation simply carry the PREVIOUS real stage's
+  // value across that stretch, rather than inventing a misleading one.
+  const knownSegments = segments.filter(seg => STAGE_DEPTH[seg.stage] !== undefined);
+  if (knownSegments.length === 0) return null;
+
+  const points = knownSegments.map(seg => ({ t: seg.start, v: STAGE_DEPTH[seg.stage] }));
+  // Extend one more point to the LAST known segment's own end, so the
   // stepped line runs all the way to the real wake time instead of
   // stopping short at the final segment's start.
-  const last = segments[segments.length - 1];
+  const last = knownSegments[knownSegments.length - 1];
   const lastEndMs = new Date(last.start).getTime() + last.duration_min * 60000;
-  points.push({ t: new Date(lastEndMs).toISOString(), v: STAGE_DEPTH[last.stage] ?? 1 });
+  points.push({ t: new Date(lastEndMs).toISOString(), v: STAGE_DEPTH[last.stage] });
 
   // Real per-stage colored bands for the zoom view's own overview
-  // strip - a direct report that the earlier plain single-color
-  // sparkline read as a meaningless zig-zag, nothing like the real
-  // hypnogram. depth is normalized 0-1 (awake=1/top, deep=0/bottom),
-  // matching STAGE_DEPTH's own 0-3 encoding divided by its max, so the
-  // compressed overview bars land at the same relative row the real
-  // full-size hypnogram's own bars use.
+  // strip - built from ALL segments (not just knownSegments), since an
+  // unrecognized stage still gets its own real time slot in the real
+  // full-size hypnogram (shown in its own existing gray fallback
+  // color, HYPNOGRAM_STAGE_COLORS[seg.stage] || "#8a8d99") - the
+  // overview strip should keep showing that same gray slot rather than
+  // silently omitting the time entirely. depth is normalized 0-1
+  // (awake=1/top, deep=0/bottom); an unrecognized stage defaults to a
+  // neutral middle depth purely for vertical placement in this overview
+  // strip - it's shown in gray specifically so it doesn't read as a
+  // real stage, unlike the earlier points-array bug this only shares
+  // a fallback value with by coincidence.
   const maxDepth = Math.max(...Object.values(STAGE_DEPTH));
   const bands = segments.map(seg => {
     const startMs = new Date(seg.start).getTime();

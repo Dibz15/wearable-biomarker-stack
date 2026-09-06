@@ -1078,6 +1078,28 @@ main {
   padding: 1rem 0.75rem;
   margin-bottom: 0.75rem;
   height: 220px;
+  position: relative;
+}
+
+/* Sits inside the chart card itself (top-right corner overlay) rather
+   than below it - a direct report that a separate button underneath
+   the card read as visually disconnected from the chart it belongs
+   to. .detail-chart-card's own fixed height can't just grow to fit an
+   in-flow button without squeezing the chart, so this overlays instead
+   of taking its own row - a semi-transparent background keeps it
+   legible over the chart without fully obscuring whatever's under it. */
+.detail-chart-zoom-btn {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.6rem;
+  padding: 0.3rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid var(--surface-active);
+  background: rgba(20, 21, 26, 0.75);
+  color: var(--muted);
+  font-size: 0.75rem;
+  white-space: nowrap;
+  z-index: 1;
 }
 
 .detail-stats-card {
