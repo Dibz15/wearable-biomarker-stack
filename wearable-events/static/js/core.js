@@ -1,11 +1,22 @@
 // --- tab switching ---
+import { navigate } from "./router.js";
+
+// Pure DOM toggle, no navigation of its own - the router calls this
+// directly when a /app/{tab} route dispatches, and the click handler
+// below now goes through navigate() instead of calling this directly,
+// so a tab click and a browser back/forward landing on the same tab
+// both end up here through the same one path.
+export function showTab(name) {
+  document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
+  const btn = document.querySelector(`.tab-btn[data-tab="${name}"]`);
+  const panel = document.getElementById(`tab-${name}`);
+  if (btn) btn.classList.add("active");
+  if (panel) panel.classList.add("active");
+}
+
 document.querySelectorAll(".tab-btn").forEach(btn => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
-    document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
-    btn.classList.add("active");
-    document.getElementById(`tab-${btn.dataset.tab}`).classList.add("active");
-  });
+  btn.addEventListener("click", () => navigate(`/app/${btn.dataset.tab}`));
 });
 
 export function escapeHtml(str) {

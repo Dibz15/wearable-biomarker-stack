@@ -14,6 +14,7 @@ import { escapeHtml, api, formatNum } from "./core.js";
 import { openDetailScreen, registerActiveChart, clearActiveCharts } from "./metric-detail.js";
 import { buildLineChart, buildCategoryPieChart, buildTieredBarChart, renderTierLegend, INTENSITY_BANDS } from "./metric-charts.js";
 import { openZoomChart } from "./zoom-chart.js";
+import { registerRoute, navigate } from "./router.js";
 
 // The person's own real watch setting (Zepp: Settings -> interval type
 // -> "lactate threshold heart rate zone") - matches
@@ -75,8 +76,7 @@ function formatSecondsAsMinSec(totalSeconds) {
 function renderStatsRow(workout, samples) {
   // max_speed_mps comes from the summary blob's own Pace field - a
   // GENUINELY SEPARATE data source from the per-sample FIT export
-  // (see parser/activefit/FIELD_RESEARCH.md's own Pace/Speed
-  // solving entry) - it's entirely possible for a workout to have
+  // it's entirely possible for a workout to have
   // real per-sample speed data (the chart fills in fine) while the
   // summary blob itself never recorded a Pace field at all, a real
   // reported case, not hypothetical. Falls back to the max of the
@@ -145,9 +145,8 @@ function renderHeartRateSummary(workout, samples) {
 }
 
 // Each zone gets its own row: name, BPM range (from the real,
-// per-workout hr_zone_*_max_bpm thresholds - see
-// parser/activefit/FIELD_RESEARCH.md for how these were confirmed,
-// and why they're used instead of a fixed/guessed formula), a
+// per-workout hr_zone_*_max_bpm thresholds, confirmed rather than a
+// fixed/guessed formula), a
 // proportional bar, and the time spent in that zone. Zones with zero
 // duration AND no real bpm data at all are skipped entirely rather
 // than shown as an empty row - matches this app's own "don't
@@ -525,8 +524,8 @@ function renderGpsMapCard(samples) {
   `;
 }
 
-export async function openWorkoutDetail(startMs, onBack = null) {
-  openDetailScreen("Workout", onBack);
+export async function openWorkoutDetail(startMs) {
+  openDetailScreen("Workout");
   const content = document.getElementById("detail-content");
   content.innerHTML = `<p class="muted">Loading...</p>`;
   clearActiveCharts();
@@ -673,6 +672,11 @@ export async function openWorkoutDetail(startMs, onBack = null) {
     btn.onclick = () => openWorkoutZoom(workout, samples, intensitySeries, btn.dataset.zoomKey);
   });
 }
+
+registerRoute(/^\/app\/activity\/workout\/(\d+)$/, (params, match) => {
+  openWorkoutDetail(Number(match[1]));
+});
+
 
 // Opens the shared zoom view for a workout, focused on whichever
 // panel's own button was tapped - all 6 metrics are still toggleable

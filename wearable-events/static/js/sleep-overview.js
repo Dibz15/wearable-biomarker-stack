@@ -9,12 +9,11 @@
 // predated each night having its own dedicated, date-nav-driven page
 // and has been replaced: each night's page now shows/edits only its
 // own entry (see the journal section further down).
-import { escapeHtml, api, todayISO, shiftISODate } from "./core.js";
+import { escapeHtml, api, todayISO, shiftISODate, showTab } from "./core.js";
 import { renderDateNav } from "./metric-detail.js";
 import { buildHypnogramSVG, HYPNOGRAM_STAGE_COLORS, HYPNOGRAM_STAGE_LABELS } from "./metric-charts.js";
-import { openSleepDurationDetail, openSleepHeartRateDetail, openSleepRespiratoryRateDetail, openSleepRegularityDetail } from "./sleep-detail.js";
-import { openSleepReportsDetail } from "./sleep-reports.js";
 import { openZoomChart } from "./zoom-chart.js";
+import { registerRoute, navigate, replaceUrl } from "./router.js";
 
 const SLEEP_STAGE_ORDER = ["deep", "light", "rem", "awake"];
 const SLEEP_STAGE_LABELS = { deep: "Deep", light: "Light", rem: "REM", awake: "Awake" };
@@ -267,11 +266,10 @@ function renderQualityMetricRow(label, valueText, meetsThreshold, thresholdText,
   `;
 }
 
-// Deliberately 3 individually-cited metrics, NOT a blended score - see
-// FIELD_RESEARCH.md's "Sleep Score" entry for why: no standardized
-// composite-scoring formula exists in the literature (confirmed via
-// the industry's own ANSI/CTA/NSF-2110 standard), which recommends
-// showing individual metrics with their own basis over a single
+// Deliberately 3 individually-cited metrics, NOT a blended score - no
+// standardized composite-scoring formula exists in the literature
+// (confirmed via the industry's own ANSI/CTA/NSF-2110 standard), which
+// recommends showing individual metrics with their own basis over a single
 // opaque number - exactly what this renders.
 function renderSleepQuality(quality) {
   if (!quality) return "";
@@ -471,6 +469,19 @@ function hypnogramToZoomSeries(segments) {
   };
 }
 
+registerRoute(/^\/app\/sleep$/, (params) => {
+  // Only re-renders if the URL actually carries a specific date (a
+  // refresh or deep link while browsing a past night) - a plain tab
+  // click lands here with no date param at all, and the eager
+  // app-startup load (today's date) is already showing correctly, so
+  // there's nothing to redo in that common case. Closing a
+  // potentially-open detail-screen overlay is handled centrally (see
+  // metric-detail.js's own router "before dispatch" hook), not here.
+  showTab("sleep");
+  const date = params.get("date");
+  if (date) loadSleepOverview(date);
+});
+
 export async function loadSleepOverview(anchorDate = todayISO()) {
   const container = document.getElementById("sleep-overview");
   container.innerHTML = `${renderDateNav("day", anchorDate)}<p class="muted">Loading...</p>`;
@@ -539,11 +550,11 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
     // opener, then wire every matching element generically, rather
     // than hardcoding one query per field.
     const detailOpeners = {
-      "sleep-duration": () => openSleepDurationDetail(anchorDate),
-      "sleep-heart-rate": () => openSleepHeartRateDetail(anchorDate),
-      "sleep-respiratory-rate": () => openSleepRespiratoryRateDetail(anchorDate),
-      "sleep-regularity": () => openSleepRegularityDetail(anchorDate),
-      "sleep-reports": () => openSleepReportsDetail(anchorDate),
+      "sleep-duration": () => navigate(`/app/sleep/duration?date=${anchorDate}`),
+      "sleep-heart-rate": () => navigate(`/app/sleep/heart-rate?date=${anchorDate}`),
+      "sleep-respiratory-rate": () => navigate(`/app/sleep/respiratory-rate?date=${anchorDate}`),
+      "sleep-regularity": () => navigate(`/app/sleep/regularity?date=${anchorDate}`),
+      "sleep-reports": () => navigate(`/app/sleep/reports?date=${anchorDate}`),
     };
     container.querySelectorAll("[data-detail-field]").forEach(el => {
       const open = detailOpeners[el.dataset.detailField];
@@ -591,20 +602,33 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
 // overlay's, both of which render the identical .date-nav-btn markup).
 function wireSleepOverviewDateNav(anchorDate) {
   const container = document.getElementById("sleep-overview");
+
+  // Keeps the URL in sync with the date actually being browsed, WITHOUT
+  // adding a history entry per day clicked through (replaceUrl, not
+  // navigate) - only called from here (real user interaction with the
+  // visible Sleep tab), never from loadSleepOverview() itself, which
+  // is also called eagerly on app startup regardless of which tab is
+  // actually showing - syncing the URL there would incorrectly show
+  // /app/sleep even while looking at a completely different tab.
+  const goToDate = (date) => {
+    replaceUrl(`/app/sleep?date=${date}`);
+    loadSleepOverview(date);
+  };
+
   const prevBtn = container.querySelector('.date-nav-btn[data-nav="prev"]');
   const nextBtn = container.querySelector('.date-nav-btn[data-nav="next"]');
   if (prevBtn) {
-    prevBtn.addEventListener("click", () => loadSleepOverview(shiftISODate(anchorDate, -1)));
+    prevBtn.addEventListener("click", () => goToDate(shiftISODate(anchorDate, -1)));
   }
   if (nextBtn && !nextBtn.disabled) {
-    nextBtn.addEventListener("click", () => loadSleepOverview(shiftISODate(anchorDate, 1)));
+    nextBtn.addEventListener("click", () => goToDate(shiftISODate(anchorDate, 1)));
   }
 
   const dateInput = container.querySelector(".date-nav-input");
   const dateLabel = container.querySelector(".date-nav-label");
   if (dateInput) {
     dateInput.addEventListener("change", () => {
-      if (dateInput.value) loadSleepOverview(dateInput.value);
+      if (dateInput.value) goToDate(dateInput.value);
     });
   }
   if (dateLabel && dateInput) {

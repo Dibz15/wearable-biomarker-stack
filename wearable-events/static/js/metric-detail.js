@@ -1,25 +1,9 @@
 // --- Metric detail views (opened from a Today card, not a tab) ---
 import { escapeHtml, api, formatNum, dateToISO, isoToDate, todayISO, shiftISODate } from "./core.js";
 import { buildLineChart, buildRangeBarChart, buildDifferentialChart, buildTieredBarChart, buildTierPieChart, buildTimeScatterChart, renderBandLegend, renderTierLegend } from "./metric-charts.js";
+import { registerRoute, registerBeforeDispatch, navigate, replaceUrl, goBack } from "./router.js";
 
 let activeCharts = [];
-
-// A small back-stack, not just a single close action - added
-// specifically because the Workout Detail page is opened FROM WITHIN
-// the Activity page's own session list, both sharing this SAME
-// overlay (title/content/back-button) rather than being genuinely
-// separate screens. Without this, pressing back from Workout Detail
-// had no way to distinguish "go back to the Activity list I came
-// from" from "close the whole overlay back to the main tabs" - it
-// always did the latter, a real reported navigation bug. Every
-// EXISTING single-level caller (Sleep Duration, Sleep Heart Rate, the
-// Activity page itself when opened from a Today card, etc.) still
-// calls openDetailScreen(title) with no second argument, so this
-// stack stays empty for them and "back" still means "close entirely",
-// exactly as before - this is purely additive for the one genuinely
-// nested case (Workout Detail), not a behavior change for anything
-// else.
-let backStack = [];
 
 // The detail-screen overlay (title, back button, chart cleanup) is
 // shared UI, not specific to the metric-detail views defined in this
@@ -29,18 +13,17 @@ let backStack = [];
 // tracking a second, separate set of live Chart.js instances that the
 // shared back button wouldn't know to destroy.
 //
-// `onBack`, when given, is what pressing the shared back button does
-// INSTEAD OF closing the overlay entirely - e.g. Workout Detail passes
-// a callback that re-renders the Activity day view it was opened from,
-// so "back" returns to that list rather than jumping all the way out
-// to the main tabs. Omitted (the default, for every single-level
-// caller) means "back" closes the overlay, exactly as it always has.
-export function openDetailScreen(title, onBack = null) {
+// No longer takes an onBack callback (an earlier version did, to
+// support Workout Detail's own "opened from within Activity" nesting
+// via a hand-rolled back-stack of closures) - real browser history
+// now does that job instead (see the back button's own click handler
+// below, which calls the router's goBack()), which is strictly more
+// capable: it also makes the browser's OWN back/forward buttons and a
+// page refresh behave correctly, neither of which a JS-only back-
+// stack could ever provide.
+export function openDetailScreen(title) {
   document.getElementById("detail-title").textContent = title;
   document.getElementById("detail-screen").style.display = "block";
-  if (onBack) {
-    backStack.push(onBack);
-  }
 }
 
 export function registerActiveChart(chart) {
@@ -52,23 +35,33 @@ export function clearActiveCharts() {
   activeCharts = [];
 }
 
-function closeDetailScreen() {
-  // Pop one level and re-render it, rather than closing, whenever a
-  // nested screen registered a way back - the whole point of the
-  // stack above. Charts still need clearing either way (the screen
-  // being left behind, nested or not, may have live Chart.js
-  // instances the destination render doesn't know about).
-  if (backStack.length > 0) {
-    const goBack = backStack.pop();
-    clearActiveCharts();
-    goBack();
-    return;
-  }
+// Hides the overlay outright. Registered below as a router
+// "before dispatch" hook, so it runs automatically on EVERY
+// navigation - a route that IS itself a detail screen re-opens it a
+// moment later via its own openDetailScreen(title) call (harmless:
+// close-then-immediately-reopen within the same synchronous dispatch,
+// before the browser ever repaints), while a route that ISN'T (e.g.
+// landing back on a tab) correctly leaves it closed. Simpler and less
+// error-prone than every individual tab route remembering to call
+// this itself - which is what an earlier version of this did, and
+// which is exactly the kind of thing that's easy to forget to add to
+// a NEW tab route later.
+export function closeDetailScreenOverlay() {
   document.getElementById("detail-screen").style.display = "none";
   clearActiveCharts();
 }
+registerBeforeDispatch(closeDetailScreenOverlay);
 
-document.getElementById("detail-back-btn").addEventListener("click", closeDetailScreen);
+document.getElementById("detail-back-btn").addEventListener("click", () => {
+  // Real browser back when there's app-internal history to return to
+  // (the common case - this screen was reached by tapping something
+  // elsewhere in the app), otherwise falls forward to Today - a fresh
+  // load or bookmark that landed directly on a detail screen has
+  // nothing of this app's own before it in history, so a raw
+  // history.back() there would leave the app entirely rather than
+  // going anywhere useful within it.
+  goBack("/app/today");
+});
 
 // Each view can plot more than one field (e.g. Heart Rate's page also
 // shows Resting Heart Rate below it) - each entry in `charts` becomes
@@ -269,7 +262,7 @@ const DETAIL_VIEWS = {
       yMax: 100,
       // Confirmed FIXED thresholds, stated directly in Zepp's own
       // educational blurb on the Stress page (not user-configurable,
-      // not inferred) - see parser/activefit/FIELD_RESEARCH.md.
+      // not inferred).
       bands: [
         { max: 39, label: "Relaxed", color: "#6ea8fe" },
         { max: 59, label: "Normal", color: "#6ecf97" },
@@ -341,6 +334,15 @@ export async function openMetricDetail(viewKey, anchorDate = todayISO()) {
   openDetailScreen(view.title);
   await renderDetailPeriod(view, "day", anchorDate);
 }
+
+registerRoute(/^\/app\/metric\/([a-z0-9_]+)$/, (params, match) => {
+  const period = params.get("period") || "day";
+  const date = params.get("date") || todayISO();
+  const view = DETAIL_VIEWS[match[1]];
+  if (!view) return;
+  openDetailScreen(view.title);
+  renderDetailPeriod(view, period, date);
+});
 
 
 function computeStatsFromSeries(series, period, decimals) {
@@ -535,6 +537,9 @@ export function renderBaselineBar(comparisonByDevice, baselineDays, config = {})
 }
 
 async function renderDetailPeriod(view, period, anchorDate) {
+  const viewKey = Object.keys(DETAIL_VIEWS).find(k => DETAIL_VIEWS[k] === view);
+  if (viewKey) replaceUrl(`/app/metric/${viewKey}?period=${period}&date=${anchorDate}`);
+
   const content = document.getElementById("detail-content");
   content.innerHTML = renderPeriodButtons(period, view.periods) + renderDateNav(period, anchorDate) + `<p class="muted">Loading...</p>`;
   wireDetailControls((p, d) => renderDetailPeriod(view, p, d), period, anchorDate);
@@ -723,10 +728,7 @@ async function renderDetailPeriod(view, period, anchorDate) {
   // for its own multiple detail-page links, rather than hardcoding one
   // querySelector per linkTo value.
   const LINK_TO_OPENERS = {
-    "sleep-heart-rate": async (d) => {
-      const { openSleepHeartRateDetail } = await import("./sleep-detail.js");
-      return openSleepHeartRateDetail(d);
-    },
+    "sleep-heart-rate": (d) => navigate(`/app/sleep/heart-rate?date=${d}`),
   };
   content.querySelectorAll("[data-link-to]").forEach(el => {
     const open = LINK_TO_OPENERS[el.dataset.linkTo];
@@ -920,3 +922,4 @@ async function fetchDetailSeries(chart, period, anchorDate) {
   }
   return api(`/vitals/range/${chart.field}?period=${period}&end_date=${anchorDate}`);
 }
+

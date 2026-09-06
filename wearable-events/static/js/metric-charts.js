@@ -828,9 +828,8 @@ const HYPNOGRAM_STAGE_ORDER_TOP_TO_BOTTOM = ["awake", "rem", "light", "deep"];
 // Our own bands, anchored on real confirmed data (STAND_INTENSITY_THRESHOLD=50,
 // confirmed against the watch's own hourly Stand display; the ~0-255
 // raw scale, confirmed against real values) - not an official Zepp/
-// Gadgetbridge scheme the way Stress's tiers are. See
-// parser/activefit/FIELD_RESEARCH.md for the full reasoning behind
-// these specific boundaries. Lives here (not in activity.js, where it
+// Gadgetbridge scheme the way Stress's tiers are - our own chosen
+// defaults. Lives here (not in activity.js, where it
 // was originally defined) so both activity.js and workout-detail.js
 // can import it without creating a circular dependency between them -
 // activity.js already imports openWorkoutDetail from workout-detail.js,
@@ -1497,3 +1496,5 @@ export function buildBedtimeWaketimeChart(canvas, trend, config) {
     },
   });
 }
+
+

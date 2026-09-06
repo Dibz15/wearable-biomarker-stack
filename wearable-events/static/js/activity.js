@@ -8,7 +8,7 @@ import {
   buildRangeBarChart, buildTieredBarChart, buildStackedMinutesChart,
   buildActivityTimeChart, renderTierLegend, INTENSITY_BANDS,
 } from "./metric-charts.js";
-import { openWorkoutDetail } from "./workout-detail.js";
+import { registerRoute, navigate, replaceUrl } from "./router.js";
 
 // A single flat band spanning the whole range - reuses
 // buildTieredBarChart's per-point bar rendering (sparse, discrete
@@ -32,7 +32,7 @@ function titleCase(label) {
 
 // Every session shows its raw code alongside the label, known or not -
 // "outdoor_running" is a real decoded name but confirmed unreliable
-// for this device (see FIELD_RESEARCH.md), so it doesn't get shown
+// for this device, so it doesn't get shown
 // with any more confidence than an unmapped code. Keeping the raw
 // code visible either way is also what makes it possible to build an
 // eventual internal map by eye, the same way the "Hybrid training"
@@ -107,21 +107,12 @@ function renderSessionLists(sessions) {
 
 function wireSessionList(container, anchorDate) {
   container.querySelectorAll("[data-workout-start-ms]").forEach(el => {
-    // "Back" from the Workout Detail page returns to THIS exact
-    // Activity day view (same anchorDate), not the main tabs - see
-    // metric-detail.js's own openDetailScreen/back-stack comment for
-    // why this needs passing through explicitly at all. Also resets
-    // the overlay's own title back to "Activity" - openWorkoutDetail's
-    // own openDetailScreen("Workout", ...) call overwrote it, and
-    // renderActivityPeriod/renderActivityDay never set it themselves
-    // (they only touch #detail-content, correctly assuming the title
-    // is already right from whenever the Activity page was FIRST
-    // opened) - without this, the title would stay stuck on "Workout"
-    // after going back, a real gap caught before shipping this fix.
-    const open = () => openWorkoutDetail(Number(el.dataset.workoutStartMs), () => {
-      openDetailScreen("Activity");
-      renderActivityPeriod("day", anchorDate);
-    });
+    // Navigates to the workout's own URL - real browser history (not
+    // a hand-rolled callback, an earlier version's approach) handles
+    // "back" returning to this exact Activity day view, including
+    // correctly restoring the overlay's own title, which the old
+    // callback-based approach had to do explicitly itself.
+    const open = () => navigate(`/app/activity/workout/${el.dataset.workoutStartMs}`);
     el.addEventListener("click", open);
     el.addEventListener("keydown", e => {
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
@@ -142,7 +133,16 @@ export async function openActivityDetail(anchorDate = todayISO()) {
   await renderActivityPeriod("day", anchorDate);
 }
 
+registerRoute(/^\/app\/activity$/, (params) => {
+  const period = params.get("period") || "day";
+  const date = params.get("date") || todayISO();
+  openDetailScreen("Activity");
+  renderActivityPeriod(period, date);
+});
+
 async function renderActivityPeriod(period, anchorDate) {
+  replaceUrl(`/app/activity?period=${period}&date=${anchorDate}`);
+
   const content = document.getElementById("detail-content");
   content.innerHTML = renderPeriodButtons(period, null) + renderDateNav(period, anchorDate) + `<p class="muted">Loading...</p>`;
   wireActivityControls(period, anchorDate);
@@ -183,7 +183,7 @@ async function renderActivityDay(anchorDate) {
 
   // The two quick stat cards use whichever device reported anything
   // today - this app is realistically single-device right now (the
-  // ring has been unbound, see FIELD_RESEARCH.md), so picking the
+  // ring has been unbound), so picking the
   // first reporting device rather than trying to merge multiple
   // devices' minutes into one combined number.
   const statsDevice = intensityDevices[0] || stepsDevices[0];

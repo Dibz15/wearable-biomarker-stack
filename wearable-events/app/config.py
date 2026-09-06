@@ -74,17 +74,15 @@ SLEEP_QUALITY_AGE_BRACKET = os.getenv("SLEEP_QUALITY_AGE_BRACKET", "adult")
 
 # Published "appropriate" thresholds for the 3 sleep-continuity metrics
 # this app can actually compute (efficiency, WASO, awakenings>5min) -
-# NOT a composite score, deliberately (see FIELD_RESEARCH.md's "Sleep
-# Score" entry for why: the industry's own standards body, ANSI/CTA/
-# NSF-2110, states no standardized composite-scoring formula exists,
-# and recommends showing individual cited metrics over one opaque
-# number). Source: Ohayon et al. 2017 (National Sleep Foundation Sleep
+# NOT a composite score, deliberately: the industry's own standards
+# body, ANSI/CTA/NSF-2110, states no standardized composite-scoring
+# formula exists, and recommends showing individual cited metrics
+# over one opaque number. Source: Ohayon et al. 2017 (National Sleep Foundation Sleep
 # Quality Consensus Panel, Sleep Health 3(1):6-19), Table 1 as
 # reproduced in ANSI/CTA/NSF-2110 (June 2024). A 4th consensus metric,
 # sleep latency, is deliberately excluded - not a threshold gap, a
 # data gap: this app has no "got into bed" timestamp separate from
-# sleep onset to measure latency from (see FIELD_RESEARCH.md's "time
-# in bed" future-feature note).
+# sleep onset to measure latency from.
 #
 # Only the "appropriate" bound is encoded for waso/awakenings - the
 # source table gives an inappropriate bound too for some metrics, but
@@ -123,8 +121,7 @@ SLEEP_DURATION_RECOMMENDED_HOURS = {
 # An "active minute" (steps > 0 OR raw_intensity >= this) is the
 # trigger for both Stand-hour crediting and derived activity-session
 # detection. Confirmed empirically against the watch's own real
-# hourly Stand display (see parser/activefit/FIELD_RESEARCH.md) -
-# not a guess, though the person's own words on it were "the best I
+# hourly Stand display - not a guess, though the person's own words on it were "the best I
 # can do from one day's data" (the watch only shows one day at a
 # time), so this could still be refined with more comparison data
 # later.

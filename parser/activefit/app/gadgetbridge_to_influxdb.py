@@ -188,10 +188,8 @@ HUAMI_SLEEP_SESSION_TIMESTAMPS_ARE_MS = os.getenv("HUAMI_SLEEP_SESSION_TIMESTAMP
 # discrete workout/activity entries rather than a continuous per-minute
 # stream. Its START_TIME/END_TIME scale was classified as milliseconds
 # via scripts/check_table_usage.py against real data - but based on
-# just the ONE row that existed at the time (see
-# parser/activefit/FIELD_RESEARCH.md's "Workout/Activity summaries"
-# entry), not the same exhaustive confirmation the flags above have.
-# Worth re-checking once more real rows accumulate.
+# only a handful of real rows, not the same exhaustive confirmation
+# the flags above have. Worth re-checking as more rows accumulate.
 BASE_ACTIVITY_SUMMARY_TIMESTAMPS_ARE_MS = os.getenv("BASE_ACTIVITY_SUMMARY_TIMESTAMPS_ARE_MS", "Y") == "Y"
 
 # CONFIRMED directly from Gadgetbridge's own source
@@ -1046,9 +1044,9 @@ def extract_base_activity_summary_rows(rows, device_tags) -> list[dict]:
     flatten_workout_summary() when present and non-empty - see that
     function's own docstring for the full field list and every
     confirmed scaling factor. A row with no blob (SUMMARY_DATA/
-    RAW_SUMMARY_DATA are both known to sometimes be entirely absent -
-    see FIELD_RESEARCH.md) still gets its basic duration_s field, just
-    without the richer breakdown.
+    RAW_SUMMARY_DATA are both known to sometimes be entirely absent)
+    still gets its basic duration_s field, just without the richer
+    breakdown.
 
     Rows with a missing END_TIME (an in-progress/unfinished workout, or
     a malformed row) are skipped with a warning, not written with a
@@ -1669,9 +1667,8 @@ def extract_data(cur, client, webdav_client):
     # --- Stress. CONFIRMED table/columns, including TYPE_NUM - captured
     # as a tag (still raw, not decoded into a friendlier value at parse
     # time) so it stays filterable in Grafana without a parser change.
-    # Meaning CONFIRMED via a deliberate cross-check (see
-    # FIELD_RESEARCH.md's stress_type_num entry): three manual stress
-    # readings taken in Zepp at known timestamps all showed
+    # Meaning CONFIRMED via a deliberate cross-check: three manual
+    # stress readings taken in Zepp at known timestamps all showed
     # stress_type_num="0" when matched against this data.
     # stress_type_num: 0 = manual, 1 = automatic.
     #
@@ -1713,9 +1710,8 @@ def extract_data(cur, client, webdav_client):
 
     # --- SpO2. CONFIRMED table/columns, including TYPE_NUM (same
     # NULL-vs-absent-tag normalization as HUAMI_STRESS_SAMPLE.TYPE_NUM
-    # above). spo2_type_num meaning CONFIRMED independently (see
-    # FIELD_RESEARCH.md), same convention as stress_type_num:
-    # 0 = manual, 1 = automatic. ---
+    # above). spo2_type_num meaning CONFIRMED independently, same
+    # convention as stress_type_num: 0 = manual, 1 = automatic. ---
     rows = run_query(cur, "HUAMI_SPO2_SAMPLE",
         "SELECT TIMESTAMP, DEVICE_ID, TYPE_NUM, SPO2 FROM HUAMI_SPO2_SAMPLE "
         f"WHERE TIMESTAMP >= {query_start_bound_scaled} ORDER BY TIMESTAMP ASC")
@@ -1786,9 +1782,7 @@ def extract_data(cur, client, webdav_client):
     # real data - genuinely sparse in practice (1 row observed against
     # 2798 rows in the per-minute activity table over the same period),
     # since it's populated only for explicitly-started workout sessions,
-    # not ambient daily movement (see parser/activefit/FIELD_RESEARCH.md's
-    # "Workout/Activity summaries" entry for the full reasoning behind
-    # that conclusion).
+    # not ambient daily movement.
     #
     # RAW_SUMMARY_DATA (the richer per-workout breakdown - HR zones,
     # training load, laps, etc.) is now decoded via flatten_workout_summary()
@@ -1843,8 +1837,8 @@ def extract_data(cur, client, webdav_client):
     # is the whole point of this feature, so it needs to look at every
     # workout regardless of the summary checkpoint's own position -
     # BASE_ACTIVITY_SUMMARY is confirmed genuinely sparse in practice
-    # (FIELD_RESEARCH.md: a handful of rows even after real use, not
-    # thousands), so querying it in full on every cycle is cheap; the
+    # (a handful of rows even after real use, not thousands), so
+    # querying it in full on every cycle is cheap; the
     # already-processed InfluxDB check inside
     # extract_workout_detail_points() is what actually prevents
     # redundant download/parse work, not this query's own bound.

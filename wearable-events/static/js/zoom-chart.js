@@ -1,4 +1,5 @@
 import { escapeHtml, formatNum } from "./core.js";
+import { registerBeforeDispatch } from "./router.js";
 
 // Shared fullscreen zoomed-chart view - opened from an "expand" button
 // on any time-series chart (the sleep hypnogram, workout detail's own
@@ -17,6 +18,27 @@ const DEFAULT_WINDOW_MINUTES = 60;
 // threading this through every helper's own arguments instead.
 let mainChart = null;
 let activeState = null;
+
+// Hides the overlay outright, safely even when no zoom is currently
+// open (a plain no-op then, since there's nothing to clean up).
+// Registered below as a router "before dispatch" hook - the same
+// pattern metric-detail.js uses for the detail-screen overlay, and
+// for the same reason: zoom is a full-screen sub-overlay with only
+// its OWN back button reachable while it's open (it covers everything
+// else), so the browser's own back/forward buttons are the one path
+// that can navigate the page underneath without ever going through
+// zoom's own close logic - which would otherwise leave this stuck
+// open on top of wherever the router just navigated to.
+function closeZoomOverlay() {
+  const screen = document.getElementById("zoom-screen");
+  if (screen) screen.style.display = "none";
+  if (mainChart) {
+    mainChart.destroy();
+    mainChart = null;
+  }
+  activeState = null;
+}
+registerBeforeDispatch(closeZoomOverlay);
 
 /**
  * Open the zoom view.

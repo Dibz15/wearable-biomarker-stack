@@ -1,7 +1,8 @@
 // --- Today tab ---
-import { escapeHtml, api, todayISO, shiftISODate } from "./core.js";
-import { openMetricDetail, renderDateNav } from "./metric-detail.js";
-import { openActivityDetail, formatMinutes } from "./activity.js";
+import { escapeHtml, api, todayISO, shiftISODate, showTab } from "./core.js";
+import { renderDateNav } from "./metric-detail.js";
+import { formatMinutes } from "./activity.js";
+import { registerRoute, navigate, replaceUrl } from "./router.js";
 
 const METRIC_FIELDS = [
   { key: "heart_rate", label: "Heart Rate", unit: "bpm", hasDetail: true },
@@ -160,6 +161,15 @@ function renderActivityCard(steps, sittingMinutes, stoodHours, hourlyBreakdown) 
   `;
 }
 
+registerRoute(/^\/app\/today$/, (params) => {
+  // Closing a potentially-open detail-screen overlay is handled
+  // centrally (metric-detail.js's own router "before dispatch" hook),
+  // not here - see app.js's comment on the same tab-route pattern.
+  showTab("today");
+  const date = params.get("date");
+  if (date) loadToday(date);
+});
+
 export async function loadToday(anchorDate = todayISO()) {
   const container = document.getElementById("today-content");
   try {
@@ -192,14 +202,14 @@ export async function loadToday(anchorDate = todayISO()) {
       // Opens the detail view on the SAME day currently being viewed
       // here, not always today - tapping "Heart Rate" (or "Activity")
       // while looking at three days ago should show that day's data,
-      // not jump back to today's. Activity isn't one of the
-      // DETAIL_VIEWS metric fields openMetricDetail knows about - it's
-      // its own module with its own opener, so it needs its own
-      // branch here rather than being handled the same generic way.
+      // not jump back to today's. Goes through navigate() (not the
+      // opener functions directly) so the resulting page gets a real
+      // URL and a back-button history entry, same as every other
+      // "open a new screen" action across the app.
       const field = el.dataset.detailField;
       const open = field === "activity"
-        ? () => openActivityDetail(anchorDate)
-        : () => openMetricDetail(field, anchorDate);
+        ? () => navigate(`/app/activity?date=${anchorDate}`)
+        : () => navigate(`/app/metric/${field}?date=${anchorDate}`);
       el.addEventListener("click", open);
       el.addEventListener("keydown", e => {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
@@ -235,20 +245,30 @@ export async function loadToday(anchorDate = todayISO()) {
 // reported.
 function wireTodayDateNav(anchorDate) {
   const container = document.getElementById("today-content");
+
+  // Same reasoning as sleep-overview.js's own wireSleepOverviewDateNav:
+  // only called from real user interaction with the visible Today tab,
+  // never from loadToday() itself (which is also called eagerly on
+  // app startup regardless of which tab is actually showing).
+  const goToDate = (date) => {
+    replaceUrl(`/app/today?date=${date}`);
+    loadToday(date);
+  };
+
   const prevBtn = container.querySelector('.date-nav-btn[data-nav="prev"]');
   const nextBtn = container.querySelector('.date-nav-btn[data-nav="next"]');
   if (prevBtn) {
-    prevBtn.addEventListener("click", () => loadToday(shiftISODate(anchorDate, -1)));
+    prevBtn.addEventListener("click", () => goToDate(shiftISODate(anchorDate, -1)));
   }
   if (nextBtn && !nextBtn.disabled) {
-    nextBtn.addEventListener("click", () => loadToday(shiftISODate(anchorDate, 1)));
+    nextBtn.addEventListener("click", () => goToDate(shiftISODate(anchorDate, 1)));
   }
 
   const dateInput = container.querySelector(".date-nav-input");
   const dateLabel = container.querySelector(".date-nav-label");
   if (dateInput) {
     dateInput.addEventListener("change", () => {
-      if (dateInput.value) loadToday(dateInput.value);
+      if (dateInput.value) goToDate(dateInput.value);
     });
   }
   if (dateLabel && dateInput) {
