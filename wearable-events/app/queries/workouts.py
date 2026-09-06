@@ -231,7 +231,7 @@ def get_workout_detail_series(user: str, start_ms: int, fields: list[str]) -> li
     return results
 
 
-# Every field flatten_fit_laps() (parser/activefit) can possibly write
+# Every field flatten_fit_laps() (parser/amazfit) can possibly write
 # - a fixed allowlist rather than pivoting and returning whatever keys
 # happen to appear, so the shape of what this function returns doesn't
 # silently change if the parser's own field set ever changes; any

@@ -79,7 +79,7 @@ def _device_stat_by_field(field: str, user: str, start: datetime, end: datetime,
 def get_today_vitals(user: str, for_date: date | None = None) -> dict[str, dict]:
     ''' Today's (local calendar day) vitals summary, per device, for
     every field both parsers share a common name for (see the shared-
-    field-name design used throughout parser/activefit - this is
+    field-name design used throughout parser/amazfit - this is
     exactly what makes a single query work unmodified across whichever
     devices happen to be reporting, ring or watch or both).
 
@@ -155,7 +155,7 @@ def _grouped_series(field: str, user: str, start: datetime, end: datetime) -> di
     use sort() after group()."), not just inferred from the symptom.
     Without it, points from what were originally several disjoint
     underlying series (this data also carries activity_kind, sample_type,
-    etc. as tags - see parser/activefit - each combination is its own
+    etc. as tags - see parser/amazfit - each combination is its own
     series until an explicit group() call collapses them by device
     alone) get merged in whatever order the query engine happened to
     produce internally, not necessarily chronological - a line chart

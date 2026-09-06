@@ -41,14 +41,14 @@ everything else (InfluxDB, Grafana, ntfy) is off-the-shelf.
 │   └── tests.yml                   runs wearable-events' test suite on every push/PR
 ├── docker-compose.yml              the full stack: InfluxDB, Grafana, ntfy, both parsers, wearable-events
 ├── env.stack.example                copy to .env, fill in your own values
-├── parser/                         device parsers - see parser/colmi/README.md and parser/activefit/README.md
+├── parser/                         device parsers - see parser/colmi/README.md and parser/amazfit/README.md
 │   ├── common/                     shared, device-agnostic: WebDAV fetch, DEVICE table lookup,
 │   │                               checkpoint mechanics, future-timestamp guard, InfluxDB write path
 │   ├── colmi/                      Colmi/Yawell ring parser (COLMI_* tables) - functional
 │   │   ├── app/gadgetbridge_to_influxdb.py
 │   │   ├── Dockerfile
 │   │   └── scripts/                 one-off maintenance scripts (checkpoint reset, historical data fixes)
-│   └── activefit/                  Amazfit Active 3 Premium parser (HUAMI_* tables) - best-effort,
+│   └── amazfit/                  Amazfit Active 3 Premium parser (HUAMI_* tables) - best-effort,
 │       ├── app/gadgetbridge_to_influxdb.py   runs safely pre-pairing (graceful no-op), but
 │       ├── Dockerfile                        table/column guesses are unverified - see its README
 │       └── README.md
@@ -80,10 +80,10 @@ everything else (InfluxDB, Grafana, ntfy) is off-the-shelf.
   [SETUP.md's alerting step](./SETUP.md#grafana-alerting-provisioned).
 - **The HRV alert rule only watches `ALERT_HRV_SOURCE` (default
   `colmi`)** — the ring, not the watch, even on a stack running both
-  parsers. `activefit` extracts HRV too (`GENERIC_HRV_VALUE_SAMPLE`),
+  parsers. `amazfit` extracts HRV too (`GENERIC_HRV_VALUE_SAMPLE`),
   it's just not alerted on by default; the two devices may compute HRV
   differently, so blending both into one rule isn't obviously more
-  correct than picking one. Switch `ALERT_HRV_SOURCE` to `activefit`,
+  correct than picking one. Switch `ALERT_HRV_SOURCE` to `amazfit`,
   or copy the rule block in `rules.yaml` for a second, parallel rule
   scoped to the other source, once you have a preference.
 - **The HRV alert rule is single-user**, watching one

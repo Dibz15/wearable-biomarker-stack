@@ -47,8 +47,8 @@ parser can fix on its own.
 
 Run via the same pattern as check_table_usage.py:
 
-    docker cp parser/activefit/scripts/inspect_activity_details_paths.py biomarker-parser-activefit:/tmp/inspect_activity_details_paths.py
-    docker exec -it biomarker-parser-activefit python3 /tmp/inspect_activity_details_paths.py
+    docker cp parser/amazfit/scripts/inspect_activity_details_paths.py biomarker-parser-amazfit:/tmp/inspect_activity_details_paths.py
+    docker exec -it biomarker-parser-amazfit python3 /tmp/inspect_activity_details_paths.py
 
 Requires the same WEBDAV_* env vars the parser itself uses, plus
 optionally GPX_TRACKS_PATH (defaults to guessing WEBDAV_PATH + "Tracks/"

@@ -12,9 +12,9 @@ tagging (caffeine, alcohol, meetings pulled from your calendar) and a
 subjective sleep-quality score, so raw sensor trends can eventually be
 correlated against what was actually happening in your day.
 
-An Amazfit parser (`parser/activefit/`) optionally runs alongside the ring parser
+An Amazfit parser (`parser/amazfit/`) optionally runs alongside the ring parser
 for a second device — best-effort, some field semantics unverified. See
-[`parser/activefit/README.md`](./parser/activefit/README.md).
+[`parser/amazfit/README.md`](./parser/amazfit/README.md).
 
 Everything runs in Docker, tested against [CasaOS](https://casaos.io/)
 but works with plain `docker compose` anywhere.
@@ -44,7 +44,7 @@ Each component has its own dev setup and test instructions:
   companion FastAPI app + web UI (calendar tagging, sleep journal)
 - [`parser/colmi/README.md`](./parser/colmi/README.md) — the Colmi/Yawell
   ring parser
-- [`parser/activefit/README.md`](./parser/activefit/README.md) — the
+- [`parser/amazfit/README.md`](./parser/amazfit/README.md) — the
   Amazfit parser
 
 ## Documentation

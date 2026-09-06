@@ -73,7 +73,7 @@ from common.influx import build_client, write_results
 
 ### Config section
 
-PARSER_SOURCE = os.getenv("PARSER_SOURCE", "activefit")
+PARSER_SOURCE = os.getenv("PARSER_SOURCE", "amazfit")
 
 WEBDAV_URL = os.getenv("WEBDAV_URL", False)
 WEBDAV_PATH = os.getenv("WEBDAV_PATH", "files/service_user/GadgetBridge/")
@@ -280,7 +280,7 @@ def compute_query_start_bound(checkpoint_ns, now_seconds, fallback_bound_seconds
 
     This exists as its own function (rather than inlined once in
     extract_data() like colmi's single-scale equivalent) specifically
-    because activefit now has two different per-table scales in play -
+    because amazfit now has two different per-table scales in play -
     see HUAMI_ACTIVITY_TIMESTAMPS_ARE_MS above - and both need this
     exact logic, just parameterized by `is_ms`. `label` is only used
     for clearer log lines when there's more than one bound in play in
@@ -604,7 +604,7 @@ def datetime_to_nanos(dt: datetime) -> int:
     decoding, or this module's own GPX <time> parsing below) to
     nanoseconds-since-epoch - the SAME "timestamp is always an int"
     convention every other point in this entire parser (both
-    activefit and colmi) already follows via to_nanos(), and the only
+    amazfit and colmi) already follows via to_nanos(), and the only
     format write_results() itself actually accepts (it compares
     row['timestamp'] directly against an int future-timestamp bound
     before ever reaching Point.time() - a real crash found and fixed

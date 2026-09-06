@@ -2,14 +2,14 @@
 
 Running notes on page layouts/UX patterns from walking through the
 Zepp app, kept separate from the parser's own data-confirmation
-notes in `parser/activefit/README.md` (that's about the underlying
+notes in `parser/amazfit/README.md` (that's about the underlying
 data; this one's about UI design). This file is for
 later reference once we actually start building the mobile dashboard,
 so we're not relying on conversation history/context for design
 details by then.
 
 Each entry: what's on the page, how it's laid out, what data it'd need
-(cross-reference `parser/activefit/README.md` if the data isn't confirmed yet),
+(cross-reference `parser/amazfit/README.md` if the data isn't confirmed yet),
 and a rough buildable-now assessment.
 
 ## General navigation
@@ -383,7 +383,7 @@ built once for HR specifically:
   showing time + value, tappable (presumably for more detail per
   reading). **This is genuinely useful beyond just UI reference** - a real
   Zepp-reading list like this is how `stress_type_num`'s 0/1 meaning
-  ended up confirmed (see `parser/activefit/README.md`).
+  ended up confirmed (see `parser/amazfit/README.md`).
 - Educational blurb at the bottom - unlike most others, this one is
   **not just generic filler**: it states the exact fixed stress-tier
   thresholds directly, so this specific blurb
@@ -392,7 +392,7 @@ built once for HR specifically:
   pie breakdown, and Max/Min/Avg all come from existing `stress` data
   and the confirmed fixed thresholds. The "Manual Data" list is now
   also buildable cleanly: `stress_type_num` is CONFIRMED
-  (see `parser/activefit/README.md`) - 0=manual, 1=automatic - so manual-only readings
+  (see `parser/amazfit/README.md`) - 0=manual, 1=automatic - so manual-only readings
   are a straightforward tag filter, no remaining ambiguity.
 
 ### Weekly (W) zoom level - likely a shared pattern, not Stress-specific
@@ -598,14 +598,14 @@ chart with a wider window", they change granularity:
   (this list could show entries from our own already-extracted
   activity/HR data at a coarse level) - the rich stats shown per entry
   mostly come from the workout-summary source (see
-  `parser/activefit/README.md` for the confirmed field list).
+  `parser/amazfit/README.md` for the confirmed field list).
 
 ## Page: Individual Activity/Workout detail (e.g. "Hybrid training")
 
 **Deliberately not a near-term build target** - flagged by the person
 as a later project. The underlying workout-summary data source (Zepp
 OS devices' `RAW_SUMMARY_DATA` protobuf blob) IS now parsed and
-extracted (see parser/activefit's own README.md) -
+extracted (see parser/amazfit's own README.md) -
 what follows was originally written before that, from Zepp app
 screenshots alone, and has now been cross-checked against BOTH a
 second set of real screenshots of this exact same workout (2026-09,
@@ -918,7 +918,7 @@ data). Everything else on this page now HAS its underlying data
 extracted - HR/HR zones incl. real BPM thresholds, training effect
 (incl. the qualitative label thresholds), load, calories, altitude/
 elevation, cadence, speed, laps, and per-sample GPS/HR/cadence/
-elevation/speed data (see parser/activefit's own README.md for the
+elevation/speed data (see parser/amazfit's own README.md for the
 full field list and the FIT/GPX/DB-only priority
 chain). The ONE remaining genuinely unresolved piece is **Workout
 Balance** - a real research effort found no public formula anywhere,

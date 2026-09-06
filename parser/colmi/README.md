@@ -11,7 +11,7 @@ This is a fork of [bentasker/gadgetbridge_to_influxdb](https://github.com/bentas
 [Dibz15](https://github.com/Dibz15/colmi_gadgetbridge_to_influxdb) for
 **Colmi/Yawell smart rings** (R02/R03/R06/R09/R10/R11/R12 family) via
 the `COLMI_*` tables instead. This directory lives in a monorepo
-alongside `../activefit/` (an Amazfit parser) and `wearable-events/` —
+alongside `../amazfit/` (an Amazfit parser) and `wearable-events/` —
 see the [top-level README](../../README.md) for how they fit together,
 and `../common/` for the WebDAV fetch, checkpoint, and InfluxDB
 write-path code shared between parsers.
@@ -47,7 +47,7 @@ file repeatedly is harmless.
 | `SLEEP_HOURS` | Comma-separated hours (0–23) treated as sleeping hours, for stress-field averaging | `0,1,2,3,4,5,6` |
 | `SYNC_INTERVAL_SECONDS` | Seconds between sync runs. Set to `0` to run once and exit (for driving from an external cron instead) | `1800` |
 | `GADGETBRIDGE_USER` | Tag identifying which person this data belongs to (see [Multi-user notes](../../docs/SETUP.md#multi-user-notes)) | `primary` |
-| `PARSER_SOURCE` | Tag identifying which parser wrote a point, distinct from the physical `device` tag - scopes checkpoint lookups so a second device parser (e.g. `../activefit/`) sharing the same bucket/user doesn't inherit this one's sync history. Only change this if you know what you're doing - see `../common/checkpoint.py` | `colmi` |
+| `PARSER_SOURCE` | Tag identifying which parser wrote a point, distinct from the physical `device` tag - scopes checkpoint lookups so a second device parser (e.g. `../amazfit/`) sharing the same bucket/user doesn't inherit this one's sync history. Only change this if you know what you're doing - see `../common/checkpoint.py` | `colmi` |
 | `MAX_FUTURE_TOLERANCE_SECONDS` | Tolerance for a sample/checkpoint being ahead of "now" before it's treated as corrupted data | `300` (5 min) |
 
 > Field/table names above match Gadgetbridge's documented Colmi tables

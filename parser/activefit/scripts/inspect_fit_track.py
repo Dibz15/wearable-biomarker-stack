@@ -13,12 +13,12 @@ reads correctly.
 REQUIRES fitparse, which is NOT yet a dependency of this parser image -
 install it in the running container first:
 
-    docker exec -it biomarker-parser-activefit pip install fitparse --break-system-packages
+    docker exec -it biomarker-parser-amazfit pip install fitparse --break-system-packages
 
 Then run via the same pattern as the other diagnostics:
 
-    docker cp parser/activefit/scripts/inspect_fit_track.py biomarker-parser-activefit:/tmp/inspect_fit_track.py
-    docker exec -it biomarker-parser-activefit python3 /tmp/inspect_fit_track.py
+    docker cp parser/amazfit/scripts/inspect_fit_track.py biomarker-parser-amazfit:/tmp/inspect_fit_track.py
+    docker exec -it biomarker-parser-amazfit python3 /tmp/inspect_fit_track.py
 
 Requires the same WEBDAV_* env vars the parser itself uses, plus
 optionally EXPORT_TRACKS_PATH (see inspect_activity_details_paths.py's

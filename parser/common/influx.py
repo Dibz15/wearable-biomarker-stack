@@ -23,7 +23,7 @@ def write_results(client, results, bucket, org, measurement, user, source,
     Every point gets a `user` tag (see GADGETBRIDGE_USER-equivalent
     config in each device app for why, even in a single-user setup)
     and, when `source` is given, a `source` tag identifying which
-    parser wrote it (e.g. "colmi", "activefit") - this is what lets
+    parser wrote it (e.g. "colmi", "amazfit") - this is what lets
     get_last_checkpoint_ns (see common/checkpoint.py) scope checkpoint
     lookups per-parser instead of blending multiple devices' sync
     history together.
