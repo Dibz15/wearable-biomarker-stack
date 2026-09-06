@@ -18,7 +18,25 @@
 FROM python:slim-bullseye
 
 RUN pip install --upgrade pip \
-    && pip install webdavclient3 influxdb-client loguru
+    && pip install webdavclient3 influxdb-client loguru protobuf fitparse
+
+# activefit/app/huami_pb2.py is PRE-COMPILED (not generated at build
+# time here) from activefit/proto/huami.proto - Gadgetbridge's own
+# protobuf schema for BASE_ACTIVITY_SUMMARY.RAW_SUMMARY_DATA (Zepp OS
+# devices), confirmed against Gadgetbridge's real source (both the
+# .proto itself and ZeppOsActivitySummaryParser.java, 2026-09). Kept
+# pre-compiled and checked in rather than adding a protoc build step
+# here, to keep this Dockerfile simple - if huami.proto ever changes,
+# regenerate with (from parser/activefit/):
+#   protoc --python_out=app --proto_path=proto proto/huami.proto
+
+# fitparse decodes per-workout .fit exports (BASE_ACTIVITY_SUMMARY's
+# own RAW_DETAILS_PATH, found via Gadgetbridge's own "Auto export FIT
+# tracks" automation - confirmed 2026-09 to work for GPS AND non-GPS
+# activities alike, unlike GPX which only exists for GPS ones). Real,
+# standardized format with a mature open-source parser - same
+# reasoning as using the real protobuf library above, not a hand-
+# rolled decoder.
 
 COPY common /app/common
 COPY activefit/app /app

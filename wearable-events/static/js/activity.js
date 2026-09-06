@@ -1,0 +1,305 @@
+// --- Activity page (opened from a Today card, not a tab) ---
+import { escapeHtml, api, todayISO } from "./core.js";
+import {
+  openDetailScreen, registerActiveChart, clearActiveCharts,
+  renderDateNav, renderPeriodButtons, wireDetailControls,
+} from "./metric-detail.js";
+import {
+  buildRangeBarChart, buildTieredBarChart, buildStackedMinutesChart,
+  buildActivityTimeChart, renderTierLegend, INTENSITY_BANDS,
+} from "./metric-charts.js";
+import { openWorkoutDetail } from "./workout-detail.js";
+
+// A single flat band spanning the whole range - reuses
+// buildTieredBarChart's per-point bar rendering (sparse, discrete
+// bars, one per actual reading, not hourly-aggregated) for the Steps
+// day chart without needing a near-identical function just to drop
+// the tier-coloring UI_DESIGN_NOTES.md never asked for on this chart.
+const STEPS_FLAT_BAND = [{ max: Infinity, label: "Steps", color: "#6ea8fe" }];
+
+export function formatMinutes(min) {
+  const hr = Math.floor(min / 60);
+  const rest = min % 60;
+  return hr > 0 ? `${hr}h ${rest}m` : `${rest}m`;
+}
+
+// "outdoor_running" -> "Outdoor Running" - only used for known labels
+// (never "unknown", which is handled separately in renderSessionLabel
+// so it isn't title-cased into "Unknown" twice over).
+function titleCase(label) {
+  return label.split("_").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
+// Every session shows its raw code alongside the label, known or not -
+// "outdoor_running" is a real decoded name but confirmed unreliable
+// for this device (see FIELD_RESEARCH.md), so it doesn't get shown
+// with any more confidence than an unmapped code. Keeping the raw
+// code visible either way is also what makes it possible to build an
+// eventual internal map by eye, the same way the "Hybrid training"
+// correspondence was found.
+function renderSessionLabel(session) {
+  const hasKnownLabel = session.label && session.label !== "unknown";
+  const text = hasKnownLabel ? titleCase(session.label) : "Unknown";
+  const code = (session.raw_code === null || session.raw_code === undefined) ? "" : ` (${session.raw_code})`;
+  return `${escapeHtml(text)}${escapeHtml(code)}`;
+}
+
+function renderSessionRow(s) {
+  const start = new Date(s.start).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const end = new Date(s.end).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const hrText = (s.avg_heart_rate === null || s.avg_heart_rate === undefined) ? "" : `${s.avg_heart_rate} bpm avg`;
+  // Only "precomputed" entries (a real BASE_ACTIVITY_SUMMARY row) have
+  // a Workout Detail page to open at all - a "derived" session
+  // (inferred from the raw per-minute stream, no summary point of its
+  // own) has nothing further to show, so it stays a plain, non-tappable
+  // row.
+  const isTappable = s.source === "precomputed" && s.start_ms !== null && s.start_ms !== undefined;
+  const rowClass = isTappable ? "activity-session-row metric-card-tappable" : "activity-session-row";
+  const attrs = isTappable ? `data-workout-start-ms="${s.start_ms}" role="button" tabindex="0"` : "";
+  return `
+    <div class="${rowClass}" ${attrs}>
+      <div class="activity-session-main">
+        <span class="activity-session-label">${renderSessionLabel(s)}</span>
+        <span class="metric-sub">${escapeHtml(start)} \u2013 ${escapeHtml(end)}</span>
+      </div>
+      <div class="activity-session-side">
+        ${hrText ? `<span class="metric-sub">${escapeHtml(hrText)}</span>` : ""}
+        <span class="metric-device-name">${escapeHtml(s.device)}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderSessionSublist(sessions, emptyMessage) {
+  if (!sessions.length) {
+    return `<p class="metric-card-empty">${escapeHtml(emptyMessage)}</p>`;
+  }
+  // Most recent first within this sublist - same reasoning as the
+  // earlier single-list reversal (the backend's own sort is
+  // chronological ascending; newest-at-top is a display-only choice
+  // matching ordinary feed/timeline convention).
+  const rows = [...sessions].reverse().map(renderSessionRow).join("");
+  return `<div class="activity-session-list">${rows}</div>`;
+}
+
+// Splits the Activity page's combined session list (both automatic
+// sessions derived from raw per-minute data, and precomputed workout
+// entries from BASE_ACTIVITY_SUMMARY - see get_combined_activity_sessions's
+// own docstring) into two SEPARATE lists, per the person's own
+// request: a deliberately-started ("manual") workout is a genuinely
+// different category from activity merely inferred after the fact
+// from ambient movement, and blending both into one chronological
+// list made it hard to scan either one at a glance. Manual workouts
+// are shown FIRST (they're also the only entries with a Workout
+// Detail page to open at all), each sublist independently sorted
+// newest-first.
+function renderSessionLists(sessions) {
+  const manual = sessions.filter(s => s.source === "precomputed");
+  const detected = sessions.filter(s => s.source === "derived");
+  return `
+    <p class="today-section-label">Workouts</p>
+    ${renderSessionSublist(manual, "No workouts logged for this day")}
+
+    <p class="today-section-label">Detected Activity</p>
+    ${renderSessionSublist(detected, "No other activity detected for this day")}
+  `;
+}
+
+function wireSessionList(container, anchorDate) {
+  container.querySelectorAll("[data-workout-start-ms]").forEach(el => {
+    // "Back" from the Workout Detail page returns to THIS exact
+    // Activity day view (same anchorDate), not the main tabs - see
+    // metric-detail.js's own openDetailScreen/back-stack comment for
+    // why this needs passing through explicitly at all. Also resets
+    // the overlay's own title back to "Activity" - openWorkoutDetail's
+    // own openDetailScreen("Workout", ...) call overwrote it, and
+    // renderActivityPeriod/renderActivityDay never set it themselves
+    // (they only touch #detail-content, correctly assuming the title
+    // is already right from whenever the Activity page was FIRST
+    // opened) - without this, the title would stay stuck on "Workout"
+    // after going back, a real gap caught before shipping this fix.
+    const open = () => openWorkoutDetail(Number(el.dataset.workoutStartMs), () => {
+      openDetailScreen("Activity");
+      renderActivityPeriod("day", anchorDate);
+    });
+    el.addEventListener("click", open);
+    el.addEventListener("keydown", e => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+    });
+  });
+}
+
+function replaceWithEmptyState(canvasId, message) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  canvas.replaceWith(Object.assign(document.createElement("p"), {
+    className: "metric-card-empty", textContent: message,
+  }));
+}
+
+export async function openActivityDetail(anchorDate = todayISO()) {
+  openDetailScreen("Activity");
+  await renderActivityPeriod("day", anchorDate);
+}
+
+async function renderActivityPeriod(period, anchorDate) {
+  const content = document.getElementById("detail-content");
+  content.innerHTML = renderPeriodButtons(period, null) + renderDateNav(period, anchorDate) + `<p class="muted">Loading...</p>`;
+  wireActivityControls(period, anchorDate);
+
+  clearActiveCharts();
+
+  try {
+    if (period === "day") {
+      await renderActivityDay(anchorDate);
+    } else {
+      await renderActivityRange(period, anchorDate);
+    }
+  } catch (e) {
+    content.innerHTML = renderPeriodButtons(period, null) + renderDateNav(period, anchorDate) + `<p class="status">Error loading activity data: ${escapeHtml(e.message)}</p>`;
+    wireActivityControls(period, anchorDate);
+  }
+}
+
+function wireActivityControls(period, anchorDate) {
+  wireDetailControls((p, d) => renderActivityPeriod(p, d), period, anchorDate);
+}
+
+async function renderActivityDay(anchorDate) {
+  const content = document.getElementById("detail-content");
+
+  const [intensitySeries, stepsSeries, sittingMinutes, stoodHours, hourlyBreakdown, sessions] = await Promise.all([
+    api(`/today/series/raw_intensity?date=${anchorDate}`),
+    api(`/today/series/steps?date=${anchorDate}`),
+    api(`/activity/sitting-minutes?date=${anchorDate}`),
+    api(`/activity/stood-hours?date=${anchorDate}`),
+    api(`/activity/hourly-breakdown?date=${anchorDate}`),
+    api(`/activity/sessions?date=${anchorDate}`),
+  ]);
+
+  const intensityDevices = Object.keys(intensitySeries);
+  const stepsDevices = Object.keys(stepsSeries);
+  const hourlyDevices = Object.keys(hourlyBreakdown);
+
+  // The two quick stat cards use whichever device reported anything
+  // today - this app is realistically single-device right now (the
+  // ring has been unbound, see FIELD_RESEARCH.md), so picking the
+  // first reporting device rather than trying to merge multiple
+  // devices' minutes into one combined number.
+  const statsDevice = intensityDevices[0] || stepsDevices[0];
+  const sittingVal = statsDevice ? (sittingMinutes[statsDevice] ?? 0) : null;
+  const stoodVal = statsDevice ? (stoodHours[statsDevice] ?? 0) : null;
+
+  content.innerHTML = renderPeriodButtons("day", null) + renderDateNav("day", anchorDate) + `
+    <p class="today-section-label">Activity</p>
+    <div class="detail-chart-card">
+      <canvas id="activity-intensity-chart"></canvas>
+    </div>
+    ${renderTierLegend(INTENSITY_BANDS, "")}
+
+    <p class="today-section-label">Steps</p>
+    <div class="detail-chart-card">
+      <canvas id="activity-steps-chart"></canvas>
+    </div>
+
+    <div class="activity-stats-row">
+      <div class="activity-stat-item">
+        <span class="activity-stat-label">Sitting Time</span>
+        <span class="activity-stat-value">${sittingVal === null ? "\u2013" : formatMinutes(sittingVal)}</span>
+      </div>
+      <div class="activity-stat-item">
+        <span class="activity-stat-label">Hours Stood</span>
+        <span class="activity-stat-value">${stoodVal === null ? "\u2013" : stoodVal}</span>
+      </div>
+    </div>
+
+    <p class="today-section-label">Sitting vs Standing</p>
+    <div class="detail-chart-card">
+      <canvas id="activity-hourly-chart"></canvas>
+    </div>
+
+    ${renderSessionLists(sessions)}
+  `;
+
+  wireActivityControls("day", anchorDate);
+  wireSessionList(content, anchorDate);
+
+  if (intensityDevices.length > 0) {
+    registerActiveChart(buildTieredBarChart(
+      document.getElementById("activity-intensity-chart"), intensitySeries, intensityDevices,
+      { bands: INTENSITY_BANDS, yMax: 255, unit: "", decimals: 0 }
+    ));
+  } else {
+    replaceWithEmptyState("activity-intensity-chart", "No data for this day");
+  }
+
+  if (stepsDevices.length > 0) {
+    registerActiveChart(buildTieredBarChart(
+      document.getElementById("activity-steps-chart"), stepsSeries, stepsDevices,
+      { bands: STEPS_FLAT_BAND, yMax: null, unit: "", decimals: 0 }
+    ));
+  } else {
+    replaceWithEmptyState("activity-steps-chart", "No data for this day");
+  }
+
+  if (hourlyDevices.length > 0) {
+    registerActiveChart(buildStackedMinutesChart(
+      document.getElementById("activity-hourly-chart"), hourlyBreakdown, hourlyDevices,
+      { labelFormat: "hour" }
+    ));
+  } else {
+    replaceWithEmptyState("activity-hourly-chart", "No data for this day");
+  }
+}
+
+async function renderActivityRange(period, anchorDate) {
+  const content = document.getElementById("detail-content");
+
+  const [stepsSeries, timeRangeSeries] = await Promise.all([
+    api(`/vitals/range/steps?period=${period}&end_date=${anchorDate}`),
+    api(`/activity/time-range?period=${period}&end_date=${anchorDate}`),
+  ]);
+
+  const stepsDevices = Object.keys(stepsSeries);
+  const timeRangeDevices = Object.keys(timeRangeSeries);
+  const labelFormat = period === "year" ? "month" : "date";
+
+  content.innerHTML = renderPeriodButtons(period, null) + renderDateNav(period, anchorDate) + `
+    <p class="today-section-label">Steps</p>
+    <div class="detail-chart-card">
+      <canvas id="activity-range-steps-chart"></canvas>
+    </div>
+
+    <p class="today-section-label">Total Activity Time</p>
+    <div class="detail-chart-card">
+      <canvas id="activity-range-time-chart"></canvas>
+    </div>
+
+    <p class="today-section-label">Sitting vs Standing</p>
+    <div class="detail-chart-card">
+      <canvas id="activity-range-stacked-chart"></canvas>
+    </div>
+  `;
+
+  wireActivityControls(period, anchorDate);
+
+  if (stepsDevices.length > 0) {
+    registerActiveChart(buildRangeBarChart(
+      document.getElementById("activity-range-steps-chart"), stepsSeries, stepsDevices, period, {}, undefined, 0
+    ));
+  } else {
+    replaceWithEmptyState("activity-range-steps-chart", "No data for this period");
+  }
+
+  if (timeRangeDevices.length > 0) {
+    registerActiveChart(buildActivityTimeChart(
+      document.getElementById("activity-range-time-chart"), timeRangeSeries, timeRangeDevices, { labelFormat }
+    ));
+    registerActiveChart(buildStackedMinutesChart(
+      document.getElementById("activity-range-stacked-chart"), timeRangeSeries, timeRangeDevices, { labelFormat }
+    ));
+  } else {
+    replaceWithEmptyState("activity-range-time-chart", "No data for this period");
+    replaceWithEmptyState("activity-range-stacked-chart", "No data for this period");
+  }
+}

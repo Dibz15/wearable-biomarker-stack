@@ -1,7 +1,8 @@
 import json
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -17,7 +18,9 @@ from app.config import (
     PORT,
     SESSION_COOKIE_SECURE,
     SESSION_MAX_AGE_DAYS,
+    SLEEP_DURATION_GOAL_SECONDS,
     SYNC_INTERVAL_MINUTES,
+    TZ_NAME,
 )
 from app.ics_sync import classify_event, sync_all_calendars
 from app.influx import (
@@ -28,9 +31,41 @@ from app.influx import (
     find_manual_events_in_range,
     find_sleep_entries_in_range,
     find_sleep_entry_by_id,
+    find_sleep_entry_for_wake_date,
+    get_activity_time_range_series,
+    get_baseline_comparison,
+    get_combined_activity_sessions,
+    get_workout_summary_detail,
+    get_workout_detail_series,
+    get_workout_laps,
+    get_workout_raw_intensity,
+    get_hourly_activity_breakdown,
+    get_manual_readings,
+    get_nightly_baseline_comparison,
+    get_nightly_differential_series,
+    get_period_range_series,
+    get_rolling_mean_series,
+    get_sitting_minutes,
+    get_sleep_hypnogram_for_night,
+    get_sleep_overview_for_night,
+    get_sleep_stage_breakdown,
+    get_sleep_stage_trend,
+    get_sleep_timing_trend,
+    get_sleep_journal_rollup,
+    get_naps_for_date,
+    get_nap_trend,
+    get_sleep_regularity_index,
+    get_sleep_vitals_series,
+    get_sleep_vitals_trend,
+    get_stood_hours,
+    get_today_series,
+    get_today_steps,
+    get_today_vitals,
     list_distinct_sensor_users,
+    local_today_bounds,
     manual_event_id,
     write_event_points,
+    write_sleep_entry_for_wake_date,
     write_sleep_point,
 )
 from app.reprocess import compute_reclassification_diff
@@ -98,11 +133,13 @@ class CalendarEventTagsIn(BaseModel):
 class SleepIn(BaseModel):
     score: int  # 1-5
     qualifiers: dict[str, bool] = {}
+    pre_sleep_factors: dict[str, bool] = {}
 
 
 class SleepUpdateIn(BaseModel):
     score: int  # 1-5
     qualifiers: dict[str, bool] = {}
+    pre_sleep_factors: dict[str, bool] = {}
 
 
 class CalendarIn(BaseModel):
@@ -400,46 +437,517 @@ def get_timeline(start: str | None = None, end: str | None = None, current_user:
     return entries
 
 
+# --- today dashboard ---
+
+@app.get("/today")
+def get_today(date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Read-only summary for the "Today" tab: vitals (per device, for
+    whichever fields reported anything that day), that day's step
+    total, and the most recently completed sleep session as of that
+    day (duration + stage breakdown) if a qualifying one exists.
+
+    `date` (YYYY-MM-DD) is optional and defaults to today - the Today
+    tab's own date navigation (prev/next/date-picker, mirroring the
+    detail views) uses this to show a past day's summary instead.
+
+    Deliberately a single combined endpoint rather than one call per
+    card - the frontend renders this as one dashboard, so one round
+    trip on tab load is simpler than several racing fetches, and the
+    underlying InfluxDB queries are already independent/parallelizable
+    work happening server-side regardless of how many HTTP calls the
+    client makes.
+    '''
+    username = current_user["username"]
+    parsed_date = _parse_optional_date(date)
+
+    vitals = get_today_vitals(username, for_date=parsed_date)
+    steps = get_today_steps(username, for_date=parsed_date)
+
+    # Always bounded at the END of the requested day (midnight going
+    # into the next one), rather than only doing this for a past date
+    # and leaving today's own case as an open-ended "now" - the two are
+    # provably equivalent for today specifically (there's no future
+    # sleep data to find either way), so one code path handles both
+    # rather than branching on whether a date was given.
+    _, before = local_today_bounds(parsed_date)
+
+    sleep = None
+    session = find_last_completed_sleep_session(username, before=before)
+    if session is not None:
+        stages = get_sleep_stage_breakdown(
+            username,
+            session["start_time"],
+            session["start_time"] + timedelta(seconds=session["duration_s"]),
+            device=session.get("device"),
+        )
+        sleep = {
+            "sleep_date": session["sleep_date"],
+            "start_time": session["start_time"].isoformat(),
+            "duration_s": session["duration_s"],
+            "stages_min": stages,
+        }
+
+    return {
+        "vitals": vitals,
+        "steps": steps,
+        "sleep": sleep,
+    }
+
+
+# Only these fields are ever valid to chart - a fixed allowlist rather
+# than passing the path parameter straight into the Flux query, since
+# `field` reaches the query string directly (see get_today_series())
+# and this is a user-influenceable URL segment.
+TODAY_SERIES_FIELDS = {
+    "heart_rate", "hrv", "stress", "spo2", "temperature", "resting_heart_rate",
+    # Added for the Activity page: raw_intensity (day-view raw activity
+    # chart only - no week/month/year raw-intensity view exists, so its
+    # presence on the shared /vitals/range, /vitals/rolling-mean, and
+    # /vitals/baseline endpoints is unused surface area, not a problem -
+    # same shared-allowlist tradeoff resting_heart_rate already makes)
+    # and steps (used by BOTH /today/series/steps for the day chart AND
+    # /vitals/range/steps for the Week/Month/Year chart - this one is
+    # actually exercised on more than one of the four endpoints).
+    "raw_intensity", "steps",
+}
+
+# Same allowlist reasoning as above - `period` also reaches Flux
+# (as an aggregateWindow() duration), so it's validated against a fixed
+# mapping rather than accepted as an arbitrary string.
+RANGE_PERIODS = {
+    # "day" buckets a single day hourly, rather than the raw per-point
+    # series /today/series returns - for a field like spo2 that's only
+    # sampled when the wearer is still (see get_period_range_series's
+    # own callers), a continuous line would either draw misleading
+    # straight segments across long gaps or just show scattered dots;
+    # hourly bars (matching Zepp's own SpO2 day view) leave an hour
+    # with no reading as a simple gap in the bars instead. Not every
+    # chart uses this for its day view - see DETAIL_VIEWS' per-chart
+    # dayViewStyle flag on the frontend.
+    "day": {"days": 1, "window": "1h"},
+    "week": {"days": 7, "window": "1d"},
+    "month": {"days": 30, "window": "1d"},
+    "year": {"days": 365, "window": "1mo"},
+}
+
+
+def _parse_optional_date(date_str: str | None) -> date | None:
+    ''' Shared YYYY-MM-DD parsing for the three detail-view endpoints'
+    optional navigation date - None in means None out (defaults to
+    today, same as before navigation existed), a malformed string is a
+    400, never silently ignored or guessed at.
+    '''
+    if date_str is None:
+        return None
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(400, f"invalid date: {date_str!r} (expected YYYY-MM-DD)")
+
+
+@app.get("/today/series/{field}")
+def get_today_series_endpoint(field: str, date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Raw per-point time series for one field, for one day (today by
+    default, or `date` for the detail-view's day-navigation) - what a
+    detail view's chart plots, as distinct from /today's reduced
+    summary stats. One entry per device that reported anything.
+    '''
+    if field not in TODAY_SERIES_FIELDS:
+        raise HTTPException(400, f"unsupported field: {field!r}")
+    return get_today_series(field, current_user["username"], _parse_optional_date(date))
+
+
+def _add_months(d: date, months: int) -> date:
+    ''' Add (or, for a negative `months`, subtract) whole calendar
+    months to a date - only ever called here with day=1 dates, so day-
+    clamping for shorter target months never actually matters, but the
+    arithmetic is written generally regardless.
+    '''
+    month_index = d.month - 1 + months
+    year = d.year + month_index // 12
+    month = month_index % 12 + 1
+    return date(year, month, 1)
+
+
+@app.get("/vitals/range/{field}")
+def get_vitals_range(field: str, period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Per-device min/max/median range bars for one field, for the
+    W/M/Y tabs on a detail view - one entry per day (week/month) or
+    per month (year), as opposed to /today/series's raw per-point
+    series that only makes sense zoomed into a single day. The window
+    ends on `end_date` (today by default) - the detail-view's
+    back/forward navigation shifts this by a whole period at a time.
+    '''
+    if field not in TODAY_SERIES_FIELDS:
+        raise HTTPException(400, f"unsupported field: {field!r}")
+    if period not in RANGE_PERIODS:
+        raise HTTPException(400, f"unsupported period: {period!r} (must be one of {sorted(RANGE_PERIODS)})")
+
+    spec = RANGE_PERIODS[period]
+    start, end = _period_bounds(period, end_date)
+    return get_period_range_series(field, current_user["username"], start, end, spec["window"])
+
+
+@app.get("/vitals/rolling-mean/{field}")
+def get_vitals_rolling_mean(field: str, period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' 7-day rolling mean overlay line for the W/M range-bar charts -
+    see get_rolling_mean_series() for why this only applies to
+    daily-bucketed periods. Year (monthly-bucketed) isn't supported
+    here - a "7-day" mean doesn't map onto monthly bars, so the
+    frontend simply doesn't request this overlay for that period.
+    '''
+    if field not in TODAY_SERIES_FIELDS:
+        raise HTTPException(400, f"unsupported field: {field!r}")
+    if period not in ("week", "month"):
+        raise HTTPException(400, f"unsupported period for a rolling mean: {period!r} (must be 'week' or 'month')")
+
+    start, end = _period_bounds(period, end_date)
+    return get_rolling_mean_series(field, current_user["username"], start, end, window_days=7)
+
+
+def _period_bounds(period: str, end_date: str | None) -> tuple[datetime, datetime]:
+    ''' [start, end) for a W/M/Y period ending on `end_date` (today by
+    default) - shared by /vitals/range and /vitals/rolling-mean so the
+    window-boundary logic (including the year period's calendar-month
+    alignment - see the comment on that branch) exists in exactly one
+    place.
+    '''
+    parsed_end_date = _parse_optional_date(end_date)
+
+    if period == "year":
+        # Deliberately NOT a rolling 365-day window here, unlike week/
+        # month below - Flux's aggregateWindow(every: 1mo) buckets
+        # align to real calendar-month boundaries (confirmed via
+        # InfluxDB's own docs), not fixed 30-day chunks. A rolling
+        # 365-day range spans 12 months plus a few extra days, so it
+        # wraps into a 13th, PARTIAL month-aligned bucket at each end -
+        # and since 365 days is close to but not exactly 12 months,
+        # those two partial buckets often land in the SAME calendar
+        # month (e.g. a few days of "this September" and a few days of
+        # "last September"), rendering as an apparently duplicate
+        # month with no way to tell them apart. Anchoring to exactly
+        # 12 full calendar months instead - from the start of the
+        # month 11 months before the anchor month through the start of
+        # the month AFTER the anchor month - always produces exactly
+        # 12 distinct (month, year) buckets, no wraparound duplicate.
+        anchor = parsed_end_date or datetime.now(ZoneInfo(TZ_NAME)).date()
+        anchor_month_start = anchor.replace(day=1)
+        start, _ = local_today_bounds(_add_months(anchor_month_start, -11))
+        end, _ = local_today_bounds(_add_months(anchor_month_start, 1))
+    else:
+        spec = RANGE_PERIODS[period]
+        end, _ = local_today_bounds(parsed_end_date)
+        end = end + timedelta(days=1)  # include all of end_date (or today)
+        start = end - timedelta(days=spec["days"])
+        # Known narrow limitation, not fixed here: "day" period's 1h
+        # aggregateWindow buckets align to whole-hour boundaries in
+        # absolute (epoch) time, not necessarily to this local
+        # timezone's own hour marks. For any TZ_NAME with a whole-hour
+        # UTC offset (true for most real timezones, including all of
+        # the US and most of Europe/East Asia) this makes no
+        # difference; for a fractional-hour offset (e.g. India's
+        # UTC+5:30) bucket boundaries would sit ~30-45 minutes off from
+        # this local timezone's actual hour marks. Not addressed here
+        # since it's unconfirmed to affect this deployment and no
+        # smaller than the effort already spent getting the far more
+        # consequential timeSrc/month-alignment bugs right - flagged
+        # plainly instead of silently ignored.
+
+    return start, end
+
+
+BASELINE_ALLOWED_DAYS = {7, 14}
+
+
+# Same night-anchored baseline as HRV, for the same reason: "today's
+# SpO2"/"today's temperature" conventionally means last night's
+# reading, and the overnight value is the one actually worth tracking
+# drift on (a daytime SpO2 reading only happens when the wearer is
+# already still, so it's sparse and less representative than the
+# night's readings anyway; daytime temperature swings with activity,
+# meals, and environment enough that only the overnight reading is a
+# stable enough baseline to be worth comparing against).
+NIGHTLY_BASELINE_FIELDS = {"hrv", "spo2", "temperature"}
+
+
+@app.get("/vitals/baseline/{field}")
+def get_vitals_baseline(field: str, days: int = 7, date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' One day's value (today by default, or `date` for the
+    detail-view's day-navigation) vs. a trailing baseline (mean +
+    stddev of the `days` days before that day) for one field, per
+    device - what powers the comparison bar. Devices without enough
+    history yet are simply absent from the response (not an error) -
+    the caller should render that as an "insufficient data" state.
+
+    HRV uses a night-anchored baseline (get_nightly_baseline_comparison) -
+    "today's HRV" conventionally means last night's mean, not a
+    calendar-day average, and that's the field-specific fact that
+    decides which comparison function applies, not something the
+    caller needs to specify.
+    '''
+    if field not in TODAY_SERIES_FIELDS:
+        raise HTTPException(400, f"unsupported field: {field!r}")
+    if days not in BASELINE_ALLOWED_DAYS:
+        raise HTTPException(400, f"unsupported days: {days!r} (must be one of {sorted(BASELINE_ALLOWED_DAYS)})")
+    parsed_date = _parse_optional_date(date)
+    if field in NIGHTLY_BASELINE_FIELDS:
+        return get_nightly_baseline_comparison(field, current_user["username"], baseline_days=days, for_date=parsed_date)
+    return get_baseline_comparison(field, current_user["username"], baseline_days=days, for_date=parsed_date)
+
+
+@app.get("/vitals/differential/{field}")
+def get_vitals_differential(field: str, period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Per-night delta from a trailing 7-night baseline, across a week
+    or month - the TREND chart for a night-anchored field (temperature
+    so far), as opposed to /vitals/baseline's single today-vs-baseline
+    comparison. Day isn't offered here on purpose - that's exactly the
+    single-point comparison /vitals/baseline already gives, not a
+    series.
+
+    Only offered for fields that actually have a nightly-baseline
+    concept in the first place (NIGHTLY_BASELINE_FIELDS) - a plain
+    calendar-day field like resting_heart_rate has no per-night value
+    this would even be a delta FROM.
+    '''
+    if field not in NIGHTLY_BASELINE_FIELDS:
+        raise HTTPException(400, f"unsupported field for a nightly differential: {field!r}")
+    if period not in ("week", "month"):
+        raise HTTPException(400, f"unsupported period: {period!r} (must be 'week' or 'month')")
+
+    spec = RANGE_PERIODS[period]
+    anchor = _parse_optional_date(end_date) or datetime.now(ZoneInfo(TZ_NAME)).date()
+    end_date_obj = anchor + timedelta(days=1)  # exclusive - include all of the anchor day
+    start_date_obj = end_date_obj - timedelta(days=spec["days"])
+
+    return get_nightly_differential_series(field, current_user["username"], start_date_obj, end_date_obj, baseline_days=7)
+
+
+# Fields confirmed to carry a `{field}_type_num` tag distinguishing
+# manual from automatic readings (0=manual, 1=automatic - confirmed
+# for BOTH fields independently via a deliberate cross-check, not
+# assumed to carry over from one to the other; see
+# parser/activefit/FIELD_RESEARCH.md). Enforced here rather than
+# trusting the path parameter, same reasoning as every other allowlist
+# in this file - an unsupported field would otherwise just silently
+# return no rows (the tag filter never matches), a far less obvious
+# failure than a 400.
+MANUAL_TYPE_NUM_FIELDS = {"stress", "spo2"}
+
+
+@app.get("/vitals/manual-readings/{field}")
+def get_vitals_manual_readings(field: str, period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Manually-triggered readings only, for one field, over a D/W/M/Y
+    period - Zepp's own Stress page "Manual Data" list for the Day
+    view; used as just a count (not the full list) for Week/Month/Year's
+    "Single Stress Measurement: N time(s)" style extra stat.
+    '''
+    if field not in MANUAL_TYPE_NUM_FIELDS:
+        raise HTTPException(400, f"unsupported field for manual-reading filtering: {field!r}")
+    if period not in RANGE_PERIODS:
+        raise HTTPException(400, f"unsupported period: {period!r} (must be one of {sorted(RANGE_PERIODS)})")
+
+    start, end = _period_bounds(period, end_date)
+    return get_manual_readings(field, current_user["username"], start, end)
+
+
+# --- activity page ---
+
+@app.get("/activity/sessions")
+def get_activity_sessions_endpoint(date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Combined activity session list for one day (both automatic
+    sessions derived from raw per-minute data, and pre-computed
+    workout entries from BASE_ACTIVITY_SUMMARY) - the Activity page's
+    session list. `date` defaults to today, same convention as /today.
+    '''
+    parsed_date = _parse_optional_date(date)
+    return get_combined_activity_sessions(current_user["username"], for_date=parsed_date)
+
+
+@app.get("/activity/workout/{start_ms}")
+def get_workout_detail_endpoint(start_ms: int, current_user: dict = Depends(get_current_user)):
+    ''' Full detail for ONE specific precomputed workout (a
+    BASE_ACTIVITY_SUMMARY entry, i.e. a "source": "precomputed" row
+    from /activity/sessions - NOT a "derived" one, which has no
+    corresponding summary point to look up at all) - the Workout
+    Detail page's own entry point. `start_ms` is that entry's own
+    start time in epoch milliseconds - see get_workout_summary_detail's
+    own docstring for exactly how that identifies the right point.
+
+    404s if no matching workout exists at all (a stale/bad start_ms),
+    rather than returning an empty-but-200 body a frontend might
+    render as a blank page without explanation.
+    '''
+    detail = get_workout_summary_detail(current_user["username"], start_ms)
+    if detail is None:
+        raise HTTPException(404, f"no workout found for start_ms={start_ms}")
+    return detail
+
+
+@app.get("/activity/workout/{start_ms}/samples")
+def get_workout_samples_endpoint(start_ms: int, current_user: dict = Depends(get_current_user)):
+    ''' Every per-sample field the Workout Detail page's own charts
+    need (HR, cadence, distance, altitude, speed, GPS position, step
+    length) for one specific workout, fetched in a SINGLE call rather
+    than one request per chart - see get_workout_detail_series's own
+    docstring for the full reasoning on what this data is and when
+    it's genuinely absent. Returns an empty list (not a 404) when no
+    FIT/GPX export exists for this workout - a real, expected, already-
+    documented case, not an error; the page should just skip whichever
+    charts have nothing to show, not treat this as missing data the
+    way a 404 on the summary endpoint above would be.
+    '''
+    fields = ["hr", "cadence_rpm", "distance_m", "altitude_m", "speed_mps",
+              "latitude", "longitude", "step_length_mm"]
+    return get_workout_detail_series(current_user["username"], start_ms, fields)
+
+
+@app.get("/activity/workout/{start_ms}/laps")
+def get_workout_laps_endpoint(start_ms: int, current_user: dict = Depends(get_current_user)):
+    ''' Per-lap summaries for one specific workout, for the Workout
+    Detail page's own Lap Details table - see get_workout_laps's own
+    docstring. Returns an empty list (not a 404) when the workout's own
+    export has no lap data at all - either a GPX-sourced workout (no
+    lap concept in GPX at all) or, less commonly, a FIT export that
+    genuinely recorded none.
+    '''
+    return get_workout_laps(current_user["username"], start_ms)
+
+
+@app.get("/activity/workout/{start_ms}/raw-intensity")
+def get_workout_raw_intensity_endpoint(start_ms: int, current_user: dict = Depends(get_current_user)):
+    ''' raw_intensity readings scoped to one specific workout's own
+    real start/duration - see get_workout_raw_intensity's own
+    docstring for how this differs from the GPX/FIT-tag-correlated
+    /samples endpoint above (this is the watch's own always-on
+    background stream, not workout-specific data, so it's scoped by
+    real time window instead of a shared tag). Returns {} (not a 404)
+    when the workout itself can't be found or has no duration -
+    treated as "no intensity data", not a separate error case.
+    '''
+    return get_workout_raw_intensity(current_user["username"], start_ms)
+
+
+@app.get("/activity/sitting-minutes")
+def get_sitting_minutes_endpoint(date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Cumulative "sitting" minutes per device for one day (low-
+    intensity minutes, excluding sleep/not-worn/charging - see
+    get_sitting_minutes's own docstring for the full reasoning).
+    `date` defaults to today, same convention as /today.
+    '''
+    parsed_date = _parse_optional_date(date)
+    return get_sitting_minutes(current_user["username"], for_date=parsed_date)
+
+
+@app.get("/activity/stood-hours")
+def get_stood_hours_endpoint(date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Count of hours today where activity intensity crossed the
+    confirmed Stand threshold at some point, per device - see
+    get_stood_hours's own docstring for the full reasoning (including
+    why this buckets by local hour, not UTC). `date` defaults to
+    today, same convention as /today.
+    '''
+    parsed_date = _parse_optional_date(date)
+    return get_stood_hours(current_user["username"], for_date=parsed_date)
+
+
+@app.get("/activity/hourly-breakdown")
+def get_hourly_activity_breakdown_endpoint(date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Per-hour sitting/active/excluded minute breakdown for one day,
+    per device - the Activity page's day-view sitting-vs-standing
+    chart. See get_hourly_activity_breakdown's own docstring. `date`
+    defaults to today, same convention as /today.
+    '''
+    parsed_date = _parse_optional_date(date)
+    return get_hourly_activity_breakdown(current_user["username"], for_date=parsed_date)
+
+
+@app.get("/activity/time-range")
+def get_activity_time_range_endpoint(period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Per-day (week/month) or per-month (year) sitting/active minute
+    sums - the Activity page's Week/Month/Year "total activity time"
+    chart (active_minutes alone) and "sitting vs standing" stacked bar
+    chart (both fields), which share this same endpoint rather than
+    each needing their own. Day isn't offered here - that's exactly
+    the single-day sitting/active breakdown /activity/hourly-breakdown
+    already gives, at hourly rather than daily granularity, not a
+    period this endpoint's day/month bucketing would even apply to.
+    '''
+    if period not in ("week", "month", "year"):
+        raise HTTPException(400, f"unsupported period: {period!r} (must be 'week', 'month', or 'year')")
+
+    spec = RANGE_PERIODS[period]
+    start, end = _period_bounds(period, end_date)
+    return get_activity_time_range_series(current_user["username"], start, end, spec["window"])
+
+
 # --- sleep ---
 
 @app.post("/sleep")
-def post_sleep(payload: SleepIn, current_user: dict = Depends(get_current_user)):
+def post_sleep(payload: SleepIn, date: str, current_user: dict = Depends(get_current_user)):
+    ''' Log a subjective sleep journal entry for the night that woke up
+    on `date` - required now that each night has its own dedicated
+    page (Sleep Heart Rate/Duration/etc, all date-nav-driven), rather
+    than always writing against "whatever the most recently completed
+    session happens to be" (the old, pre-per-night-pages behavior,
+    which made it impossible to log/edit anything but the latest
+    night). See write_sleep_entry_for_wake_date()'s own docstring for
+    how the actual session gets resolved from this date.
+    '''
     if not (1 <= payload.score <= 5):
         raise HTTPException(400, "score must be between 1 and 5")
+    parsed_date = _parse_optional_date(date)
+    if parsed_date is None:
+        raise HTTPException(400, "date is required (YYYY-MM-DD)")
 
-    session = find_last_completed_sleep_session(current_user["username"])
-    if session is None:
+    result = write_sleep_entry_for_wake_date(
+        user=current_user["username"],
+        wake_date=parsed_date,
+        score=payload.score,
+        qualifiers=payload.qualifiers,
+        pre_sleep_factors=payload.pre_sleep_factors,
+        submission_ts=datetime.now(timezone.utc),
+    )
+    if result is None:
         raise HTTPException(
             409,
-            "No recent completed sleep session found - try again after your ring syncs "
+            f"No completed sleep session found for {date} - try again after your ring syncs "
             "(a session needs a recorded wake-up time and be long enough to not look like a nap). "
             "If this persists, check that your account username matches the GADGETBRIDGE_USER "
             "value configured for your ring parser instance."
         )
-
-    submission_ts = datetime.now(timezone.utc)
-    entry_id = write_sleep_point(
-        user=current_user["username"],
-        session_start=session["start_time"],
-        sleep_date=session["sleep_date"],
-        score=payload.score,
-        qualifiers=payload.qualifiers,
-        submission_ts=submission_ts,
-    )
     return {
-        "entry_id": entry_id,
-        "sleep_date": session["sleep_date"],
+        "entry_id": result["entry_id"],
+        "sleep_date": result["sleep_date"],
         "score": payload.score,
         "qualifiers": payload.qualifiers,
-        "resolved_session_duration_s": session["duration_s"],
+        "pre_sleep_factors": payload.pre_sleep_factors,
+        "resolved_session_duration_s": result["resolved_session_duration_s"],
     }
+
+
+@app.get("/sleep/entry")
+def get_sleep_entry_for_date(date: str, current_user: dict = Depends(get_current_user)):
+    ''' The subjective sleep journal entry (if any) for the night that
+    woke up on `date` - what each per-night Sleep page's own journal
+    section fetches to decide whether to show the submit form or the
+    existing entry (read-only, with an Edit option). Returns null
+    (not a 404) when nothing has been logged yet for this specific
+    night - a normal, expected state, not an error.
+    '''
+    parsed_date = _parse_optional_date(date)
+    if parsed_date is None:
+        raise HTTPException(400, "date is required (YYYY-MM-DD)")
+    return find_sleep_entry_for_wake_date(current_user["username"], parsed_date)
 
 
 @app.get("/sleep")
 def get_sleep_history(start: str | None = None, end: str | None = None, current_user: dict = Depends(get_current_user)):
-    ''' Read-only history of subjective sleep entries. Powers the
-    "Recent nights" list on the Sleep tab. start/end are ISO date
-    strings; defaults to the last 30 days through tomorrow.
+    ''' Read-only history of subjective sleep entries across a date
+    range. No longer powers a "Recent nights" list on the Sleep tab
+    (each night's own page now shows just its own entry, via
+    /sleep/entry) - kept as a general-purpose range query, e.g. for a
+    future review/export view. start/end are ISO date strings;
+    defaults to the last 30 days through tomorrow.
 
     Sorted by start_time (the session's own real timestamp), not
     sleep_date - multiple entries can share a sleep_date (see
@@ -460,15 +968,15 @@ def get_sleep_history(start: str | None = None, end: str | None = None, current_
 
 @app.patch("/sleep/{entry_id}")
 def patch_sleep(entry_id: str, payload: SleepUpdateIn, current_user: dict = Depends(get_current_user)):
-    ''' Edit an existing sleep entry's score/qualifiers, addressed by
-    its stable entry_id (not sleep_date - multiple entries can share a
-    date, see write_sleep_point's docstring). Relies on
+    ''' Edit an existing sleep entry's score/qualifiers/pre_sleep_factors,
+    addressed by its stable entry_id (not sleep_date - multiple entries
+    can share a date, see write_sleep_point's docstring). Relies on
     write_sleep_point's fixed-per-session timestamp to overwrite
     cleanly - no delete-and-rewrite needed, unlike event tag edits.
-    The caller (frontend) is expected to send every known qualifier
-    explicitly as true/false, not just the ones that are true -
-    InfluxDB only overwrites fields actually included in a write, so
-    an omitted qualifier that was previously true would otherwise
+    The caller (frontend) is expected to send every known qualifier AND
+    pre_sleep_factor explicitly as true/false, not just the ones that
+    are true - InfluxDB only overwrites fields actually included in a
+    write, so an omitted one that was previously true would otherwise
     silently persist instead of being cleared.
     '''
     if not (1 <= payload.score <= 5):
@@ -485,9 +993,16 @@ def patch_sleep(entry_id: str, payload: SleepUpdateIn, current_user: dict = Depe
         sleep_date=existing["sleep_date"],
         score=payload.score,
         qualifiers=payload.qualifiers,
+        pre_sleep_factors=payload.pre_sleep_factors,
         submission_ts=datetime.now(timezone.utc),
     )
-    return {"entry_id": new_entry_id, "sleep_date": existing["sleep_date"], "score": payload.score, "qualifiers": payload.qualifiers}
+    return {
+        "entry_id": new_entry_id,
+        "sleep_date": existing["sleep_date"],
+        "score": payload.score,
+        "qualifiers": payload.qualifiers,
+        "pre_sleep_factors": payload.pre_sleep_factors,
+    }
 
 
 @app.delete("/sleep/{entry_id}")
@@ -500,6 +1015,216 @@ def delete_sleep(entry_id: str, current_user: dict = Depends(get_current_user)):
 
     delete_sleep_entry(username, entry_id)
     return {"ok": True}
+
+
+SLEEP_TREND_PERIODS = {"week", "month", "year"}
+
+
+@app.get("/sleep/overview")
+def get_sleep_overview(date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Everything the Sleep tab's main day-view needs for one specific
+    night - session timing, stage breakdown, wake-event count, and
+    sleep-window HR/respiratory averages, all combined server-side by
+    get_sleep_overview_for_night() rather than requiring several
+    separate frontend fetches.
+
+    `date` names the WAKE date (the night that ended waking up on this
+    calendar day) - defaults to today. Returns null (not a 404) when
+    no sleep session is recorded for that night, the same "absence is
+    normal, not an error" convention /today already uses for its own
+    sleep card.
+    '''
+    wake_date = _parse_optional_date(date) or datetime.now(ZoneInfo(TZ_NAME)).date()
+    overview = get_sleep_overview_for_night(current_user["username"], wake_date)
+    if overview is not None:
+        overview["duration_goal_s"] = SLEEP_DURATION_GOAL_SECONDS
+    return overview
+
+
+@app.get("/sleep/hypnogram")
+def get_sleep_hypnogram(date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' The Sleep tab's hypnogram - the ordered, individual sleep-stage
+    segments for one specific night (NOT /sleep/overview's aggregated
+    stages_min totals), the chronological sequence a real hypnogram
+    visualization needs. Same `date` (wake date) convention as
+    /sleep/overview. Returns an empty list (not an error) when no
+    sleep session is recorded for that night.
+    '''
+    wake_date = _parse_optional_date(date) or datetime.now(ZoneInfo(TZ_NAME)).date()
+    return get_sleep_hypnogram_for_night(current_user["username"], wake_date)
+
+
+@app.get("/sleep/vitals-series/{field}")
+def get_sleep_vitals_series_endpoint(field: str, date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Raw per-point series for heart_rate or sleep_respiratory_rate
+    within one night's actual sleep session window - the full-night
+    chart the Sleep Heart Rate and Sleep Respiratory Rate detail pages
+    plot against a stage-hypnogram background (see UI_DESIGN_NOTES.md).
+    Reuses TODAY_SERIES_FIELDS' existing allowlist rather than a new
+    one - both fields are already valid there.
+    '''
+    if field not in ("heart_rate", "sleep_respiratory_rate"):
+        raise HTTPException(400, f"unsupported field for sleep vitals: {field!r}")
+    wake_date = _parse_optional_date(date) or datetime.now(ZoneInfo(TZ_NAME)).date()
+    return get_sleep_vitals_series(field, current_user["username"], wake_date)
+
+
+@app.get("/sleep/timing-trend")
+def get_sleep_timing_trend_endpoint(period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Per-night start_time/end_time/duration_s across a W/M/Y range -
+    shared by the Sleep Duration detail page's "Last 7 days" bar chart
+    and the Sleep Regularity detail page's bedtime/wake-time scatter
+    charts and weekly averages (see get_sleep_timing_trend()'s own
+    docstring for why one endpoint covers both). "day" deliberately
+    not accepted - a trend across nights doesn't apply to a single
+    night, same reasoning as /activity/time-range rejecting it.
+    '''
+    if period not in SLEEP_TREND_PERIODS:
+        raise HTTPException(400, f"unsupported period: {period!r} (must be one of {sorted(SLEEP_TREND_PERIODS)})")
+    start, end = _period_bounds(period, end_date)
+    return get_sleep_timing_trend(current_user["username"], start.date(), end.date())
+
+
+@app.get("/sleep/regularity-index")
+def get_sleep_regularity_index_endpoint(end_date: str | None = None, days: int = 7, current_user: dict = Depends(get_current_user)):
+    ''' Sleep Regularity Index (SRI) - a real, peer-reviewed metric
+    (Phillips et al. 2017, Scientific Reports 7:3216) for the Sleep
+    Regularity detail page, replacing an attempt to reproduce Zepp's
+    own unpublished 0-100% "regularity" score (see UI_DESIGN_NOTES.md's
+    own note that formula was never published). See
+    get_sleep_regularity_index()'s own docstring for the full
+    definition and citation.
+
+    `days` mirrors the same window the page's other charts already use
+    (7 by default) - the original paper's own recommendation is 7, or a
+    multiple of 7, consecutive days, so this isn't an arbitrary default.
+    Returns null (not a 4xx) when there's insufficient data (fewer than
+    2 usable consecutive-night pairs) - matching how every other
+    "insufficient data" state in this app's sleep/vitals baseline
+    endpoints already behaves, not an error condition.
+    '''
+    parsed_date = _parse_optional_date(end_date)
+    return get_sleep_regularity_index(current_user["username"], end_date=parsed_date, num_days=days)
+
+
+@app.get("/sleep/stage-trend")
+def get_sleep_stage_trend_endpoint(period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Per-night stage-minute breakdown across a W/M/Y range - the
+    Sleep tab's own "vs Last 7 Days" stacked-bar weekly view (see
+    UI_DESIGN_NOTES.md). Same period restriction as /sleep/timing-trend
+    and for the same reason.
+    '''
+    if period not in SLEEP_TREND_PERIODS:
+        raise HTTPException(400, f"unsupported period: {period!r} (must be one of {sorted(SLEEP_TREND_PERIODS)})")
+    start, end = _period_bounds(period, end_date)
+    return get_sleep_stage_trend(current_user["username"], start.date(), end.date())
+
+
+@app.get("/sleep/journal-rollup")
+def get_sleep_journal_rollup_endpoint(period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Subjective sleep journal entries aggregated into per-tag
+    frequency counts across a W/M/Y range - the "Time Asleep
+    (advanced)" page's own weekly Bedtime Journal / Wake-up Mood
+    rollup cards (see get_sleep_journal_rollup's own docstring for the
+    full field-by-field mapping). Same period restriction as
+    /sleep/timing-trend and /sleep/stage-trend - unlike those two,
+    this ISN'T at risk of an unusable "365 raw bars" problem for a
+    year (it aggregates into a short list of tags, not one point per
+    night), so year is included here even though it's deliberately
+    left out of the Sleep Duration page's own period selector for a
+    different reason.
+    '''
+    if period not in SLEEP_TREND_PERIODS:
+        raise HTTPException(400, f"unsupported period: {period!r} (must be one of {sorted(SLEEP_TREND_PERIODS)})")
+    start, end = _period_bounds(period, end_date)
+    return get_sleep_journal_rollup(current_user["username"], start.date(), end.date())
+
+
+@app.get("/sleep/naps")
+def get_naps_endpoint(date: str, current_user: dict = Depends(get_current_user)):
+    ''' Every nap for one specific calendar day - see
+    get_naps_for_date's own docstring for the full confirmed byte
+    layout this is decoded from. Returns an empty list (not a 404)
+    when there were none that day - a normal, expected state (most
+    days have zero naps), not an error.
+    '''
+    parsed_date = _parse_optional_date(date)
+    if parsed_date is None:
+        raise HTTPException(400, "date is required (YYYY-MM-DD)")
+    naps = get_naps_for_date(current_user["username"], parsed_date)
+    return [
+        {
+            "device": n["device"],
+            "start_time": n["start_time"].isoformat(),
+            "end_time": n["end_time"].isoformat(),
+            "duration_s": n["duration_s"],
+        }
+        for n in naps
+    ]
+
+
+@app.get("/sleep/nap-trend")
+def get_nap_trend_endpoint(period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Total nap minutes per calendar day across a W/M range - the
+    Sleep Reports page's own weekly/monthly composition chart, adding
+    naps as their own distinct stacked-bar category alongside Deep/
+    Light/REM/Awake (see get_nap_trend's own docstring). Same period
+    restriction as /sleep/stage-trend and for the same reason (this
+    page's own week/month-only selector) - unlike that endpoint,
+    "year" isn't offered here at all rather than allowed-but-unused,
+    since nap totals have no standalone use outside this one chart.
+    '''
+    if period not in {"week", "month"}:
+        raise HTTPException(400, f"unsupported period: {period!r} (must be one of ['month', 'week'])")
+    start, end = _period_bounds(period, end_date)
+    return get_nap_trend(current_user["username"], start.date(), end.date())
+
+
+@app.get("/sleep/vitals-trend/{field}")
+def get_sleep_vitals_trend_endpoint(field: str, period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Per-night average heart_rate or sleep_respiratory_rate across a
+    W/M/Y range - the "Last 7 days" trend on the Sleep Heart Rate /
+    Sleep Respiratory Rate detail pages. Same field restriction as
+    /sleep/vitals-series, same period restriction as the other sleep
+    trend endpoints and for the same reason.
+    '''
+    if field not in ("heart_rate", "sleep_respiratory_rate"):
+        raise HTTPException(400, f"unsupported field for sleep vitals: {field!r}")
+    if period not in SLEEP_TREND_PERIODS:
+        raise HTTPException(400, f"unsupported period: {period!r} (must be one of {sorted(SLEEP_TREND_PERIODS)})")
+    start, end = _period_bounds(period, end_date)
+    return get_sleep_vitals_trend(field, current_user["username"], start.date(), end.date())
+
+
+@app.get("/sleep/vitals-baseline/{field}")
+def get_sleep_vitals_baseline_endpoint(field: str, days: int = 7, date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Night-anchored baseline comparison for heart_rate or
+    sleep_respiratory_rate - the "Slower/Lower - Baseline - Faster/
+    Higher" gauge on the Sleep Heart Rate / Sleep Respiratory Rate
+    detail pages.
+
+    Deliberately its OWN endpoint under /sleep/, not routed through
+    the existing /vitals/baseline/{field} (which decides nightly-vs-
+    calendar-day comparison via the global NIGHTLY_BASELINE_FIELDS
+    set) - heart_rate specifically is a field a future GENERAL
+    (non-sleep) Heart Rate detail page would plausibly also want to
+    show, and that page would want a calendar-day baseline (matching
+    resting_heart_rate/hrv's own existing split), not the sleep-
+    specific nightly one. Adding heart_rate to NIGHTLY_BASELINE_FIELDS
+    globally would have silently forced every future caller into the
+    nightly comparison - scoping this here instead avoids that
+    conflict entirely rather than needing to resolve it later.
+
+    get_nightly_baseline_comparison() itself needed no changes - it
+    was already generic on `field`, this is purely about NOT wiring it
+    through the field-to-comparison-type routing that's global.
+    '''
+    if field not in ("heart_rate", "sleep_respiratory_rate"):
+        raise HTTPException(400, f"unsupported field for sleep vitals: {field!r}")
+    if days not in BASELINE_ALLOWED_DAYS:
+        raise HTTPException(400, f"unsupported days: {days!r} (must be one of {sorted(BASELINE_ALLOWED_DAYS)})")
+    parsed_date = _parse_optional_date(date)
+    return get_nightly_baseline_comparison(field, current_user["username"], baseline_days=days, for_date=parsed_date)
 
 
 # --- calendars ---

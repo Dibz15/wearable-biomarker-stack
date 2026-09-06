@@ -58,8 +58,15 @@ services:
     image: influxdb:2.7
     container_name: biomarker-influxdb
     restart: unless-stopped
+    # Runs as PUID:PGID instead of the image's default (usually root or a
+    # fixed image-baked uid) so files written into the bind-mounted
+    # APPDATA_ROOT paths below are owned by a uid/gid you control on the
+    # host, not whatever the image happens to hard-code. Matters because
+    # these are host bind mounts, not Docker-managed named volumes -
+    # ownership is real host filesystem ownership. See env.stack.example.
+    user: "${PUID:-1000}:${PGID:-1000}"
     ports:
-      - "8086:8086"
+      - "${INFLUXDB_HOST_PORT:-8086}:8086"
     environment:
       # First-run setup - only takes effect on an empty data volume.
       # After first boot, manage users/tokens via the InfluxDB UI instead
@@ -135,8 +142,11 @@ services:
     image: grafana/grafana:latest
     container_name: biomarker-grafana
     restart: unless-stopped
+    # See the same note on the influxdb service above - matches ownership
+    # of the bind-mounted grafana/data path to a host-controlled uid/gid.
+    user: "${PUID:-1000}:${PGID:-1000}"
     ports:
-      - "3000:3000"
+      - "${GRAFANA_HOST_PORT:-3000}:3000"
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-changeme_grafana_password}
@@ -179,6 +189,13 @@ services:
     image: binwiederhier/ntfy:latest
     container_name: biomarker-ntfy
     restart: unless-stopped
+    # See the same note on the influxdb service above - matches ownership
+    # of the bind-mounted ntfy/cache and ntfy/lib paths to a
+    # host-controlled uid/gid. Because of this, NTFY_LISTEN_HTTP below is
+    # set to an unprivileged port (8080, not the image's default 80) -
+    # a non-root user can't bind ports below 1024 on most kernels, so
+    # staying on 80 here would fail to start once PUID/PGID isn't root.
+    user: "${PUID:-1000}:${PGID:-1000}"
     command:
       - serve
     environment:
@@ -187,13 +204,13 @@ services:
       # Keep this reachable only over Tailscale rather than opening it to
       # the wider internet - ntfy has no auth by default on the topic you
       # publish/subscribe to
-      NTFY_LISTEN_HTTP: ":80"
+      NTFY_LISTEN_HTTP: ":8080"
       NTFY_CACHE_FILE: "/var/cache/ntfy/cache.db"
       NTFY_AUTH_FILE: "/var/lib/ntfy/auth.db"
       NTFY_AUTH_DEFAULT_ACCESS: "deny-all"
       NTFY_ENABLE_SIGNUP: "false"
     ports:
-      - "8090:80"
+      - "${NTFY_HOST_PORT:-8090}:8080"
     volumes:
       - ${APPDATA_ROOT:-/DATA/AppData/biomarker-stack}/ntfy/cache:/var/cache/ntfy
       - ${APPDATA_ROOT:-/DATA/AppData/biomarker-stack}/ntfy/lib:/var/lib/ntfy
@@ -205,7 +222,7 @@ services:
           description:
             en_us: "Timezone for notification timestamps"
       ports:
-        - container: "80"
+        - container: "8080"
           description:
             en_us: "ntfy web UI / publish-subscribe API"
       volumes:
@@ -297,13 +314,16 @@ services:
           description:
             en_us: "How often to re-check the Nextcloud export, in seconds"
 
-  # Amazfit Active 3 Premium parser. NOT YET FUNCTIONAL - the HUAMI_*
-  # extraction logic is still an unverified skeleton (see
-  # parser/activefit/README.md), so this service is gated behind the
-  # `activefit` Compose profile and won't start on a plain
-  # `docker compose up`. Once extraction is implemented and verified,
-  # drop the `profiles:` line (or run with `--profile activefit`) to
-  # enable it.
+  # Amazfit Active 3 Premium parser. Best-effort implementation - the
+  # HUAMI_* table/column names are guessed from Gadgetbridge's public
+  # issue tracker, NOT verified against real Active 3 Premium hardware
+  # yet (see parser/activefit/README.md). Safe to run continuously
+  # before the watch is even paired: every query gracefully skips a
+  # missing/mismatched table instead of crashing, so before pairing
+  # this just quietly does nothing every cycle. Once real data starts
+  # flowing in, treat it as a starting point to verify, not as
+  # confirmed-correct - watch the logs and follow the checklist in
+  # that README.
   parser-activefit:
     image: ${PARSER_ACTIVEFIT_IMAGE:-dibz15/amazfit2influx:latest}
     container_name: biomarker-parser-activefit
@@ -314,6 +334,14 @@ services:
       WEBDAV_USER: ${WEBDAV_USER:-your_nextcloud_user}
       WEBDAV_PASS: ${WEBDAV_PASS:-your_nextcloud_app_password}
       EXPORT_FILENAME: ${EXPORT_FILENAME:-Gadgetbridge}
+      # Optional - enables per-sample workout detail (GPS/HR/cadence)
+      # extraction from Gadgetbridge's own "Auto export GPX/FIT
+      # tracks" automations. No default - leave unset (empty) in your
+      # own .env if you haven't set those automations up. NOT
+      # automatically relative to WEBDAV_PATH above, despite the
+      # similar name - see env.stack.example's own note on this
+      # variable for the full explanation and a worked example.
+      EXPORT_TRACKS_PATH: ${EXPORT_TRACKS_PATH:-}
 
       QUERY_DURATION: ${QUERY_DURATION:-86400}
       MAX_CATCHUP_SECONDS: ${MAX_CATCHUP_SECONDS:-2592000}
@@ -344,6 +372,10 @@ services:
     image: ${WEARABLE_EVENTS_IMAGE:-dibz15/wearable-events-ui:latest}
     container_name: biomarker-wearable-events
     restart: unless-stopped
+    # See the same note on the influxdb service above - matches ownership
+    # of the bind-mounted wearable-events path (holds config.db) to a
+    # host-controlled uid/gid.
+    user: "${PUID:-1000}:${PGID:-1000}"
     environment:
       SQLITE_PATH: /data/config.db
       TZ: ${TZ:-UTC}
@@ -369,7 +401,7 @@ services:
     volumes:
       - ${APPDATA_ROOT:-/DATA/AppData/biomarker-stack}/wearable-events:/data
     ports:
-      - "8081:8080"
+      - "${WEARABLE_EVENTS_HOST_PORT:-8081}:8080"
     networks:
       - biomarker-net
     depends_on:
