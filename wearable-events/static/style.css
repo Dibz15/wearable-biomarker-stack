@@ -105,6 +105,20 @@ main {
   height: 22px;
 }
 
+.detail-home-btn {
+  background: none;
+  border: none;
+  color: var(--text);
+  padding: 0.25rem;
+  display: flex;
+  margin-left: auto;
+}
+
+.detail-home-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
 #detail-title {
   font-weight: 700;
   font-size: 1.05rem;

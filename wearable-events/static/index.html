@@ -33,13 +33,19 @@
 <!-- Full-screen drill-down view for a single metric (Heart Rate, HRV,
      etc.) - opened by tapping a card on the Today tab, never a tab of
      its own. Reused across every detail view; #detail-content is
-     replaced per-view. Hidden by default. -->
+     replaced per-view. Hidden by default. The header's back button
+     steps back one screen (real browser history); the home button
+     jumps straight to Today regardless of navigation depth - both
+     wired in metric-detail.js. -->
 <div id="detail-screen" style="display:none">
   <header class="detail-header">
     <button id="detail-back-btn" class="detail-back-btn" aria-label="Back">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
     </button>
     <span id="detail-title"></span>
+    <button id="detail-home-btn" class="detail-home-btn" aria-label="Home">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10v9a1 1 0 0 0 1 1h4v-6h3v6h4a1 1 0 0 0 1-1v-9"/></svg>
+    </button>
   </header>
   <div id="detail-content" class="detail-content"></div>
 </div>

@@ -63,6 +63,18 @@ document.getElementById("detail-back-btn").addEventListener("click", () => {
   goBack("/app/today");
 });
 
+document.getElementById("detail-home-btn").addEventListener("click", () => {
+  // Jumps straight to Today regardless of how many screens deep the
+  // current detail view is - e.g. Sleep tab -> Sleep Reports -> a
+  // trend chart's own zoom would otherwise need several presses of
+  // the back button (or the browser's own back) to get all the way
+  // out. A real navigate(), not goBack() - this is a deliberate jump
+  // to a specific destination, not "undo the last step", so it always
+  // adds one new history entry regardless of how deep the stack was,
+  // rather than trying to unwind it.
+  navigate("/app/today");
+});
+
 // Each view can plot more than one field (e.g. Heart Rate's page also
 // shows Resting Heart Rate below it) - each entry in `charts` becomes
 // its own card.
@@ -922,4 +934,3 @@ async function fetchDetailSeries(chart, period, anchorDate) {
   }
   return api(`/vitals/range/${chart.field}?period=${period}&end_date=${anchorDate}`);
 }
-
