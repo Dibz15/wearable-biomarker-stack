@@ -1356,6 +1356,44 @@ main {
   border-radius: 12px;
 }
 
+.workout-gradient-card {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.workout-gradient-chart-wrap {
+  width: 110px;
+  height: 110px;
+  flex-shrink: 0;
+}
+
+.workout-gradient-legend {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.workout-gradient-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.workout-gradient-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.workout-gradient-legend-label {
+  flex: 1;
+  font-weight: 700;
+}
+
 /* --- Sleep tab's objective-data overview --- */
 
 .sleep-hypnogram-card {

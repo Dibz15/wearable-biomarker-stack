@@ -12,7 +12,7 @@
 // documented layout this is working toward).
 import { escapeHtml, api, formatNum } from "./core.js";
 import { openDetailScreen, registerActiveChart, clearActiveCharts } from "./metric-detail.js";
-import { buildLineChart } from "./metric-charts.js";
+import { buildLineChart, buildCategoryPieChart } from "./metric-charts.js";
 
 // The person's own real watch setting (Zepp: Settings -> interval type
 // -> "lactate threshold heart rate zone") - matches
@@ -37,25 +37,51 @@ function formatSecondsAsMinSec(totalSeconds) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-function renderStatsRow(workout) {
-  const items = [
-    ["Duration", workout.active_seconds !== null && workout.active_seconds !== undefined
-      ? formatSecondsAsMinSec(workout.active_seconds) : "\u2013"],
-    ["Calories", workout.calories_kcal !== null && workout.calories_kcal !== undefined
-      ? `${workout.calories_kcal} kcal` : "\u2013"],
-    ["Avg Heart Rate", workout.hr_avg !== null && workout.hr_avg !== undefined
-      ? `${workout.hr_avg} bpm` : "\u2013"],
-    ["Training Load", workout.training_load !== null && workout.training_load !== undefined
-      ? workout.training_load : "\u2013"],
-  ];
+function renderStatsRow(workout, samples) {
+  // max_speed_mps comes from the summary blob's own Pace field - a
+  // GENUINELY SEPARATE data source from the per-sample FIT export
+  // (see parser/activefit/FIELD_RESEARCH.md's own Pace/Speed
+  // solving entry) - it's entirely possible for a workout to have
+  // real per-sample speed data (the chart fills in fine) while the
+  // summary blob itself never recorded a Pace field at all, a real
+  // reported case, not hypothetical. Falls back to the max of the
+  // already-fetched per-sample speed_mps values in that case, same
+  // "derive from samples when no summary field exists" pattern
+  // already used for Stride's own max value.
+  let maxSpeedMps = workout.max_speed_mps;
+  if (maxSpeedMps === null || maxSpeedMps === undefined) {
+    const sampleSpeeds = samples.filter(p => p.speed_mps !== undefined).map(p => p.speed_mps);
+    if (sampleSpeeds.length > 0) maxSpeedMps = Math.max(...sampleSpeeds);
+  }
+  const maxSpeedMph = maxSpeedMps !== null && maxSpeedMps !== undefined
+    ? `${formatNum(maxSpeedMps * MPS_TO_MPH, 1)} mph` : "\u2013";
+  const cell = (label, value) => `
+    <div class="activity-stat-item">
+      <span class="activity-stat-label">${escapeHtml(label)}</span>
+      <span class="activity-stat-value">${escapeHtml(String(value))}</span>
+    </div>
+  `;
+  // Two rows of three, not one row of six - .activity-stats-row's own
+  // CSS has no wrapping behavior (a plain flex row), and this class is
+  // shared with other 2-4 item stat rows elsewhere on this page and
+  // in the app more broadly - changing it to wrap could shift those
+  // other rows' own layout in ways not actually asked for here.
+  // Keeping to the already-proven 3-item width (matching the existing
+  // Heart Rate summary row exactly) avoids touching shared CSS at all.
   return `
     <div class="activity-stats-row">
-      ${items.map(([label, value]) => `
-        <div class="activity-stat-item">
-          <span class="activity-stat-label">${escapeHtml(label)}</span>
-          <span class="activity-stat-value">${escapeHtml(String(value))}</span>
-        </div>
-      `).join("")}
+      ${cell("Duration", workout.active_seconds !== null && workout.active_seconds !== undefined
+        ? formatSecondsAsMinSec(workout.active_seconds) : "\u2013")}
+      ${cell("Calories", workout.calories_kcal !== null && workout.calories_kcal !== undefined
+        ? `${workout.calories_kcal} kcal` : "\u2013")}
+      ${cell("Avg Heart Rate", workout.hr_avg !== null && workout.hr_avg !== undefined
+        ? `${workout.hr_avg} bpm` : "\u2013")}
+    </div>
+    <div class="activity-stats-row">
+      ${cell("Training Load", workout.training_load !== null && workout.training_load !== undefined
+        ? workout.training_load : "\u2013")}
+      ${cell("Max Speed", maxSpeedMph)}
+      ${cell("Steps", workout.steps !== null && workout.steps !== undefined ? workout.steps : "\u2013")}
     </div>
   `;
 }
@@ -217,14 +243,16 @@ function renderLapsTable(laps) {
   `;
 }
 
-// A single reusable chart-card shape for the three per-sample charts
-// below (Elevation/Speed/Cadence) - same "canvas now, filled in or
-// replaced with a message once the actual per-sample fetch resolves"
-// pattern the HR chart already established. Returns "" (renders
-// nothing at all, not an empty-state message) when the field is
-// completely absent from every sample - an indoor workout's own
-// Yoga/Hybrid Training session genuinely has no elevation/speed data
-// at all, and showing an empty "no data" card for something that was
+// A single reusable chart-card shape for chart-only sections (Speed
+// specifically - Elevation/Cadence/Stride below get their own
+// dedicated panels since they also show summary stats above their own
+// chart, a shape this generic version doesn't have). Same "canvas now,
+// filled in or replaced with a message once the actual per-sample
+// fetch resolves" pattern the HR chart already established. Returns
+// "" (renders nothing at all, not an empty-state message) when the
+// field is completely absent from every sample - an indoor workout's
+// own Yoga/Hybrid Training session genuinely has no speed data at
+// all, and showing an empty "no data" card for something that was
 // never going to exist for that activity type would just be noise
 // (unlike HR, which is expected for virtually every workout and so
 // gets its own explanatory placeholder instead of disappearing).
@@ -236,6 +264,164 @@ function renderPerSampleChartCard(canvasId, title, samples, field) {
     <div class="detail-chart-card">
       <canvas id="${canvasId}"></canvas>
     </div>
+  `;
+}
+
+// Elevation: summary-level Avg/Min/Max/Gain stats (from RAW_SUMMARY_DATA
+// - available for any workout with a location field, regardless of
+// whether a per-sample FIT/GPX export exists at all) shown above the
+// per-sample chart (only when that DOES exist). Rendered independently
+// of each other - a workout can have summary altitude stats with no
+// per-sample chart (no export), though not the reverse in practice.
+function renderElevationPanel(workout, samples) {
+  const hasStats = workout.altitude_avg_m !== null && workout.altitude_avg_m !== undefined;
+  const hasChart = samples.some(p => p.altitude_m !== undefined);
+  if (!hasStats && !hasChart) return "";
+
+  const cell = (label, value) => `
+    <div class="activity-stat-item">
+      <span class="activity-stat-label">${escapeHtml(label)}</span>
+      <span class="activity-stat-value">${value !== null && value !== undefined ? `${formatNum(value, 1)} m` : "\u2013"}</span>
+    </div>
+  `;
+  const statsHtml = hasStats ? `
+    <div class="activity-stats-row">
+      ${cell("Avg", workout.altitude_avg_m)}
+      ${cell("Min", workout.altitude_min_m)}
+      ${cell("Max", workout.altitude_max_m)}
+      ${cell("Gain", workout.elevation_gain_m)}
+    </div>
+  ` : "";
+  const chartHtml = hasChart ? `
+    <div class="detail-chart-card">
+      <canvas id="workout-elevation-chart"></canvas>
+    </div>
+  ` : "";
+
+  return `
+    <p class="today-section-label">Elevation</p>
+    ${statsHtml}
+    ${chartHtml}
+  `;
+}
+
+// Cadence: same pattern as Elevation above - summary-level Avg/Max
+// (from RAW_SUMMARY_DATA) shown above the per-sample chart.
+function renderCadencePanel(workout, samples) {
+  const hasStats = workout.avg_cadence_per_min !== null && workout.avg_cadence_per_min !== undefined;
+  const hasChart = samples.some(p => p.cadence_rpm !== undefined);
+  if (!hasStats && !hasChart) return "";
+
+  const cell = (label, value) => `
+    <div class="activity-stat-item">
+      <span class="activity-stat-label">${escapeHtml(label)}</span>
+      <span class="activity-stat-value">${value !== null && value !== undefined ? `${formatNum(value, 0)} spm` : "\u2013"}</span>
+    </div>
+  `;
+  const statsHtml = hasStats ? `
+    <div class="activity-stats-row">
+      ${cell("Avg", workout.avg_cadence_per_min)}
+      ${cell("Max", workout.max_cadence_per_min)}
+    </div>
+  ` : "";
+  const chartHtml = hasChart ? `
+    <div class="detail-chart-card">
+      <canvas id="workout-cadence-chart"></canvas>
+    </div>
+  ` : "";
+
+  return `
+    <p class="today-section-label">Cadence</p>
+    ${statsHtml}
+    ${chartHtml}
+  `;
+}
+
+// Gradient Distribution: a pie chart (Uphill/Flat/Downhill time) fully
+// computed from already-extracted summary fields - no new parser work
+// needed (confirmed directly earlier this session: this exact
+// workout's own ascent_seconds/descent_seconds/active_seconds sum to
+// its own total duration exactly, and match the real Zepp screenshot's
+// own shown 8%/76%/16% breakdown for this workout). Only rendered when
+// BOTH ascent_seconds and descent_seconds are present - an indoor
+// workout with no elevation data at all has nothing to show here.
+const GRADIENT_COLORS = { uphill: "#e88a8a", flat: "#f0c674", downhill: "#6ea8fe" };
+
+function renderGradientDistribution(workout) {
+  const { ascent_seconds, descent_seconds, active_seconds } = workout;
+  if (ascent_seconds === null || ascent_seconds === undefined
+    || descent_seconds === null || descent_seconds === undefined
+    || active_seconds === null || active_seconds === undefined) {
+    return "";
+  }
+  const flatSeconds = Math.max(0, active_seconds - ascent_seconds - descent_seconds);
+  const legendRow = (label, seconds, color) => {
+    const pct = active_seconds > 0 ? Math.round((seconds / active_seconds) * 100) : 0;
+    return `
+      <div class="workout-gradient-legend-row">
+        <span class="workout-gradient-dot" style="background:${color}"></span>
+        <span class="workout-gradient-legend-label">${escapeHtml(label)}</span>
+        <span class="metric-sub">${pct}%</span>
+        <span class="metric-sub">${formatSecondsAsMinSec(seconds)}</span>
+      </div>
+    `;
+  };
+  return `
+    <p class="today-section-label">Gradient Distribution</p>
+    <div class="sleep-summary-card workout-gradient-card">
+      <div class="workout-gradient-chart-wrap">
+        <canvas id="workout-gradient-chart"></canvas>
+      </div>
+      <div class="workout-gradient-legend">
+        ${legendRow("Uphill", ascent_seconds, GRADIENT_COLORS.uphill)}
+        ${legendRow("Flat", flatSeconds, GRADIENT_COLORS.flat)}
+        ${legendRow("Downhill", descent_seconds, GRADIENT_COLORS.downhill)}
+      </div>
+    </div>
+  `;
+}
+
+// Stride: summary-level Avg (avg_stride_cm, the only stride stat
+// RAW_SUMMARY_DATA itself carries) alongside a per-sample-derived Max
+// (RAW_SUMMARY_DATA has no max-stride field at all - computed here
+// directly from the already-fetched per-sample step_length_mm values,
+// no new backend work needed for this specific piece). Both converted
+// to inches, matching Zepp's own real "STRIDE (in)" unit choice seen
+// in an earlier screenshot this session - the same locale-display
+// reasoning already applied to Speed's own mph conversion.
+const CM_TO_INCHES = 1 / 2.54;
+
+function renderStridePanel(workout, samples) {
+  const hasAvg = workout.avg_stride_cm !== null && workout.avg_stride_cm !== undefined;
+  const strideValues = samples.filter(p => p.step_length_mm !== undefined).map(p => p.step_length_mm);
+  const hasChart = strideValues.length > 0;
+  if (!hasAvg && !hasChart) return "";
+
+  const avgInches = hasAvg ? workout.avg_stride_cm * CM_TO_INCHES : null;
+  const maxInches = hasChart ? Math.max(...strideValues) / 10 * CM_TO_INCHES : null; // mm -> cm -> in
+
+  const cell = (label, inches) => `
+    <div class="activity-stat-item">
+      <span class="activity-stat-label">${escapeHtml(label)}</span>
+      <span class="activity-stat-value">${inches !== null ? `${formatNum(inches, 1)} in` : "\u2013"}</span>
+    </div>
+  `;
+  const statsHtml = `
+    <div class="activity-stats-row">
+      ${cell("Avg", avgInches)}
+      ${cell("Max", maxInches)}
+    </div>
+  `;
+  const chartHtml = hasChart ? `
+    <div class="detail-chart-card">
+      <canvas id="workout-stride-chart"></canvas>
+    </div>
+  ` : "";
+
+  return `
+    <p class="today-section-label">Stride</p>
+    ${statsHtml}
+    ${chartHtml}
   `;
 }
 
@@ -295,14 +481,16 @@ export async function openWorkoutDetail(startMs, onBack = null) {
 
   content.innerHTML = `
     <p class="metric-sub" style="margin-bottom: 0.75rem;">${escapeHtml(dateLabel)} \u00b7 ${escapeHtml(workout.device || "")}</p>
-    ${renderStatsRow(workout)}
+    ${renderStatsRow(workout, samples)}
     ${renderHeartRateSummary(workout)}
     ${renderHeartRateZones(workout.hr_zones)}
     ${renderTrainingEffectCard(workout)}
     ${renderGpsMapCard(samples)}
-    ${renderPerSampleChartCard("workout-elevation-chart", "Elevation", samples, "altitude_m")}
+    ${renderElevationPanel(workout, samples)}
+    ${renderGradientDistribution(workout)}
     ${renderPerSampleChartCard("workout-speed-chart", "Speed", samples, "speed_mps")}
-    ${renderPerSampleChartCard("workout-cadence-chart", "Cadence", samples, "cadence_rpm")}
+    ${renderCadencePanel(workout, samples)}
+    ${renderStridePanel(workout, samples)}
     ${renderLapsTable(laps)}
   `;
 
@@ -344,9 +532,26 @@ export async function openWorkoutDetail(startMs, onBack = null) {
   }
 
   renderPerSampleChart("workout-elevation-chart", samples, "altitude_m", workout.device, v => v, "m");
-  renderPerSampleChart("workout-speed-chart", samples, "speed_mps", workout.device, v => v * MPS_TO_MPH, "mph");
-  renderPerSampleChart("workout-cadence-chart", samples, "cadence_rpm", workout.device, v => v, "spm");
+  renderPerSampleChart("workout-speed-chart", samples, "speed_mps", workout.device, v => v * MPS_TO_MPH, "mph", true);
+  renderPerSampleChart("workout-cadence-chart", samples, "cadence_rpm", workout.device, v => v, "spm", true);
+  renderPerSampleChart("workout-stride-chart", samples, "step_length_mm", workout.device, v => v / 10 * CM_TO_INCHES, "in", true);
   renderGpsMap(samples);
+  renderGradientChart(workout);
+}
+
+// Fills in the Gradient Distribution pie chart, if its own card was
+// rendered at all (renderGradientDistribution already decided whether
+// this workout has the ascent/descent/duration data needed for it).
+function renderGradientChart(workout) {
+  const canvas = document.getElementById("workout-gradient-chart");
+  if (!canvas) return;
+  const { ascent_seconds, descent_seconds, active_seconds } = workout;
+  const flatSeconds = Math.max(0, active_seconds - ascent_seconds - descent_seconds);
+  registerActiveChart(buildCategoryPieChart(canvas, [
+    { label: "Uphill", value: ascent_seconds, color: GRADIENT_COLORS.uphill },
+    { label: "Flat", value: flatSeconds, color: GRADIENT_COLORS.flat },
+    { label: "Downhill", value: descent_seconds, color: GRADIENT_COLORS.downhill },
+  ]));
 }
 
 // Fills in one of the three optional per-sample chart canvases -
@@ -356,12 +561,12 @@ export async function openWorkoutDetail(startMs, onBack = null) {
 // canvas doesn't exist at all (renderPerSampleChartCard already
 // decided not to render it, because this field is completely absent
 // for this workout - Yoga has no elevation/speed data, for instance).
-function renderPerSampleChart(canvasId, samples, field, deviceName, convert, unit) {
+function renderPerSampleChart(canvasId, samples, field, deviceName, convert, unit, minZero = false) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
   const points = samples.filter(p => p[field] !== undefined).map(p => ({ t: p.time, v: convert(p[field]) }));
   if (points.length === 0) return;
-  registerActiveChart(buildLineChart(canvas, { [deviceName || "device"]: points }, [deviceName || "device"], 1, unit));
+  registerActiveChart(buildLineChart(canvas, { [deviceName || "device"]: points }, [deviceName || "device"], 1, unit, minZero));
 }
 
 // Renders the real GPS track on a Leaflet map (OpenStreetMap tiles,

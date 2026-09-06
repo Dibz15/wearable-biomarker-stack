@@ -4,7 +4,7 @@ import { isoToDate, formatNum, escapeHtml } from "./core.js";
 // are ever more devices than colors defined here, rather than erroring.
 const DEVICE_CHART_COLORS = ["#e88a8a", "#6ea8fe", "#4fd8b8", "#f0c674"];
 
-export function buildLineChart(canvas, series, devices, decimals, yAxisLabel = null) {
+export function buildLineChart(canvas, series, devices, decimals, yAxisLabel = null, minZero = false) {
   const datasets = devices.map((device, i) => ({
     label: device,
     // Epoch milliseconds, not the raw ISO string - lets Chart.js's
@@ -47,6 +47,27 @@ export function buildLineChart(canvas, series, devices, decimals, yAxisLabel = n
           grid: { color: "#2a2d38" },
         },
         y: {
+          // "grace" pads the auto-computed min/max by this fraction
+          // of the data's own range, so a line doesn't touch the
+          // very top/bottom edge of the chart - a real usability gap
+          // reported directly (every chart's y-axis was tightly
+          // bound to the exact data min/max with zero breathing
+          // room). Chart.js's own built-in option for exactly this,
+          // not a hand-rolled min/max computation.
+          grace: "10%",
+          // grace pads BOTH sides of the range - fine for something
+          // like heart rate or elevation, where values near the
+          // bottom of the chart are still meaningfully "not zero",
+          // but wrong for a genuinely non-negative physical quantity
+          // (speed, cadence, stride) sampled near its own floor - a
+          // real reported bug, since data starting near 0 (e.g. speed
+          // at the start of a walk) got graced into a NEGATIVE axis
+          // minimum, which doesn't mean anything for these charts.
+          // An explicit min here overrides grace's own lower bound
+          // (Chart.js's own documented behavior: explicit min/max
+          // take precedence over any auto-computed value) while
+          // leaving the top of the range still graced normally.
+          min: minZero ? 0 : undefined,
           ticks: {
             color: "#8a8d99",
             callback: (v) => formatNum(v, decimals),
@@ -593,6 +614,44 @@ export function buildTierPieChart(canvas, points, config) {
       animation: false,
       plugins: {
         legend: { display: false }, // the shared band legend beneath already explains the colors
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const pct = Math.round((item.parsed / total) * 100);
+              return `${item.label}: ${pct}%`;
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
+// A pie chart from PRE-COMPUTED category totals (not raw points to
+// bin, unlike buildTierPieChart above) - {label, value, color} per
+// slice. Used for Gradient Distribution (Uphill/Flat/Downhill time),
+// and reusable for any future "show a few known category durations as
+// a pie" need without forcing that data through buildTierPieChart's
+// own "bin raw samples by value" shape, which doesn't fit data that's
+// already aggregated.
+export function buildCategoryPieChart(canvas, categories) {
+  const total = categories.reduce((sum, c) => sum + c.value, 0) || 1;
+  return new Chart(canvas, {
+    type: "pie",
+    data: {
+      labels: categories.map(c => c.label),
+      datasets: [{
+        data: categories.map(c => c.value),
+        backgroundColor: categories.map(c => c.color),
+        borderColor: "#1a1c24",
+        borderWidth: 2,
+      }],
+    },
+    options: {
+      responsive: true,
+      animation: false,
+      plugins: {
+        legend: { display: false }, // rendered as an HTML legend alongside, same as buildTierPieChart's own callers
         tooltip: {
           callbacks: {
             label: (item) => {
