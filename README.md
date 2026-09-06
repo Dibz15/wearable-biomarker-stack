@@ -29,7 +29,7 @@ gives you the raw trends to build on.
 
 1. Pair your device in Gadgetbridge, point its auto-export at a WebDAV server.
 2. `cp env.stack.example .env` and fill in your InfluxDB token, WebDAV credentials, and image locations.
-3. `docker compose up -d`
+3. `docker compose up -d` (see [setup](./docs/SETUP.md#running-just-one-device) to run just one device type)
 4. Open InfluxDB (`:8086`), Grafana (`:3000`), and wearable-events (`:8081`) to finish setup on each.
 
 Full walkthrough with all the details (Gadgetbridge configuration,

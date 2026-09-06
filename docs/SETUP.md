@@ -194,6 +194,47 @@ tab, using the same username as their `GADGETBRIDGE_USER` (see
 Developing or modifying this component? See
 [`wearable-events/README.md`](../wearable-events/README.md).
 
+## Running just one device
+ 
+Both parser containers are in `docker-compose.yml` by default so
+`docker compose up -d` works out of the box regardless of which device
+you actually have - but if you only have a ring or only a watch,
+there's no need to also start (or even pull the image for) the other
+one.
+ 
+Compose's `profiles` mechanism controls this via the `COMPOSE_PROFILES`
+variable in `.env`:
+ 
+```bash
+COMPOSE_PROFILES=all       # default - both parsers
+COMPOSE_PROFILES=colmi     # ring only
+COMPOSE_PROFILES=activefit # watch only
+```
+ 
+Or override it for a single run without touching `.env` at all - an
+explicit `--profile` flag takes full precedence over whatever
+`COMPOSE_PROFILES` says:
+ 
+```bash
+docker compose --profile colmi up -d
+```
+ 
+Every other service (InfluxDB, Grafana, ntfy, wearable-events) has no
+profile of its own, so it always starts regardless of which parser
+profile is active - only the two parser containers are affected.
+ 
+**Switching profiles after both are already running:** `docker compose
+up -d` with a narrower profile won't stop a parser that's no longer in
+the active set - it just leaves it running, untouched. `--remove-orphans`
+is supposed to clean this up but has inconsistent behavior across
+Compose versions when profiles are involved - the reliable way is to
+stop and remove the specific container directly:
+ 
+```bash
+docker compose stop parser-activefit && docker compose rm -f parser-activefit
+```
+
+
 ## Multi-user notes
 
 Each person gets their own device and their own parser container

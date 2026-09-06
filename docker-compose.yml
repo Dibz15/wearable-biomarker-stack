@@ -244,6 +244,15 @@ services:
     image: ${PARSER_COLMI_IMAGE:-dibz15/colmi2influx:latest}
     container_name: biomarker-parser-colmi
     restart: unless-stopped
+    # Two profiles, not one: "colmi" alone (this device only) and "all"
+    # (both devices) - a service can belong to more than one profile,
+    # and starts if ANY of its own profiles are in the active set. See
+    # COMPOSE_PROFILES in env.stack.example for how to pick between
+    # them; docs/SETUP.md's own "Running just one device" has the
+    # full explanation.
+    profiles:
+      - colmi
+      - all
     environment:
       # --- WebDAV (Nextcloud) source ---
       WEBDAV_URL: ${WEBDAV_URL:-https://your-nextcloud-domain/remote.php/dav/}
@@ -328,6 +337,11 @@ services:
     image: ${PARSER_ACTIVEFIT_IMAGE:-dibz15/amazfit2influx:latest}
     container_name: biomarker-parser-activefit
     restart: unless-stopped
+    # See parser-colmi's own comment on profiles above - same pattern,
+    # this device's own profile plus "all".
+    profiles:
+      - activefit
+      - all
     environment:
       WEBDAV_URL: ${WEBDAV_URL:-https://your-nextcloud-domain/remote.php/dav/}
       WEBDAV_PATH: ${WEBDAV_PATH:-files/your_nextcloud_user/GadgetBridge/}
