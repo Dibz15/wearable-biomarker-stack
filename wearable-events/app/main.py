@@ -4,6 +4,7 @@ from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
@@ -68,4 +69,26 @@ app.include_router(admin.router)
 
 # --- static UI ---
 _static_dir = Path(__file__).parent.parent / "static"
+
+
+# Client-side routing fallback. Every real frontend "page" the SPA
+# router understands lives under /app/* (see static/js/router.js's own
+# route table) - a deliberately distinct namespace from the API's own
+# paths, since a bare path like /sleep or /activity would otherwise
+# collide with a real API endpoint of the same name (GET /sleep,
+# GET /activity/sessions, etc.) and a full-page browser navigation
+# there would hit the API and get raw JSON instead of the app shell.
+# Without this, refreshing (or opening a bookmark/shared link) on any
+# in-app URL other than "/" would 404, since no file actually exists
+# at e.g. /app/activity/workout/12345 on disk - this always returns
+# the same index.html regardless of the specific /app/* path, and the
+# router's own client-side code (already loaded once index.html runs)
+# takes it from there. Registered before the StaticFiles mount below,
+# though order wouldn't actually matter here in practice - nothing
+# under static/ is ever placed at an /app/* path.
+@app.get("/app/{full_path:path}")
+async def spa_fallback(full_path: str):
+    return FileResponse(_static_dir / "index.html")
+
+
 app.mount("/", StaticFiles(directory=_static_dir, html=True), name="static")

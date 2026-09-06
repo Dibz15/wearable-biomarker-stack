@@ -11,6 +11,7 @@ import { escapeHtml, api, todayISO } from "./core.js";
 import { openDetailScreen, registerActiveChart, clearActiveCharts, renderDateNav, renderPeriodButtons, wireDetailControls } from "./metric-detail.js";
 import { buildSleepStageStackedChart, buildBedtimeWaketimeChart, buildTrendBarChart, buildTimeScatterChart, HYPNOGRAM_STAGE_COLORS } from "./metric-charts.js";
 import { noonAnchoredHour, formatClockTime } from "./sleep-detail.js";
+import { registerRoute, replaceUrl } from "./router.js";
 
 // Only week/month, deliberately - no day (a single night has nothing
 // to roll up) and no year (get_sleep_stage_trend/get_sleep_timing_trend
@@ -46,6 +47,13 @@ export async function openSleepReportsDetail(anchorDate = todayISO()) {
   openDetailScreen("Sleep Reports");
   await renderSleepReportsPeriod("week", anchorDate);
 }
+
+registerRoute(/^\/app\/sleep\/reports$/, (params) => {
+  const period = params.get("period") || "week";
+  const date = params.get("date") || todayISO();
+  openDetailScreen("Sleep Reports");
+  renderSleepReportsPeriod(period, date);
+});
 
 function sectionCard(title, canvasId) {
   return `
@@ -138,6 +146,7 @@ function renderJournalRollup(rollup) {
 }
 
 async function renderSleepReportsPeriod(period, anchorDate) {
+  replaceUrl(`/app/sleep/reports?period=${period}&date=${anchorDate}`);
   const content = document.getElementById("detail-content");
   content.innerHTML = `${renderPeriodButtons(period, SLEEP_REPORTS_PERIODS)}${renderDateNav(period, anchorDate)}<p class="muted">Loading...</p>`;
   wireDetailControls(renderSleepReportsPeriod, period, anchorDate);

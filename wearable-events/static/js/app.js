@@ -1,11 +1,45 @@
 // --- init ---
-import { escapeHtml, api } from "./core.js";
+import { escapeHtml, api, showTab } from "./core.js";
 import { loadToday } from "./today.js";
 import { loadTagButtons } from "./tags.js";
 import { loadCalendars } from "./calendars.js";
 import { loadKeywordRules, checkReprocessOnLoad, loadTagDefManage } from "./manage.js";
 import { initTimelineControls, loadTimeline } from "./timeline.js";
 import { loadSleepOverview } from "./sleep-overview.js";
+import { registerRoute, initRouter } from "./router.js";
+
+// Imported for their own module-level registerRoute() (and, for
+// metric-detail.js/zoom-chart.js, registerBeforeDispatch()) calls, not
+// for any named export used directly here - explicit, rather than
+// relying on these modules happening to already be reachable
+// transitively via some OTHER module's own import (today.js importing
+// activity.js, for instance). That fragility is exactly what caused a
+// real bug caught while building this: workout-detail.js's own route
+// silently never registered at all once its only previous importer
+// (activity.js) no longer needed a named export from it. Every module
+// in this list registers at least one /app/* route or dispatch hook
+// of its own - see each one's own registerRoute()/registerBeforeDispatch()
+// call for which.
+import "./activity.js";
+import "./workout-detail.js";
+import "./metric-detail.js";
+import "./sleep-detail.js";
+import "./sleep-reports.js";
+import "./zoom-chart.js";
+
+// The four tabs with no params of their own (no date/period to
+// restore) - a plain showTab() is the whole route. Today and Sleep
+// each register their own richer route instead (see today.js/
+// sleep-overview.js), since landing there can also carry a ?date=.
+// Closing a potentially-open detail-screen overlay is handled
+// centrally (metric-detail.js registers that as a router "before
+// dispatch" hook, so it runs automatically on every navigation, not
+// just these four) rather than each tab route needing to remember to
+// call it itself.
+registerRoute(/^\/app\/tags$/, () => showTab("tags"));
+registerRoute(/^\/app\/calendars$/, () => showTab("calendars"));
+registerRoute(/^\/app\/timeline$/, () => showTab("timeline"));
+registerRoute(/^\/app\/manage$/, () => showTab("manage"));
 
 // api() (in core.js) dispatches this instead of calling showLogin()
 // directly, to avoid a circular import between core.js and this file -
@@ -31,6 +65,12 @@ function showApp(me) {
   document.getElementById("app-shell").style.display = "block";
   document.getElementById("current-username").textContent = me.username;
 
+  // Every tab's own default (today's date / this week's report /
+  // etc.) content loads eagerly up front, same as before routing
+  // existed - initRouter() below then renders whatever the CURRENT
+  // URL actually says on top of that (a specific tab, a specific
+  // date, a detail screen), so a refresh or a shared link lands
+  // exactly where it should rather than always resetting to Today.
   loadToday();
   loadTagButtons();
   loadCalendars();
@@ -42,6 +82,8 @@ function showApp(me) {
   initTimelineControls();
   loadTimeline();
   loadSleepOverview();
+
+  initRouter();
 }
 
 document.getElementById("login-submit").addEventListener("click", async () => {

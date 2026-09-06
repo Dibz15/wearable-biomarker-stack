@@ -5,6 +5,7 @@
 import { escapeHtml, api, todayISO, shiftISODate } from "./core.js";
 import { openDetailScreen, registerActiveChart, clearActiveCharts, renderDateNav, renderBaselineBar, renderPeriodButtons, wireDetailControls } from "./metric-detail.js";
 import { buildTrendBarChart, buildVitalsHypnogramSVG, buildRangeBarChart, buildBedtimeWaketimeChart } from "./metric-charts.js";
+import { registerRoute, navigate, replaceUrl } from "./router.js";
 
 function formatHoursMinutes(hours) {
   const totalMin = Math.round(hours * 60);
@@ -60,7 +61,15 @@ export async function openSleepDurationDetail(anchorDate = todayISO()) {
   await renderSleepDurationPeriod("day", anchorDate);
 }
 
+registerRoute(/^\/app\/sleep\/duration$/, (params) => {
+  const period = params.get("period") || "day";
+  const date = params.get("date") || todayISO();
+  openDetailScreen("Sleep Duration");
+  renderSleepDurationPeriod(period, date);
+});
+
 async function renderSleepDurationPeriod(period, anchorDate) {
+  replaceUrl(`/app/sleep/duration?period=${period}&date=${anchorDate}`);
   if (period === "day") {
     await renderSleepDurationDay(anchorDate);
   } else {
@@ -253,9 +262,12 @@ function wireSubDetailDateNav(anchorDate, renderFn) {
 // Structurally identical pages (UI_DESIGN_NOTES.md confirms Sleep
 // Respiratory Rate is "near-identical layout to Sleep Heart Rate"),
 // one field-parameterized implementation rather than two near-copies.
+// `path` is each one's own /app/sleep/* URL segment - kept alongside
+// the rest of this shared config so renderSleepVitalsDay can look it
+// up from the same place, rather than a second parallel map.
 const VITALS_PAGE_CONFIG = {
-  heart_rate: { title: "Sleep Heart Rate", unit: "bpm", lowLabel: "Slower", highLabel: "Faster", decimals: 0 },
-  sleep_respiratory_rate: { title: "Sleep Respiratory Rate", unit: "brpm", lowLabel: "Lower", highLabel: "Higher", decimals: 0 },
+  heart_rate: { title: "Sleep Heart Rate", unit: "bpm", lowLabel: "Slower", highLabel: "Faster", decimals: 0, path: "heart-rate" },
+  sleep_respiratory_rate: { title: "Sleep Respiratory Rate", unit: "brpm", lowLabel: "Lower", highLabel: "Higher", decimals: 0, path: "respiratory-rate" },
 };
 
 export async function openSleepHeartRateDetail(anchorDate = todayISO()) {
@@ -268,8 +280,19 @@ export async function openSleepRespiratoryRateDetail(anchorDate = todayISO()) {
   await renderSleepVitalsDay("sleep_respiratory_rate", anchorDate);
 }
 
+registerRoute(/^\/app\/sleep\/heart-rate$/, (params) => {
+  openDetailScreen("Sleep Heart Rate");
+  renderSleepVitalsDay("heart_rate", params.get("date") || todayISO());
+});
+
+registerRoute(/^\/app\/sleep\/respiratory-rate$/, (params) => {
+  openDetailScreen("Sleep Respiratory Rate");
+  renderSleepVitalsDay("sleep_respiratory_rate", params.get("date") || todayISO());
+});
+
 async function renderSleepVitalsDay(field, anchorDate) {
   const cfg = VITALS_PAGE_CONFIG[field];
+  replaceUrl(`/app/sleep/${cfg.path}?date=${anchorDate}`);
   const renderFn = (d) => renderSleepVitalsDay(field, d);
   const content = document.getElementById("detail-content");
   content.innerHTML = `${renderDateNav("day", anchorDate)}<p class="muted">Loading...</p>`;
@@ -481,7 +504,13 @@ export async function openSleepRegularityDetail(anchorDate = todayISO()) {
   await renderSleepRegularityDay(anchorDate);
 }
 
+registerRoute(/^\/app\/sleep\/regularity$/, (params) => {
+  openDetailScreen("Sleep Regularity");
+  renderSleepRegularityDay(params.get("date") || todayISO());
+});
+
 async function renderSleepRegularityDay(anchorDate) {
+  replaceUrl(`/app/sleep/regularity?date=${anchorDate}`);
   const content = document.getElementById("detail-content");
   content.innerHTML = `${renderDateNav("day", anchorDate)}<p class="muted">Loading...</p>`;
   wireSubDetailDateNav(anchorDate, renderSleepRegularityDay);

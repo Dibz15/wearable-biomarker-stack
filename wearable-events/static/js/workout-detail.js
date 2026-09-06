@@ -14,6 +14,7 @@ import { escapeHtml, api, formatNum } from "./core.js";
 import { openDetailScreen, registerActiveChart, clearActiveCharts } from "./metric-detail.js";
 import { buildLineChart, buildCategoryPieChart, buildTieredBarChart, renderTierLegend, INTENSITY_BANDS } from "./metric-charts.js";
 import { openZoomChart } from "./zoom-chart.js";
+import { registerRoute, navigate } from "./router.js";
 
 // The person's own real watch setting (Zepp: Settings -> interval type
 // -> "lactate threshold heart rate zone") - matches
@@ -525,8 +526,8 @@ function renderGpsMapCard(samples) {
   `;
 }
 
-export async function openWorkoutDetail(startMs, onBack = null) {
-  openDetailScreen("Workout", onBack);
+export async function openWorkoutDetail(startMs) {
+  openDetailScreen("Workout");
   const content = document.getElementById("detail-content");
   content.innerHTML = `<p class="muted">Loading...</p>`;
   clearActiveCharts();
@@ -673,6 +674,11 @@ export async function openWorkoutDetail(startMs, onBack = null) {
     btn.onclick = () => openWorkoutZoom(workout, samples, intensitySeries, btn.dataset.zoomKey);
   });
 }
+
+registerRoute(/^\/app\/activity\/workout\/(\d+)$/, (params, match) => {
+  openWorkoutDetail(Number(match[1]));
+});
+
 
 // Opens the shared zoom view for a workout, focused on whichever
 // panel's own button was tapped - all 6 metrics are still toggleable
