@@ -8,7 +8,7 @@ name: Tests
 # real Influx code path fails fast instead of hanging).
 #
 # Only the wearable-events app has a test suite right now - if
-# parser/colmi or parser/activefit gain one later, add a job for each
+# parser/colmi or parser/amazfit gain one later, add a job for each
 # here rather than trying to force everything through one job.
 
 on:

@@ -12,9 +12,9 @@ tagging (caffeine, alcohol, meetings pulled from your calendar) and a
 subjective sleep-quality score, so raw sensor trends can eventually be
 correlated against what was actually happening in your day.
 
-An Amazfit parser (`parser/activefit/`) optionally runs alongside the ring parser
+An Amazfit parser (`parser/amazfit/`) optionally runs alongside the ring parser
 for a second device — best-effort, some field semantics unverified. See
-[`parser/activefit/README.md`](./parser/activefit/README.md).
+[`parser/amazfit/README.md`](./parser/amazfit/README.md).
 
 Everything runs in Docker, tested against [CasaOS](https://casaos.io/)
 but works with plain `docker compose` anywhere.
@@ -29,7 +29,7 @@ gives you the raw trends to build on.
 
 1. Pair your device in Gadgetbridge, point its auto-export at a WebDAV server.
 2. `cp env.stack.example .env` and fill in your InfluxDB token, WebDAV credentials, and image locations.
-3. `docker compose up -d` (see [setup](./docs/SETUP.md#running-just-one-device) to run just one device type)
+3. `docker compose --profile all up -d` (see [setup](./docs/SETUP.md#running-just-one-device) to run just one device type). Note, to stop the containers you must also specify the profile.
 4. Open InfluxDB (`:8086`), Grafana (`:3000`), and wearable-events (`:8081`) to finish setup on each.
 
 Full walkthrough with all the details (Gadgetbridge configuration,
@@ -44,7 +44,7 @@ Each component has its own dev setup and test instructions:
   companion FastAPI app + web UI (calendar tagging, sleep journal)
 - [`parser/colmi/README.md`](./parser/colmi/README.md) — the Colmi/Yawell
   ring parser
-- [`parser/activefit/README.md`](./parser/activefit/README.md) — the
+- [`parser/amazfit/README.md`](./parser/amazfit/README.md) — the
   Amazfit parser
 
 ## Documentation

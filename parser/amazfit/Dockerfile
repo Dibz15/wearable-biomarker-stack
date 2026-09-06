@@ -1,10 +1,10 @@
-# Dockerfile for the Amazfit ("activefit") parser image.
+# Dockerfile for the Amazfit ("amazfit") parser image.
 #
 # Build context for this Dockerfile MUST be ./parser (the directory
-# containing this file's parent), not ./parser/activefit, since it
-# needs COPY access to ../common/ as well as its own activefit/ subtree:
+# containing this file's parent), not ./parser/amazfit, since it
+# needs COPY access to ../common/ as well as its own amazfit/ subtree:
 #
-#   docker build -f parser/activefit/Dockerfile ./parser
+#   docker build -f parser/amazfit/Dockerfile ./parser
 #
 # NOTE: this image runs safely before the Active 3 Premium is even
 # paired - every query gracefully skips a missing/mismatched table
@@ -20,14 +20,14 @@ FROM python:slim-bullseye
 RUN pip install --upgrade pip \
     && pip install webdavclient3 influxdb-client loguru protobuf fitparse
 
-# activefit/app/huami_pb2.py is PRE-COMPILED (not generated at build
-# time here) from activefit/proto/huami.proto - Gadgetbridge's own
+# amazfit/app/huami_pb2.py is PRE-COMPILED (not generated at build
+# time here) from amazfit/proto/huami.proto - Gadgetbridge's own
 # protobuf schema for BASE_ACTIVITY_SUMMARY.RAW_SUMMARY_DATA (Zepp OS
 # devices), confirmed against Gadgetbridge's real source (both the
 # .proto itself and ZeppOsActivitySummaryParser.java, 2026-09). Kept
 # pre-compiled and checked in rather than adding a protoc build step
 # here, to keep this Dockerfile simple - if huami.proto ever changes,
-# regenerate with (from parser/activefit/):
+# regenerate with (from parser/amazfit/):
 #   protoc --python_out=app --proto_path=proto proto/huami.proto
 
 # fitparse decodes per-workout .fit exports (BASE_ACTIVITY_SUMMARY's
@@ -39,8 +39,8 @@ RUN pip install --upgrade pip \
 # rolled decoder.
 
 COPY common /app/common
-COPY activefit/app /app
-COPY activefit/scripts /scripts
+COPY amazfit/app /app
+COPY amazfit/scripts /scripts
 COPY common/entrypoint.sh /entrypoint.sh
 RUN chmod +x /app/gadgetbridge_to_influxdb.py /entrypoint.sh
 

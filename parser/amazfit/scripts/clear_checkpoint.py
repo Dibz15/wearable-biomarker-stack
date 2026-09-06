@@ -18,7 +18,7 @@ QUERY_DURATION wide enough to cover the gap (see below), and restart
 once to recover it.
 
 Since the multi-device restructure, checkpoints are scoped by a
-`source` tag (e.g. "colmi", "activefit") as well as `user` - see
+`source` tag (e.g. "colmi", "amazfit") as well as `user` - see
 parser/common/checkpoint.py's module docstring. This script reads
 PARSER_SOURCE from the environment (same as the parser container it's
 run in) and only clears that source's checkpoints, so clearing the
@@ -40,8 +40,8 @@ duplicating), just means the next sync will take noticeably longer and
 write far more points than a normal 15-30min incremental sync.
 
 Usage:
-    docker cp parser/activefit/scripts/clear_checkpoint.py biomarker-parser-activefit:/tmp/clear_checkpoint.py
-    docker exec -it biomarker-parser-activefit python3 /tmp/clear_checkpoint.py
+    docker cp parser/amazfit/scripts/clear_checkpoint.py biomarker-parser-amazfit:/tmp/clear_checkpoint.py
+    docker exec -it biomarker-parser-amazfit python3 /tmp/clear_checkpoint.py
     # then, in .env: temporarily set QUERY_DURATION to cover the
     # history you need, e.g. 1209600 for 14 days, and restart the
     # parser container.
@@ -56,7 +56,7 @@ INFLUXDB_ORG = os.getenv("INFLUXDB_ORG")
 INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET")
 INFLUXDB_MEASUREMENT = os.getenv("INFLUXDB_MEASUREMENT", "gadgetbridge")
 GADGETBRIDGE_USER = os.getenv("GADGETBRIDGE_USER", "primary")
-PARSER_SOURCE = os.getenv("PARSER_SOURCE", "activefit")
+PARSER_SOURCE = os.getenv("PARSER_SOURCE", "amazfit")
 
 START = "2020-01-01T00:00:00Z"
 STOP = "2100-01-01T00:00:00Z"

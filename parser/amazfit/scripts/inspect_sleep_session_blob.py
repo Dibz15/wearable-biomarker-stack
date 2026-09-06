@@ -14,8 +14,8 @@ not those columns.
 
 Run via the same pattern as check_table_usage.py:
 
-    docker cp parser/activefit/scripts/inspect_sleep_session_blob.py biomarker-parser-activefit:/tmp/inspect_bob.py
-    docker exec -it biomarker-parser-activefit python3 /tmp/inspect_blob.py
+    docker cp parser/amazfit/scripts/inspect_sleep_session_blob.py biomarker-parser-amazfit:/tmp/inspect_bob.py
+    docker exec -it biomarker-parser-amazfit python3 /tmp/inspect_blob.py
 
 Requires the same WEBDAV_* env vars the parser itself uses.
 

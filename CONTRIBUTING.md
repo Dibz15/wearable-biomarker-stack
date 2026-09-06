@@ -12,7 +12,7 @@ working code and a clear description of what changed and why.
 - Each component has its own README with dev setup instructions:
   [`wearable-events/README.md`](./wearable-events/README.md),
   [`parser/colmi/README.md`](./parser/colmi/README.md),
-  [`parser/activefit/README.md`](./parser/activefit/README.md).
+  [`parser/amazfit/README.md`](./parser/amazfit/README.md).
 - For anything nontrivial, opening an issue first to discuss the
   approach saves everyone time versus a large PR landing unannounced.
 
@@ -50,7 +50,7 @@ keep diffs focused on the actual change.
 ## Reporting bugs / unverified data
 
 A few things in this stack (sleep-stage codes, some Amazfit field
-semantics — see [`parser/activefit/README.md`](./parser/activefit/README.md))
+semantics — see [`parser/amazfit/README.md`](./parser/amazfit/README.md))
 are documented as best-effort rather than fully confirmed. If you have
 real device data that confirms or contradicts one of these, that's a
 genuinely useful contribution even without an accompanying code change

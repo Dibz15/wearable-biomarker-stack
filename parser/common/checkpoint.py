@@ -17,7 +17,7 @@ silently skipping that new device's entire backfill, since the lookup
 would look like "already caught up" rather than "never synced".
 
 The fix: every point written also carries a `source` tag identifying
-which parser wrote it (e.g. "colmi", "activefit") - a stable identifier
+which parser wrote it (e.g. "colmi", "amazfit") - a stable identifier
 known at parser-startup, unlike the physical `device` tag/name which
 is only discovered by reading the DEVICE table per-run and may not
 even be knowable yet on a device's very first sync. get_last_checkpoint_ns

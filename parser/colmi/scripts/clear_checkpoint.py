@@ -6,7 +6,7 @@ QUERY_DURATION instead of resuming from wherever the checkpoint
 currently points.
 
 Since the multi-device restructure, checkpoints are scoped by a
-`source` tag (e.g. "colmi", "activefit") as well as `user` - see
+`source` tag (e.g. "colmi", "amazfit") as well as `user` - see
 parser/common/checkpoint.py's module docstring. This script reads
 PARSER_SOURCE from the environment (same as the parser container it's
 run in) and only clears that source's checkpoints, so clearing the

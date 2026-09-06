@@ -1,4 +1,4 @@
-# activefit parser (Amazfit Active 3 Premium)
+# amazfit parser (Amazfit Active 3 Premium)
 
 **Status:** real synced data confirmed for all 11 tables this parser
 queries, including full sleep-stage decoding from
@@ -202,8 +202,8 @@ inside the running container so it picks up the same `WEBDAV_*` env
 vars:
 
 ```bash
-docker cp parser/activefit/scripts/check_table_usage.py biomarker-parser-activefit:/tmp/check.py
-docker exec -it biomarker-parser-activefit python3 /tmp/check.py
+docker cp parser/amazfit/scripts/check_table_usage.py biomarker-parser-amazfit:/tmp/check.py
+docker exec -it biomarker-parser-amazfit python3 /tmp/check.py
 ```
 
 Non-zero tables not already extracted (flagged
@@ -215,7 +215,7 @@ temperature were found.
 ## Checkpoint isolation
 
 This parser writes/reads its own checkpoint history independently of
-Colmi's — every point gets a `source="activefit"` tag (vs Colmi's
+Colmi's — every point gets a `source="amazfit"` tag (vs Colmi's
 `source="colmi"`), and `common.checkpoint.get_last_checkpoint_ns`
 filters on it. This is what lets both parsers run simultaneously
 against the same InfluxDB bucket/user without one's first-ever sync

@@ -22,8 +22,8 @@ skipped) on every table that doesn't.
 
 Run via the same pattern as before:
 
-    docker cp parser/activefit/scripts/check_table_usage.py biomarker-parser-activefit:/tmp/check.py
-    docker exec -it biomarker-parser-activefit python3 /tmp/check.py
+    docker cp parser/amazfit/scripts/check_table_usage.py biomarker-parser-amazfit:/tmp/check.py
+    docker exec -it biomarker-parser-amazfit python3 /tmp/check.py
 
 Requires the same WEBDAV_* env vars the parser itself uses (already
 set in the running container, so no extra config needed). Works
@@ -56,7 +56,7 @@ WEBDAV_PASS = os.getenv("WEBDAV_PASS", False)
 EXPORT_FILE = os.getenv("EXPORT_FILENAME", "Gadgetbridge.db")
 
 # Every table currently queried by EITHER parser (parser/colmi and
-# parser/activefit both read from this same shared Gadgetbridge
+# parser/amazfit both read from this same shared Gadgetbridge
 # export) - printed distinctly below so it's obvious at a glance which
 # non-zero tables are already wired up vs newly discovered. Kept as an
 # explicit set rather than derived by parsing the parser source files
@@ -64,7 +64,7 @@ EXPORT_FILE = os.getenv("EXPORT_FILENAME", "Gadgetbridge.db")
 # a table gets newly wired up, not something worth its own fragile
 # source-parsing logic in a one-off diagnostic script.
 ALREADY_IMPLEMENTED = {
-    # parser/activefit
+    # parser/amazfit
     "BASE_ACTIVITY_SUMMARY",
     "GENERIC_HRV_VALUE_SAMPLE",
     "GENERIC_TEMPERATURE_SAMPLE",

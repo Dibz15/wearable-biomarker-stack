@@ -123,8 +123,8 @@ services:
       ALERT_HRV_USER: ${ALERT_HRV_USER:-primary}
       # Which parser's HRV data the alert rule evaluates - see
       # grafana/provisioning-templates/alerting/rules.yaml.template.
-      # Defaults to "colmi" since HRV isn't extracted by parser-activefit
-      # yet (see parser/activefit/README.md).
+      # Defaults to "colmi" since HRV isn't extracted by parser-amazfit
+      # yet (see parser/amazfit/README.md).
       ALERT_HRV_SOURCE: ${ALERT_HRV_SOURCE:-colmi}
       NTFY_TOPIC: ${NTFY_TOPIC:-biomarker-alerts}
       NTFY_USER: ${NTFY_GRAFANA_USER:-grafana}
@@ -235,7 +235,7 @@ services:
 
   # Colmi ring parser. Renamed from the old `parser` service name as
   # part of the multi-device restructure (now a sibling of
-  # parser-activefit below, not "the" parser) - if you're upgrading an
+  # parser-amazfit below, not "the" parser) - if you're upgrading an
   # existing deployment, `docker compose up` will recreate this
   # container under the new service name; it's stateless (no mounted
   # volume tied to the old name) so this is safe, just expect a brief
@@ -275,7 +275,7 @@ services:
       # (not e.g. "gadgetbridge") for backward compatibility - existing
       # deployments already have historical data under that measurement
       # name, and silently changing the default would break their
-      # dashboards. parser-activefit below shares this SAME variable
+      # dashboards. parser-amazfit below shares this SAME variable
       # (both parsers should write to one measurement, disambiguated by
       # the `device`/`source` tags each point carries - not by
       # measurement name) - so if you rename this, update both. ---
@@ -291,7 +291,7 @@ services:
       REMOVE_TEMP_DB: ${REMOVE_TEMP_DB:-Y}
       GADGETBRIDGE_USER: ${GADGETBRIDGE_USER:-primary}
       # Distinguishes this parser's checkpoint history from
-      # parser-activefit's, even though both share INFLUXDB_MEASUREMENT
+      # parser-amazfit's, even though both share INFLUXDB_MEASUREMENT
       # and GADGETBRIDGE_USER above - see parser/common/checkpoint.py.
       PARSER_SOURCE: colmi
 
@@ -326,21 +326,21 @@ services:
   # Amazfit Active 3 Premium parser. Best-effort implementation - the
   # HUAMI_* table/column names are guessed from Gadgetbridge's public
   # issue tracker, NOT verified against real Active 3 Premium hardware
-  # yet (see parser/activefit/README.md). Safe to run continuously
+  # yet (see parser/amazfit/README.md). Safe to run continuously
   # before the watch is even paired: every query gracefully skips a
   # missing/mismatched table instead of crashing, so before pairing
   # this just quietly does nothing every cycle. Once real data starts
   # flowing in, treat it as a starting point to verify, not as
   # confirmed-correct - watch the logs and follow the checklist in
   # that README.
-  parser-activefit:
-    image: ${PARSER_ACTIVEFIT_IMAGE:-dibz15/amazfit2influx:latest}
-    container_name: biomarker-parser-activefit
+  parser-amazfit:
+    image: ${PARSER_AMAZFIT_IMAGE:-dibz15/amazfit2influx:latest}
+    container_name: biomarker-parser-amazfit
     restart: unless-stopped
     # See parser-colmi's own comment on profiles above - same pattern,
     # this device's own profile plus "all".
     profiles:
-      - activefit
+      - amazfit
       - all
     environment:
       WEBDAV_URL: ${WEBDAV_URL:-https://your-nextcloud-domain/remote.php/dav/}
@@ -374,7 +374,7 @@ services:
       HUAMI_TIMESTAMPS_ARE_MS: ${HUAMI_TIMESTAMPS_ARE_MS:-Y}
       REMOVE_TEMP_DB: ${REMOVE_TEMP_DB:-Y}
       GADGETBRIDGE_USER: ${GADGETBRIDGE_USER:-primary}
-      PARSER_SOURCE: activefit
+      PARSER_SOURCE: amazfit
 
       SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-1800}
     networks:

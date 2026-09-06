@@ -9,7 +9,7 @@ high-level pitch and a quick-start summary, see the
 - A Linux host that can run Docker + Docker Compose (NAS, Raspberry
   Pi, home server — anything).
 - A Colmi/Yawell smart ring. `R09` is a good starting point. See [`parser/colmi/README.md`](../parser/colmi/README.md)
-  for per-model notes. This repo also supports newer Amazfit/Huami watches, such as the Active 3 Premium ([`parser/activefit/README.md`](../parser/activefit/README.md))
+  for per-model notes. This repo also supports newer Amazfit/Huami watches, such as the Active 3 Premium ([`parser/amazfit/README.md`](../parser/amazfit/README.md))
 - [Gadgetbridge](https://gadgetbridge.org/) on an Android phone (from
   F-Droid, not Google Play).
 - A WebDAV server reachable from both your phone and your Docker host
@@ -36,7 +36,7 @@ wearable-events:
 ```
 
 Then run `docker compose up -d --build` in step 4. `parser-colmi` and
-`parser-activefit` need an explicit Dockerfile path and a build context
+`parser-amazfit` need an explicit Dockerfile path and a build context
 of `./parser` (not `./parser/colmi`), since both share `parser/common/`:
 
 ```yaml
@@ -46,8 +46,8 @@ parser-colmi:
     dockerfile: ./parser/colmi/Dockerfile
 ```
 
-(`parser-activefit` is best-effort against an Actie 3 Premium and
-safe to run — see [`parser/activefit/README.md`](../parser/activefit/README.md).)
+(`parser-amazfit` is best-effort against an Actie 3 Premium and
+safe to run — see [`parser/amazfit/README.md`](../parser/amazfit/README.md).)
 
 Maintaining your own fork? [`.github/workflows/docker-publish.yml`](../.github/workflows/docker-publish.yml)
 builds and publishes all three images automatically on push — not
@@ -76,7 +76,7 @@ cp env.stack.example .env
 
 Edit `.env` and fill in, at minimum:
 
-- `PARSER_COLMI_IMAGE` / `PARSER_ACTIVEFIT_IMAGE` / `WEARABLE_EVENTS_IMAGE` —
+- `PARSER_COLMI_IMAGE` / `PARSER_AMAZFIT_IMAGE` / `WEARABLE_EVENTS_IMAGE` —
   wherever those images live (prebuilt or your own, per step 1)
 - `INFLUXDB_TOKEN` and `INFLUXDB_INIT_ADMIN_TOKEN` — the **same**
   generated value for both (`openssl rand -hex 32`); this is a
@@ -208,7 +208,7 @@ variable in `.env`:
 ```bash
 COMPOSE_PROFILES=all       # default - both parsers
 COMPOSE_PROFILES=colmi     # ring only
-COMPOSE_PROFILES=activefit # watch only
+COMPOSE_PROFILES=amazfit # watch only
 ```
  
 Or override it for a single run without touching `.env` at all - an
@@ -231,7 +231,7 @@ Compose versions when profiles are involved - the reliable way is to
 stop and remove the specific container directly:
  
 ```bash
-docker compose stop parser-activefit && docker compose rm -f parser-activefit
+docker compose stop parser-amazfit && docker compose rm -f parser-amazfit
 ```
 
 

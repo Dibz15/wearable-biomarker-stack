@@ -13,8 +13,8 @@ this has to be checked against the real database directly.
 
 Run via the same pattern as check_table_usage.py:
 
-    docker cp parser/activefit/scripts/inspect_activity_summary_blob.py biomarker-parser-activefit:/tmp/inspect_activity_summary_blob.py
-    docker exec -it biomarker-parser-activefit python3 /tmp/inspect_activity_summary_blob.py
+    docker cp parser/amazfit/scripts/inspect_activity_summary_blob.py biomarker-parser-amazfit:/tmp/inspect_activity_summary_blob.py
+    docker exec -it biomarker-parser-amazfit python3 /tmp/inspect_activity_summary_blob.py
 
 See inspect_sleep_session_blob.py's own docstring for why the
 destination filename matters (don't shadow a stdlib module name).

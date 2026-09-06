@@ -1,6 +1,6 @@
 name: Build and push images
 
-# Monorepo workflow: builds parser/colmi, parser/activefit, and
+# Monorepo workflow: builds parser/colmi, parser/amazfit, and
 # wearable-events/ as three separate Docker Hub images from one repo.
 # Each only rebuilds when its own sources (or this workflow file)
 # change, via dorny/paths-filter - pushing a wearable-events change
@@ -10,7 +10,7 @@ name: Build and push images
 # "filter hit" for BOTH parser jobs (see the filters below), since a
 # shared-infrastructure fix genuinely does affect both images and
 # should rebuild both. A change scoped to only parser/colmi/** or only
-# parser/activefit/** rebuilds just that one image.
+# parser/amazfit/** rebuilds just that one image.
 #
 # workflow_dispatch always builds all three, regardless of what
 # changed - useful for a manual "rebuild everything" (e.g. after
@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       parser_colmi: ${{ steps.filter.outputs.parser_colmi }}
-      parser_activefit: ${{ steps.filter.outputs.parser_activefit }}
+      parser_amazfit: ${{ steps.filter.outputs.parser_amazfit }}
       wearable_events: ${{ steps.filter.outputs.wearable_events }}
     steps:
       - uses: actions/checkout@v4
@@ -43,9 +43,9 @@ jobs:
               - 'parser/common/**'
               - 'parser/colmi/**'
               - '.github/workflows/docker-publish.yml'
-            parser_activefit:
+            parser_amazfit:
               - 'parser/common/**'
-              - 'parser/activefit/**'
+              - 'parser/amazfit/**'
               - '.github/workflows/docker-publish.yml'
             wearable_events:
               - 'wearable-events/**'
@@ -97,9 +97,9 @@ jobs:
           cache-from: type=gha,scope=parser-colmi
           cache-to: type=gha,mode=max,scope=parser-colmi
 
-  build-parser-activefit:
+  build-parser-amazfit:
     needs: detect-changes
-    if: needs.detect-changes.outputs.parser_activefit == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.detect-changes.outputs.parser_amazfit == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -130,13 +130,13 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ./parser
-          file: ./parser/activefit/Dockerfile
+          file: ./parser/amazfit/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=parser-activefit
-          cache-to: type=gha,mode=max,scope=parser-activefit
+          cache-from: type=gha,scope=parser-amazfit
+          cache-to: type=gha,mode=max,scope=parser-amazfit
 
   build-wearable-events:
     needs: detect-changes

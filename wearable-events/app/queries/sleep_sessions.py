@@ -738,7 +738,7 @@ def get_sleep_stage_breakdown(user: str, session_start: datetime, session_end: d
     sleep_session's result) already knows exactly which session.
 
     Sums sleep_stage_duration_s (already extracted per stage segment,
-    see parser/activefit and parser/colmi's sleep stage extraction)
+    see parser/amazfit and parser/colmi's sleep stage extraction)
     grouped by the sleep_stage tag, converted to whole minutes.
 
     `device`, if given, filters to that device's own stage data only -
@@ -801,7 +801,7 @@ def count_wake_events(user: str, session_start: datetime, session_end: datetime,
 
     Counts the sleep_stage_duration_s field specifically - written
     ONCE per stage segment, at that segment's own start point (see
-    parser/activefit's sleep-stage extraction) - not sleep_stage_active
+    parser/amazfit's sleep-stage extraction) - not sleep_stage_active
     (written TWICE per segment, a start=1 marker and an end=0 marker
     one second before the next stage begins, which would double the
     count if used here instead).

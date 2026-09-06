@@ -19,7 +19,7 @@
 # (WebDAV fetch, DEVICE table lookup, checkpoint mechanics, the
 # future-timestamp corruption guard, and the InfluxDB write path) now
 # lives in ../../common/ and is shared with any other device parser
-# (e.g. ../../activefit/). Only genuinely Colmi-specific extraction
+# (e.g. ../../amazfit/). Only genuinely Colmi-specific extraction
 # logic - which COLMI_* tables/columns, unit conversions, sleep-stage
 # mapping - remains in this file. See parser/common/*.py docstrings
 # for why each piece was judged device-agnostic.
@@ -60,7 +60,7 @@ from common.influx import build_client, write_results
 # physical `device` tag (which comes from Gadgetbridge's DEVICE table
 # at runtime). See common/checkpoint.py's module docstring for why
 # this exists - it's what lets a brand-new device parser (e.g.
-# activefit, on its very first run) avoid inheriting this parser's
+# amazfit, on its very first run) avoid inheriting this parser's
 # checkpoint history.
 PARSER_SOURCE = os.getenv("PARSER_SOURCE", "colmi")
 

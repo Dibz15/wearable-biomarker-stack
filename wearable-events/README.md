@@ -77,7 +77,7 @@ areas (vitals, activity, sleep detail views) are welcome.
 - **[UI_DESIGN_NOTES.md](./UI_DESIGN_NOTES.md)** — running design notes
   on page layouts and UX patterns (mostly reverse-engineered from the
   Zepp app), cross-referenced against
-  [`parser/activefit/README.md`](../parser/activefit/README.md)
+  [`parser/amazfit/README.md`](../parser/amazfit/README.md)
   for which underlying data is confirmed to exist
 
 ## License
