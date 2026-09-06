@@ -4,7 +4,7 @@ import { isoToDate, formatNum, escapeHtml } from "./core.js";
 // are ever more devices than colors defined here, rather than erroring.
 const DEVICE_CHART_COLORS = ["#e88a8a", "#6ea8fe", "#4fd8b8", "#f0c674"];
 
-export function buildLineChart(canvas, series, devices, decimals, yAxisLabel = null, minZero = false) {
+export function buildLineChart(canvas, series, devices, decimals, yAxisLabel = null, minZero = false, colorOverride = null) {
   const datasets = devices.map((device, i) => ({
     label: device,
     // Epoch milliseconds, not the raw ISO string - lets Chart.js's
@@ -16,7 +16,17 @@ export function buildLineChart(canvas, series, devices, decimals, yAxisLabel = n
     // real benefit here, since a formatted tick callback on a plain
     // numeric axis gives the same HH:MM labels with one less moving part).
     data: series[device].map(p => ({ x: new Date(p.t).getTime(), y: p.v })),
-    borderColor: DEVICE_CHART_COLORS[i % DEVICE_CHART_COLORS.length],
+    // Cycling by DEVICE index makes sense when a chart is comparing
+    // several devices' own readings of the SAME metric (this app's
+    // main use for buildLineChart) - but is the wrong axis entirely
+    // for a page like Workout Detail, where every chart has exactly
+    // one device and instead wants each DIFFERENT METRIC (HR,
+    // elevation, speed...) to have its own distinct color - a real
+    // reported gap, since every single-device chart was silently
+    // landing on DEVICE_CHART_COLORS[0] every time. colorOverride
+    // lets a caller specify that directly instead of relying on
+    // device-index cycling, without changing the multi-device case.
+    borderColor: colorOverride || DEVICE_CHART_COLORS[i % DEVICE_CHART_COLORS.length],
     backgroundColor: "transparent",
     borderWidth: 2,
     // A line needs at least two points to draw anything - a

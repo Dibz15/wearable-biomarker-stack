@@ -1296,11 +1296,15 @@ main {
 .workout-zone-bar-fill {
   height: 100%;
   border-radius: 999px;
-  /* One flat accent color for every zone, deliberately - unlike the
-     Sleep tab's own multi-color stage bar, these rows are already
-     distinguished by name/position, and a single consistent fill
-     reads as "one continuous scale" rather than implying each zone
-     is its own unrelated category. */
+  /* Actual per-zone color is set inline from JS (HR_ZONE_COLORS in
+     workout-detail.js - a real, deliberate intensity gradient from
+     cool to hot across the 6 zones) - this is just a fallback for
+     the unlikely case that color wasn't provided. An earlier version
+     of this comment argued for one flat color across every zone
+     deliberately - reversed after direct feedback that everything on
+     this page was reading as "the same salmonish color" throughout,
+     which a single flat fill for 6 different-intensity zones was
+     part of. */
   background: #e88a8a;
 }
 

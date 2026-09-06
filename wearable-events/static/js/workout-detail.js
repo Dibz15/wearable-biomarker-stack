@@ -31,6 +31,35 @@ import { buildLineChart, buildCategoryPieChart } from "./metric-charts.js";
 const MPS_TO_MPH = 2.23694;
 const METERS_TO_MILES = 1 / 1609.344;
 
+// A short, deliberate palette for this page - previously every chart/
+// bar used the same DEVICE_CHART_COLORS[0] (a real reported gap:
+// buildLineChart colors by DEVICE index, and every chart here has
+// exactly one device, so they all silently landed on the same first
+// color). Each metric gets its own color instead, and HR Zones get a
+// genuine low-to-high intensity gradient (cool -> hot) rather than one
+// flat fill for every zone regardless of intensity.
+const WORKOUT_COLORS = {
+  hr: "#ff6b6b",
+  elevation: "#4fd8b8",
+  speed: "#6ea8fe",
+  cadence: "#f0c674",
+  stride: "#b39ddb",
+  gpsTrack: "#f4a261",
+};
+// Indexed low-to-high intensity, matching HR_ZONE_ORDER in app/influx.py
+// (na/warm_up/fat_burn/aerobic/anaerobic/extreme) - a cool-to-hot
+// progression (gray for the untracked "N/A" zone, then blue -> teal ->
+// yellow -> orange -> red as intensity rises), not the same flat color
+// repeated for every zone regardless of how hard that zone actually is.
+const HR_ZONE_COLORS = {
+  na: "#8a8d99",
+  warm_up: "#6ea8fe",
+  fat_burn: "#4fd8b8",
+  aerobic: "#f0c674",
+  anaerobic: "#f4a261",
+  extreme: "#ff6b6b",
+};
+
 function formatSecondsAsMinSec(totalSeconds) {
   const m = Math.floor(totalSeconds / 60);
   const s = Math.round(totalSeconds % 60);
@@ -160,7 +189,7 @@ function renderHeartRateZones(zones) {
           <span class="metric-sub">${escapeHtml(z.bpmRangeLabel)}</span>
         </div>
         <div class="workout-zone-bar-track">
-          <div class="workout-zone-bar-fill" style="width: ${pct}%"></div>
+          <div class="workout-zone-bar-fill" style="width: ${pct}%; background: ${HR_ZONE_COLORS[z.key] || WORKOUT_COLORS.hr}"></div>
         </div>
         <div class="workout-zone-footer">
           <span class="metric-sub">${pct}%</span>
@@ -345,7 +374,17 @@ function renderCadencePanel(workout, samples) {
 // own shown 8%/76%/16% breakdown for this workout). Only rendered when
 // BOTH ascent_seconds and descent_seconds are present - an indoor
 // workout with no elevation data at all has nothing to show here.
-const GRADIENT_COLORS = { uphill: "#e88a8a", flat: "#f0c674", downhill: "#6ea8fe" };
+//
+// Colors chosen for terrain intuition (tan/earthy=effort, gray=neutral,
+// cool blue=ease/coasting) rather than reused from WORKOUT_COLORS above
+// - this is a genuinely different concept (terrain, not metric type),
+// and reusing another section's own color here (an earlier attempt at
+// this DID collide - uphill and downhill accidentally matched
+// gpsTrack/speed exactly, caught only by testing the actual hex values
+// against each other rather than eyeballing the two color sets) would
+// make two unrelated things on the same page look deliberately linked
+// when they aren't.
+const GRADIENT_COLORS = { uphill: "#c9976b", flat: "#8a8d99", downhill: "#7fb3d5" };
 
 function renderGradientDistribution(workout) {
   const { ascent_seconds, descent_seconds, active_seconds } = workout;
@@ -521,7 +560,7 @@ export async function openWorkoutDetail(startMs, onBack = null) {
       const points = samples.filter(p => p.hr !== undefined).map(p => ({ t: p.time, v: p.hr }));
       if (points.length > 0) {
         const deviceName = workout.device || "device";
-        registerActiveChart(buildLineChart(hrCanvas, { [deviceName]: points }, [deviceName], 0, "bpm"));
+        registerActiveChart(buildLineChart(hrCanvas, { [deviceName]: points }, [deviceName], 0, "bpm", false, WORKOUT_COLORS.hr));
       } else {
         hrCanvas.replaceWith(Object.assign(document.createElement("p"), {
           className: "metric-card-empty",
@@ -531,10 +570,10 @@ export async function openWorkoutDetail(startMs, onBack = null) {
     }
   }
 
-  renderPerSampleChart("workout-elevation-chart", samples, "altitude_m", workout.device, v => v, "m");
-  renderPerSampleChart("workout-speed-chart", samples, "speed_mps", workout.device, v => v * MPS_TO_MPH, "mph", true);
-  renderPerSampleChart("workout-cadence-chart", samples, "cadence_rpm", workout.device, v => v, "spm", true);
-  renderPerSampleChart("workout-stride-chart", samples, "step_length_mm", workout.device, v => v / 10 * CM_TO_INCHES, "in", true);
+  renderPerSampleChart("workout-elevation-chart", samples, "altitude_m", workout.device, v => v, "m", false, WORKOUT_COLORS.elevation);
+  renderPerSampleChart("workout-speed-chart", samples, "speed_mps", workout.device, v => v * MPS_TO_MPH, "mph", true, WORKOUT_COLORS.speed);
+  renderPerSampleChart("workout-cadence-chart", samples, "cadence_rpm", workout.device, v => v, "spm", true, WORKOUT_COLORS.cadence);
+  renderPerSampleChart("workout-stride-chart", samples, "step_length_mm", workout.device, v => v / 10 * CM_TO_INCHES, "in", true, WORKOUT_COLORS.stride);
   renderGpsMap(samples);
   renderGradientChart(workout);
 }
@@ -561,12 +600,12 @@ function renderGradientChart(workout) {
 // canvas doesn't exist at all (renderPerSampleChartCard already
 // decided not to render it, because this field is completely absent
 // for this workout - Yoga has no elevation/speed data, for instance).
-function renderPerSampleChart(canvasId, samples, field, deviceName, convert, unit, minZero = false) {
+function renderPerSampleChart(canvasId, samples, field, deviceName, convert, unit, minZero = false, colorOverride = null) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
   const points = samples.filter(p => p[field] !== undefined).map(p => ({ t: p.time, v: convert(p[field]) }));
   if (points.length === 0) return;
-  registerActiveChart(buildLineChart(canvas, { [deviceName || "device"]: points }, [deviceName || "device"], 1, unit, minZero));
+  registerActiveChart(buildLineChart(canvas, { [deviceName || "device"]: points }, [deviceName || "device"], 1, unit, minZero, colorOverride));
 }
 
 // Renders the real GPS track on a Leaflet map (OpenStreetMap tiles,
@@ -588,6 +627,6 @@ function renderGpsMap(samples) {
     attribution: "\u00a9 OpenStreetMap contributors",
   }).addTo(map);
 
-  const polyline = L.polyline(points, { color: "#e88a8a", weight: 4 }).addTo(map);
+  const polyline = L.polyline(points, { color: WORKOUT_COLORS.gpsTrack, weight: 4 }).addTo(map);
   map.fitBounds(polyline.getBounds(), { padding: [16, 16] });
 }
