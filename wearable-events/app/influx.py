@@ -339,6 +339,84 @@ def find_sleep_entries_in_range(user: str, start: datetime, end: datetime) -> li
     return results
 
 
+def get_sleep_journal_rollup(user: str, start_date: date, end_date: date) -> dict:
+    ''' Aggregates subjective sleep journal entries across
+    [start_date, end_date) into per-tag frequency counts - the "Time
+    Asleep (advanced)" page's own weekly Bedtime Journal / Wake-up Mood
+    rollup cards (see UI_DESIGN_NOTES.md's M/Y zoom levels entry: "a
+    ranked list of tag options, one row per tag actually used in the
+    period, showing a percentage of days + a day-count"). Reuses
+    find_sleep_entries_in_range() directly - no new Flux query, just
+    aggregation over what it already returns.
+
+    pre_sleep_factors -> "Bedtime Journal" (things logged as happening
+    BEFORE sleep - read, alcohol, late_screen_time, etc.); score ->
+    "Wake-up Mood" (the 1-5 rating, rolled up the same way, treating
+    each score value 1-5 as its own "tag"); qualifiers (how the sleep
+    itself felt - groggy, vivid_dreams, etc.) included too as a third
+    rollup, even though UI_DESIGN_NOTES.md's own two-category naming
+    doesn't have a slot for it - it's the same kind of subjective
+    per-night data and there's no reason to drop it just because
+    Zepp's own page didn't have a third section for it.
+
+    total_nights is the number of CALENDAR NIGHTS in the period, not
+    the number of entries - a night with no entry at all still counts
+    toward "no record" below, matching Zepp's own real screenshot
+    treatment of "No record" as its own pseudo-tag row rather than
+    simply excluding nights with nothing logged.
+
+    Multiple entries CAN share the same sleep_date (see
+    write_sleep_point's own docstring - e.g. a nap plus the main
+    night's sleep) - tag counts are deduplicated by sleep_date per tag
+    (a `set`, not a running total) so a night logging the same factor
+    twice across two sessions still counts as ONE night for that
+    factor, not two.
+    '''
+    start_dt = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
+    end_dt = datetime.combine(end_date, datetime.min.time(), tzinfo=timezone.utc)
+    entries = find_sleep_entries_in_range(user, start_dt, end_dt)
+
+    total_nights = (end_date - start_date).days
+
+    nights_with_entry = set()
+    factor_dates: dict[str, set] = {}
+    qualifier_dates: dict[str, set] = {}
+    mood_dates: dict[int, set] = {}
+
+    for entry in entries:
+        sleep_date = entry.get("sleep_date")
+        if not sleep_date:
+            continue
+        nights_with_entry.add(sleep_date)
+        for factor, is_set in (entry.get("pre_sleep_factors") or {}).items():
+            if is_set:
+                factor_dates.setdefault(factor, set()).add(sleep_date)
+        for qualifier, is_set in (entry.get("qualifiers") or {}).items():
+            if is_set:
+                qualifier_dates.setdefault(qualifier, set()).add(sleep_date)
+        score = entry.get("score")
+        if score is not None:
+            mood_dates.setdefault(score, set()).add(sleep_date)
+
+    def to_rollup(dates_by_key: dict) -> list[dict]:
+        rows = [
+            {"key": k, "nights": len(dates), "pct": round(len(dates) / total_nights * 100, 1) if total_nights else 0.0}
+            for k, dates in dates_by_key.items()
+        ]
+        return sorted(rows, key=lambda r: r["nights"], reverse=True)
+
+    no_record_nights = total_nights - len(nights_with_entry)
+
+    return {
+        "total_nights": total_nights,
+        "pre_sleep_factors": to_rollup(factor_dates),
+        "qualifiers": to_rollup(qualifier_dates),
+        "mood_scores": to_rollup(mood_dates),
+        "no_record_nights": no_record_nights,
+        "no_record_pct": round(no_record_nights / total_nights * 100, 1) if total_nights else 0.0,
+    }
+
+
 def find_sleep_entry_by_id(user: str, entry_id: str) -> dict | None:
     ''' Look up a single sleep entry by its stable entry_id, for the
     edit/delete endpoints. entry_id is a tag, so this can be filtered

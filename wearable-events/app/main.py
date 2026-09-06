@@ -50,6 +50,7 @@ from app.influx import (
     get_sleep_stage_breakdown,
     get_sleep_stage_trend,
     get_sleep_timing_trend,
+    get_sleep_journal_rollup,
     get_sleep_regularity_index,
     get_sleep_vitals_series,
     get_sleep_vitals_trend,
@@ -1100,6 +1101,26 @@ def get_sleep_stage_trend_endpoint(period: str, end_date: str | None = None, cur
         raise HTTPException(400, f"unsupported period: {period!r} (must be one of {sorted(SLEEP_TREND_PERIODS)})")
     start, end = _period_bounds(period, end_date)
     return get_sleep_stage_trend(current_user["username"], start.date(), end.date())
+
+
+@app.get("/sleep/journal-rollup")
+def get_sleep_journal_rollup_endpoint(period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Subjective sleep journal entries aggregated into per-tag
+    frequency counts across a W/M/Y range - the "Time Asleep
+    (advanced)" page's own weekly Bedtime Journal / Wake-up Mood
+    rollup cards (see get_sleep_journal_rollup's own docstring for the
+    full field-by-field mapping). Same period restriction as
+    /sleep/timing-trend and /sleep/stage-trend - unlike those two,
+    this ISN'T at risk of an unusable "365 raw bars" problem for a
+    year (it aggregates into a short list of tags, not one point per
+    night), so year is included here even though it's deliberately
+    left out of the Sleep Duration page's own period selector for a
+    different reason.
+    '''
+    if period not in SLEEP_TREND_PERIODS:
+        raise HTTPException(400, f"unsupported period: {period!r} (must be one of {sorted(SLEEP_TREND_PERIODS)})")
+    start, end = _period_bounds(period, end_date)
+    return get_sleep_journal_rollup(current_user["username"], start.date(), end.date())
 
 
 @app.get("/sleep/vitals-trend/{field}")

@@ -157,7 +157,7 @@ const medianMarkerPlugin = {
 // dataset-based line mixed onto a category axis doesn't reach the
 // real edges or draw on top reliably; this sidesteps both issues the
 // same way.
-function buildMeanLinePlugin(id, meanValue, label, formatFn) {
+function buildMeanLinePlugin(id, meanValue, label, formatFn, color = "#8a8d99") {
   if (meanValue === null || meanValue === undefined) return null;
   return {
     id,
@@ -166,7 +166,7 @@ function buildMeanLinePlugin(id, meanValue, label, formatFn) {
       const y = scales.y.getPixelForValue(meanValue);
 
       ctx.save();
-      ctx.strokeStyle = "#8a8d99";
+      ctx.strokeStyle = color;
       ctx.lineWidth = 1.5;
       ctx.setLineDash([5, 5]);
       ctx.beginPath();
@@ -180,7 +180,7 @@ function buildMeanLinePlugin(id, meanValue, label, formatFn) {
       const text = `${label || "Average"}: ${formatFn(meanValue)}`;
       const labelBelow = y - chartArea.top < 14;
       ctx.save();
-      ctx.fillStyle = "#8a8d99";
+      ctx.fillStyle = color;
       ctx.font = "11px sans-serif";
       ctx.textAlign = "right";
       ctx.textBaseline = labelBelow ? "top" : "bottom";
@@ -1273,7 +1273,12 @@ export function buildTimeScatterChart(canvas, series, devices, config = {}) {
       borderColor: color,
       borderWidth: 1.5,
       spanGaps: true,
-      pointRadius: 5,
+      // Configurable (default 5, the original hardcoded value, so
+      // every existing caller is unaffected) - the Sleep Reports
+      // page's own month view passes 0 here deliberately: 28-31 point
+      // markers on one chart is clutter, not useful detail, a real
+      // request rather than a guess.
+      pointRadius: config.pointRadius !== undefined ? config.pointRadius : 5,
       pointBackgroundColor: color,
       pointBorderColor: color,
     };
@@ -1343,10 +1348,23 @@ export function buildTimeScatterChart(canvas, series, devices, config = {}) {
 export function buildBedtimeWaketimeChart(canvas, trend, config) {
   const labels = trend.map(t => new Date(t.date).toLocaleDateString([], { month: "short", day: "numeric" }));
   const fmt = config.yTickCallback || ((v) => v);
+  // Opt-in, not the default - the existing Sleep Regularity (day) page
+  // already shows Avg Bedtime/Avg Wake Time as its own stats row above
+  // this same chart, so mean lines there would just repeat what's
+  // already visible. The newer Sleep Reports page (week/month) has no
+  // such stats row and asks for these explicitly instead.
+  const showMeanLines = !!config.showMeanLines;
+  // No point markers at all on a month view (28-31 points) - a real,
+  // deliberate request, since that many dots reads as clutter rather
+  // than data. Defaults to 4 (the original hardcoded value) so the
+  // existing day-view caller, which never passes this, is unaffected.
+  const pointRadius = config.pointRadius !== undefined ? config.pointRadius : 4;
 
+  const bedtimeValues = trend.map(config.bedtimeValue);
+  const waketimeValues = trend.map(config.waketimeValue);
   const series = [
-    { label: "Fell Asleep", color: "#6ea8fe", values: trend.map(config.bedtimeValue) },
-    { label: "Woke Up", color: "#f0c674", values: trend.map(config.waketimeValue) },
+    { key: "bedtime", label: "Fell Asleep", color: "#6ea8fe", values: bedtimeValues },
+    { key: "waketime", label: "Woke Up", color: "#f0c674", values: waketimeValues },
   ];
   const datasets = series.map(s => ({
     type: "line",
@@ -1357,14 +1375,32 @@ export function buildBedtimeWaketimeChart(canvas, trend, config) {
     borderWidth: 2,
     tension: 0.3,
     spanGaps: true,
-    pointRadius: 4,
+    pointRadius,
     pointBackgroundColor: s.color,
     pointBorderColor: s.color,
   }));
 
+  // Two mean lines, not one - buildMeanLinePlugin's own `id` has to be
+  // distinct per plugin instance (Chart.js keys registered plugins by
+  // id), and each line's color matches its own curve's color so two
+  // dashed lines on the same chart stay visually distinguishable from
+  // each other, not two identical gray dashes.
+  let meanPlugins = [];
+  if (showMeanLines) {
+    const meanOf = (values) => {
+      const real = values.filter(v => v !== null && v !== undefined);
+      return real.length ? real.reduce((a, b) => a + b, 0) / real.length : null;
+    };
+    meanPlugins = [
+      buildMeanLinePlugin("bedtimeMeanLine", meanOf(bedtimeValues), "Avg Bedtime", fmt, "#6ea8fe"),
+      buildMeanLinePlugin("waketimeMeanLine", meanOf(waketimeValues), "Avg Wake", fmt, "#f0c674"),
+    ].filter(Boolean);
+  }
+
   return new Chart(canvas, {
     type: "line",
     data: { labels, datasets },
+    plugins: meanPlugins,
     options: {
       responsive: true,
       animation: false,

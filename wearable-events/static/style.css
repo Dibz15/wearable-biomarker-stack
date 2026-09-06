@@ -1265,7 +1265,14 @@ main {
   gap: 0.1rem;
 }
 
-/* --- Workout Detail page (opened from a tappable session row above) --- */
+/* --- Workout Detail page (opened from a tappable session row above) ---
+   Also reused, as-is, by the Sleep Duration page's own weekly journal
+   rollup rows (sleep-detail.js) - same visual shape (a name, a
+   proportion bar, a stats footer) fits a ranked list of journal tags
+   just as well as an HR zone, despite the class names' own
+   workout-specific origin. Not renamed to something more generic to
+   avoid touching the already-working Workout Detail page's own markup
+   for a cosmetic naming concern. */
 
 .workout-zone-row {
   padding: 0.65rem 0;

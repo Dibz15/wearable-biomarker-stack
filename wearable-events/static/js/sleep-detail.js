@@ -4,7 +4,7 @@
 // (same one metric-detail.js's DETAIL_VIEWS and activity.js use).
 import { escapeHtml, api, todayISO, shiftISODate } from "./core.js";
 import { openDetailScreen, registerActiveChart, clearActiveCharts, renderDateNav, renderBaselineBar, renderPeriodButtons, wireDetailControls } from "./metric-detail.js";
-import { buildTrendBarChart, buildVitalsHypnogramSVG, buildRangeBarChart, buildSleepStageStackedChart, buildBedtimeWaketimeChart } from "./metric-charts.js";
+import { buildTrendBarChart, buildVitalsHypnogramSVG, buildRangeBarChart, buildBedtimeWaketimeChart } from "./metric-charts.js";
 
 function formatHoursMinutes(hours) {
   const totalMin = Math.round(hours * 60);
@@ -156,10 +156,7 @@ async function renderSleepDurationRollup(period, anchorDate) {
   clearActiveCharts();
 
   try {
-    const [timingTrend, stageTrend] = await Promise.all([
-      api(`/sleep/timing-trend?period=${period}&end_date=${anchorDate}`),
-      api(`/sleep/stage-trend?period=${period}&end_date=${anchorDate}`),
-    ]);
+    const timingTrend = await api(`/sleep/timing-trend?period=${period}&end_date=${anchorDate}`);
 
     if (timingTrend.length === 0) {
       content.innerHTML = `
@@ -173,41 +170,37 @@ async function renderSleepDurationRollup(period, anchorDate) {
       return;
     }
 
-    // A straight mean across however many nights actually have a
-    // recorded session - nights with no session are already omitted
-    // by get_sleep_timing_trend() itself, not zero-filled, so this
-    // isn't skewed toward 0 by missing nights.
-    const avgHours = timingTrend.reduce((sum, t) => sum + t.duration_s, 0) / timingTrend.length / 3600;
-
     content.innerHTML = `
       ${renderPeriodButtons(period, SLEEP_DURATION_PERIODS)}
       ${renderDateNav(period, anchorDate)}
-      <div class="sleep-summary-card">
-        <div class="sleep-summary-top">
-          <span class="sleep-summary-duration">${formatHoursMinutes(avgHours)}</span>
-          <span class="sleep-summary-date">Average \u00b7 ${timingTrend.length} night${timingTrend.length === 1 ? "" : "s"}</span>
-        </div>
-      </div>
-
-      <p class="today-section-label">Sleep Composition</p>
       <div class="detail-chart-card">
-        <canvas id="sleep-stage-stacked-chart"></canvas>
+        <canvas id="sleep-duration-rollup-chart"></canvas>
       </div>
     `;
     wireDetailControls(renderSleepDurationPeriod, period, anchorDate);
 
-    if (stageTrend.length > 0) {
-      const chart = buildSleepStageStackedChart(
-        document.getElementById("sleep-stage-stacked-chart"), stageTrend, { labelFormat: "day" }
-      );
-      if (chart) registerActiveChart(chart);
-    } else {
-      document.getElementById("sleep-stage-stacked-chart").replaceWith(Object.assign(document.createElement("p"), {
-        className: "metric-card-empty", textContent: "No sleep stage data for this period",
-      }));
-    }
+    // Same shape/chart as the day view's own "Last 7 Days" chart
+    // (buildTrendBarChart, one bar per night + a dashed period-mean
+    // line) - just spanning the whole selected period instead of a
+    // fixed trailing week. Everything else this page used to also
+    // show here (Sleep Composition, the journal rollup) moved to the
+    // new, dedicated Sleep Reports page - this page stays focused on
+    // duration specifically, matching the person's own direct
+    // request to keep it simple and put the richer breakdowns
+    // somewhere else.
+    const devices = [...new Set(timingTrend.map(t => t.device))];
+    const series = {};
+    devices.forEach(d => { series[d] = []; });
+    timingTrend.forEach(t => {
+      series[t.device].push({ t: t.date, value: Math.round((t.duration_s / 3600) * 10) / 10 });
+    });
+    const chart = buildTrendBarChart(
+      document.getElementById("sleep-duration-rollup-chart"), series, devices,
+      { yAxisTitle: "hours", decimals: 1, unit: "h", meanLabel: "Average" }
+    );
+    if (chart) registerActiveChart(chart);
   } catch (e) {
-    content.innerHTML = `${renderPeriodButtons(period, SLEEP_DURATION_PERIODS)}${renderDateNav(period, anchorDate)}<p class="status">Error loading sleep composition data: ${escapeHtml(e.message)}</p>`;
+    content.innerHTML = `${renderPeriodButtons(period, SLEEP_DURATION_PERIODS)}${renderDateNav(period, anchorDate)}<p class="status">Error loading sleep duration data: ${escapeHtml(e.message)}</p>`;
     wireDetailControls(renderSleepDurationPeriod, period, anchorDate);
   }
 }
@@ -435,14 +428,14 @@ async function renderSleepVitalsDay(field, anchorDate) {
 // after-noon / wake-before-noon pattern - a night that doesn't fit that
 // (e.g. an extreme shift-work schedule) would plot oddly, but that's a
 // reasonable simplification for what this chart is for.
-function noonAnchoredHour(iso) {
+export function noonAnchoredHour(iso) {
   const d = new Date(iso);
   let h = d.getHours() + d.getMinutes() / 60;
   if (h < 12) h += 24;
   return h;
 }
 
-function formatClockTime(hour) {
+export function formatClockTime(hour) {
   const h = ((hour % 24) + 24) % 24;
   const period = h < 12 ? "AM" : "PM";
   const h12raw = Math.floor(h) % 12;

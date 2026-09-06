@@ -13,6 +13,7 @@ import { escapeHtml, api, todayISO, shiftISODate } from "./core.js";
 import { renderDateNav } from "./metric-detail.js";
 import { buildHypnogramSVG } from "./metric-charts.js";
 import { openSleepDurationDetail, openSleepHeartRateDetail, openSleepRespiratoryRateDetail, openSleepRegularityDetail } from "./sleep-detail.js";
+import { openSleepReportsDetail } from "./sleep-reports.js";
 
 const SLEEP_STAGE_ORDER = ["deep", "light", "rem", "awake"];
 const SLEEP_STAGE_LABELS = { deep: "Deep", light: "Light", rem: "REM", awake: "Awake" };
@@ -392,20 +393,24 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
       <div class="sleep-summary-card metric-card-tappable" data-detail-field="sleep-regularity" role="button" tabindex="0">
         <span class="metric-card-label">Sleep Regularity</span>
       </div>
+      <div class="sleep-summary-card metric-card-tappable" data-detail-field="sleep-reports" role="button" tabindex="0">
+        <span class="metric-card-label">Sleep Reports</span>
+      </div>
       <div id="sleep-journal-section">${renderJournalSection(journalEntry)}</div>
     `;
     wireSleepOverviewDateNav(anchorDate);
     // Each sub-detail page has one or more tappable elements linking
     // to it (Duration has two - the header number and the stats-row
-    // item; Heart Rate/Respiratory Rate/Regularity have one each, so
-    // far) - one map from data-detail-field value to its opener, then
-    // wire every matching element generically, rather than hardcoding
-    // one query per field.
+    // item; Heart Rate/Respiratory Rate/Regularity/Reports have one
+    // each, so far) - one map from data-detail-field value to its
+    // opener, then wire every matching element generically, rather
+    // than hardcoding one query per field.
     const detailOpeners = {
       "sleep-duration": () => openSleepDurationDetail(anchorDate),
       "sleep-heart-rate": () => openSleepHeartRateDetail(anchorDate),
       "sleep-respiratory-rate": () => openSleepRespiratoryRateDetail(anchorDate),
       "sleep-regularity": () => openSleepRegularityDetail(anchorDate),
+      "sleep-reports": () => openSleepReportsDetail(anchorDate),
     };
     container.querySelectorAll("[data-detail-field]").forEach(el => {
       const open = detailOpeners[el.dataset.detailField];
