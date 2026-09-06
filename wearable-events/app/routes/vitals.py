@@ -111,8 +111,7 @@ def get_vitals_differential(field: str, period: str, end_date: str | None = None
 # Fields confirmed to carry a `{field}_type_num` tag distinguishing
 # manual from automatic readings (0=manual, 1=automatic - confirmed
 # for BOTH fields independently via a deliberate cross-check, not
-# assumed to carry over from one to the other; see
-# parser/activefit/FIELD_RESEARCH.md). Enforced here rather than
+# assumed to carry over from one to the other). Enforced here rather than
 # trusting the path parameter, same reasoning as every other allowlist
 # in this file - an unsupported field would otherwise just silently
 # return no rows (the tag filter never matches), a far less obvious

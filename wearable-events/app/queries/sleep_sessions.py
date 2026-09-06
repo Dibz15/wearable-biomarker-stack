@@ -99,7 +99,7 @@ def find_last_completed_sleep_session(user: str, lookback_days: int = 7, before:
                 # more than one device can have sleep-stage data for
                 # overlapping nights (the ring's historical data
                 # persists in InfluxDB even after being unbound from
-                # Gadgetbridge - see parser/activefit/FIELD_RESEARCH.md).
+                # Gadgetbridge).
                 # Real bug found and fixed here (2026-09): without this,
                 # get_sleep_stage_breakdown had no way to avoid summing
                 # BOTH devices' stage minutes together for the same
@@ -858,9 +858,9 @@ def get_sleep_quality_indicators(user: str, session_start: datetime, session_end
     (sleep efficiency, WASO, awakenings >5min), each compared against
     Ohayon et al. 2017's published "appropriate" thresholds for the
     configured age bracket - see SLEEP_QUALITY_THRESHOLDS' own
-    docstring in config.py for full sourcing, and FIELD_RESEARCH.md's
-    "Sleep Score" entry for why this is 3 metrics shown individually
-    rather than one blended Zepp-style score.
+    docstring in config.py for full sourcing and for why this is 3
+    metrics shown individually rather than one blended Zepp-style
+    score.
 
     Takes duration_s and awake_minutes as already-known inputs (from
     get_sleep_overview_for_night's own session/stage data) rather than
@@ -873,8 +873,7 @@ def get_sleep_quality_indicators(user: str, session_start: datetime, session_end
     proxy - NOT the strict clinical definition, which uses true time
     in bed (including any pre-sleep-onset period) as the denominator.
     This app has no separately-tracked "got into bed" timestamp to use
-    instead (see FIELD_RESEARCH.md's "time in bed" future-feature
-    note) - stated here so this isn't silently conflated with a
+    instead - stated here so this isn't silently conflated with a
     clinical-grade efficiency figure if ever compared against one.
 
     Returns a dict with each metric's raw value, whether it meets the

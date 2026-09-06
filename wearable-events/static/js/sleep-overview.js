@@ -266,11 +266,10 @@ function renderQualityMetricRow(label, valueText, meetsThreshold, thresholdText,
   `;
 }
 
-// Deliberately 3 individually-cited metrics, NOT a blended score - see
-// FIELD_RESEARCH.md's "Sleep Score" entry for why: no standardized
-// composite-scoring formula exists in the literature (confirmed via
-// the industry's own ANSI/CTA/NSF-2110 standard), which recommends
-// showing individual metrics with their own basis over a single
+// Deliberately 3 individually-cited metrics, NOT a blended score - no
+// standardized composite-scoring formula exists in the literature
+// (confirmed via the industry's own ANSI/CTA/NSF-2110 standard), which
+// recommends showing individual metrics with their own basis over a single
 // opaque number - exactly what this renders.
 function renderSleepQuality(quality) {
   if (!quality) return "";

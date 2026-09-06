@@ -45,8 +45,7 @@ def get_training_effect_label(value: float | None) -> dict | None:
 
 # The person's own real watch setting (Zepp: Settings -> interval type
 # -> "lactate threshold heart rate zone") - confirmed to change BOTH
-# the zone names AND the actual BPM thresholds (see
-# parser/activefit/FIELD_RESEARCH.md's own hr_zone_*_max_bpm entry).
+# the zone names AND the actual BPM thresholds.
 # This naming is a deliberate choice matching what the person actually
 # sees on their own watch/app, not Gadgetbridge's own generic internal
 # names (Warm-Up/Fat Burn/Aerobic/Anaerobic/Extreme) - see
@@ -170,8 +169,8 @@ WORKOUT_LAP_FIELDS = [
 
 def get_workout_detail_series(user: str, start_ms: int, fields: list[str]) -> list[dict]:
     ''' Per-sample points (sample_type="workout_detail", written by the
-    parser's extract_workout_detail_points from a real FIT/GPX export -
-    see parser/activefit/FIELD_RESEARCH.md) for ONE specific workout,
+    parser's extract_workout_detail_points from a real FIT/GPX export)
+    for ONE specific workout,
     correlated by its own `workout_start_time` tag - the SAME raw
     BASE_ACTIVITY_SUMMARY.START_TIME value get_workout_summary_detail()
     is keyed by, just carried as a string tag on these separate points
@@ -247,8 +246,8 @@ WORKOUT_LAP_FIELDS = [
 
 def get_workout_laps(user: str, start_ms: int) -> list[dict]:
     ''' Per-lap summaries (sample_type="workout_lap", written by the
-    parser's flatten_fit_laps - see parser/activefit/FIELD_RESEARCH.md)
-    for one workout, correlated the same way get_workout_detail_series()
+    parser's flatten_fit_laps) for one workout, correlated the
+    same way get_workout_detail_series()
     is (the shared workout_start_time tag). FIT's own "lap" message
     type only exists for FIT exports specifically - a GPX-sourced
     workout (see extract_workout_detail_points's own source-priority
@@ -327,9 +326,9 @@ def get_workout_raw_intensity(user: str, start_ms: int) -> dict[str, list[dict]]
 
 
 # Excluded from "sitting" time even though their intensity is
-# typically low too (see the real per-activity-kind distribution in
-# FIELD_RESEARCH.md - sleep's median intensity was 0, charging's was
-# also near-zero) - counting them would silently fold hours of sleep
+# typically low too (sleep's median intensity was 0, charging's was
+# also near-zero, confirmed against real data) - counting them would
+# silently fold hours of sleep
 # or a charging watch into a "sitting time" figure, which isn't what
 # this feature is for. not_worn is excluded for the same reason: time
 # the watch wasn't being worn isn't time the person was sitting,

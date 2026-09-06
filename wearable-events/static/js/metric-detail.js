@@ -262,7 +262,7 @@ const DETAIL_VIEWS = {
       yMax: 100,
       // Confirmed FIXED thresholds, stated directly in Zepp's own
       // educational blurb on the Stress page (not user-configurable,
-      // not inferred) - see parser/activefit/FIELD_RESEARCH.md.
+      // not inferred).
       bands: [
         { max: 39, label: "Relaxed", color: "#6ea8fe" },
         { max: 59, label: "Normal", color: "#6ecf97" },
@@ -922,3 +922,4 @@ async function fetchDetailSeries(chart, period, anchorDate) {
   }
   return api(`/vitals/range/${chart.field}?period=${period}&end_date=${anchorDate}`);
 }
+

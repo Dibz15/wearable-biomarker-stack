@@ -32,7 +32,7 @@ function titleCase(label) {
 
 // Every session shows its raw code alongside the label, known or not -
 // "outdoor_running" is a real decoded name but confirmed unreliable
-// for this device (see FIELD_RESEARCH.md), so it doesn't get shown
+// for this device, so it doesn't get shown
 // with any more confidence than an unmapped code. Keeping the raw
 // code visible either way is also what makes it possible to build an
 // eventual internal map by eye, the same way the "Hybrid training"
@@ -183,7 +183,7 @@ async function renderActivityDay(anchorDate) {
 
   // The two quick stat cards use whichever device reported anything
   // today - this app is realistically single-device right now (the
-  // ring has been unbound, see FIELD_RESEARCH.md), so picking the
+  // ring has been unbound), so picking the
   // first reporting device rather than trying to merge multiple
   // devices' minutes into one combined number.
   const statsDevice = intensityDevices[0] || stepsDevices[0];

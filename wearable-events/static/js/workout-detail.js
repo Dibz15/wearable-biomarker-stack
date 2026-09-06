@@ -76,8 +76,7 @@ function formatSecondsAsMinSec(totalSeconds) {
 function renderStatsRow(workout, samples) {
   // max_speed_mps comes from the summary blob's own Pace field - a
   // GENUINELY SEPARATE data source from the per-sample FIT export
-  // (see parser/activefit/FIELD_RESEARCH.md's own Pace/Speed
-  // solving entry) - it's entirely possible for a workout to have
+  // it's entirely possible for a workout to have
   // real per-sample speed data (the chart fills in fine) while the
   // summary blob itself never recorded a Pace field at all, a real
   // reported case, not hypothetical. Falls back to the max of the
@@ -146,9 +145,8 @@ function renderHeartRateSummary(workout, samples) {
 }
 
 // Each zone gets its own row: name, BPM range (from the real,
-// per-workout hr_zone_*_max_bpm thresholds - see
-// parser/activefit/FIELD_RESEARCH.md for how these were confirmed,
-// and why they're used instead of a fixed/guessed formula), a
+// per-workout hr_zone_*_max_bpm thresholds, confirmed rather than a
+// fixed/guessed formula), a
 // proportional bar, and the time spent in that zone. Zones with zero
 // duration AND no real bpm data at all are skipped entirely rather
 // than shown as an empty row - matches this app's own "don't

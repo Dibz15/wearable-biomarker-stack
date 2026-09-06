@@ -49,9 +49,8 @@ What to look for in the output:
     session), or a wire-format edge case the schema doesn't cover yet.
   - SUMMARY_DATA (separate, plaintext TEXT column): expected to be
     NULL/empty in practice - independently confirmed Gadgetbridge
-    strips this before writing to the DB to save space (see
-    FIELD_RESEARCH.md) - a non-empty value here would be a pleasant
-    surprise, not something to expect.
+    strips this before writing to the DB to save space - a non-empty
+    value here would be a pleasant surprise, not something to expect.
 '''
 
 import os

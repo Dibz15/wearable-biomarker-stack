@@ -1,5 +1,26 @@
+# Editor / OS cruft
 *~
-*pyc
-*swp
+*.swp
+.DS_Store
+
+# Env files (never commit real secrets - see env.stack.example for the template)
 **/*.env
+.env
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.venv/
+*.egg-info/
+
+# Node (occasionally useful for local frontend testing with a tool
+# like jsdom; nothing in this repo depends on it at runtime or in CI)
+node_modules/
+
+# Local dev databases (wearable-events' SQLITE_PATH, when pointed at a
+# file under the repo during local development)
+*.db
+
 /tmp/**

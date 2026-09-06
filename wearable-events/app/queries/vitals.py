@@ -212,8 +212,8 @@ def get_manual_readings(field: str, user: str, start: datetime, end: datetime) -
 
     Relies on `{field}_type_num` being a TAG (not a field) with value
     "0" meaning manual - confirmed for both stress and spo2 via a
-    deliberate cross-check (see parser/activefit/FIELD_RESEARCH.md),
-    not inferred from Gadgetbridge's feature-list wording alone. Only
+    deliberate cross-check, not inferred from Gadgetbridge's
+    feature-list wording alone. Only
     ever call this for a field actually confirmed to have this tag -
     MANUAL_TYPE_NUM_FIELDS in main.py is the enforced allowlist: an
     unsupported field would just silently return {} here (the tag

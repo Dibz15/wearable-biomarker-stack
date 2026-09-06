@@ -196,8 +196,7 @@ def get_precomputed_activity_sessions(user: str, for_date: date | None = None) -
     session list, as opposed to get_activity_sessions()'s derived-from-
     raw-data half. Genuinely sparse in practice - this table is
     populated only for explicitly-started workouts, not ambient daily
-    movement (see parser/activefit/FIELD_RESEARCH.md), so most days
-    will return an empty list here.
+    movement, so most days will return an empty list here.
 
     Average heart rate for each entry is computed by querying the
     already-extracted per-minute heart_rate field over that entry's own
@@ -402,7 +401,7 @@ def get_stood_hours(user: str, for_date: date | None = None) -> dict[str, int]:
     STAND_INTENSITY_THRESHOLD at some point during that hour, per
     device - confirmed empirically against the watch's own real hourly
     Stand display (see STAND_INTENSITY_THRESHOLD's own docstring in
-    config.py and parser/activefit/FIELD_RESEARCH.md).
+    config.py).
 
     Reuses the exact same per-minute data get_activity_sessions()
     already fetches. Buckets by LOCAL hour, not UTC - InfluxDB always

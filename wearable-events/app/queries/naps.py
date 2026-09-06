@@ -1,4 +1,4 @@
-"""Nap detection and trend, decoded from the hidden sleep-session sub-structure (see parser/activefit/FIELD_RESEARCH.md)."""
+"""Nap detection and trend, decoded from the hidden sleep-session sub-structure (see the parser's own decode_nap_candidates_from_blob() for the confirmed byte layout)."""
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -9,10 +9,10 @@ from app.queries.client import get_client
 
 def get_naps_for_date(user: str, local_date: date) -> list[dict]:
     ''' Naps (sample_type="nap", written by the parser's own
-    decode_nap_candidates_from_blob() - see
-    parser/activefit/FIELD_RESEARCH.md for the full confirmed byte
-    layout and reference-timestamp reasoning, verified end to end
-    against real ground truth across 3 real naps on 2 separate dates)
+    decode_nap_candidates_from_blob() - see its own docstring for the
+    full confirmed byte layout and reference-timestamp reasoning,
+    verified end to end against real ground truth across 3 real naps
+    on 2 separate dates)
     whose own start time falls within `local_date`'s calendar day, in
     the configured TZ_NAME.
 
