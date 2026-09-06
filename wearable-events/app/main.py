@@ -38,6 +38,7 @@ from app.influx import (
     get_workout_summary_detail,
     get_workout_detail_series,
     get_workout_laps,
+    get_workout_raw_intensity,
     get_hourly_activity_breakdown,
     get_manual_readings,
     get_nightly_baseline_comparison,
@@ -810,6 +811,20 @@ def get_workout_laps_endpoint(start_ms: int, current_user: dict = Depends(get_cu
     genuinely recorded none.
     '''
     return get_workout_laps(current_user["username"], start_ms)
+
+
+@app.get("/activity/workout/{start_ms}/raw-intensity")
+def get_workout_raw_intensity_endpoint(start_ms: int, current_user: dict = Depends(get_current_user)):
+    ''' raw_intensity readings scoped to one specific workout's own
+    real start/duration - see get_workout_raw_intensity's own
+    docstring for how this differs from the GPX/FIT-tag-correlated
+    /samples endpoint above (this is the watch's own always-on
+    background stream, not workout-specific data, so it's scoped by
+    real time window instead of a shared tag). Returns {} (not a 404)
+    when the workout itself can't be found or has no duration -
+    treated as "no intensity data", not a separate error case.
+    '''
+    return get_workout_raw_intensity(current_user["username"], start_ms)
 
 
 @app.get("/activity/sitting-minutes")

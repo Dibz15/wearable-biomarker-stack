@@ -12,7 +12,7 @@
 // documented layout this is working toward).
 import { escapeHtml, api, formatNum } from "./core.js";
 import { openDetailScreen, registerActiveChart, clearActiveCharts } from "./metric-detail.js";
-import { buildLineChart, buildCategoryPieChart } from "./metric-charts.js";
+import { buildLineChart, buildCategoryPieChart, buildTieredBarChart, renderTierLegend, INTENSITY_BANDS } from "./metric-charts.js";
 import { openZoomChart } from "./zoom-chart.js";
 
 // The person's own real watch setting (Zepp: Settings -> interval type
@@ -46,6 +46,11 @@ const WORKOUT_COLORS = {
   cadence: "#f0c674",
   stride: "#b39ddb",
   gpsTrack: "#f4a261",
+  // Distinct from every INTENSITY_BANDS tier color too (those clash
+  // with speed/cadence's own colors above) - only matters as a single
+  // representative line color in the zoom view, since the dedicated
+  // Activity Intensity panel itself uses the full tiered-bar coloring.
+  intensity: "#9b8fd4",
 };
 // Indexed low-to-high intensity, matching HR_ZONE_ORDER in app/influx.py
 // (na/warm_up/fat_burn/aerobic/anaerobic/extreme) - a cool-to-hot
@@ -485,6 +490,30 @@ function renderStridePanel(workout, samples) {
   `;
 }
 
+// Raw activity intensity during the workout's own real time window -
+// same continuous background monitoring stream and same tiered-bar
+// style as the Activity page's own daily intensity chart (see
+// INTENSITY_BANDS's own comment in metric-charts.js), just scoped to
+// the workout instead of a full day. A separate data source from every
+// other per-sample chart on this page (those all come from a GPX/FIT
+// export correlated by workout_start_time; this comes from the watch's
+// own always-on monitoring, scoped by the workout's real start/duration
+// instead - see get_workout_raw_intensity's own docstring) - so this
+// can be present even for a workout with no FIT/GPX export at all, and
+// absent even when the others aren't.
+function renderIntensityPanel(intensitySeries) {
+  const hasData = Object.values(intensitySeries).some(points => points.length > 0);
+  if (!hasData) return "";
+  return `
+    <p class="today-section-label">Activity Intensity</p>
+    <div class="detail-chart-card">
+      <canvas id="workout-intensity-chart"></canvas>
+      ${zoomTriggerHtml("intensity")}
+    </div>
+    ${renderTierLegend(INTENSITY_BANDS, "")}
+  `;
+}
+
 function renderGpsMapCard(samples) {
   const hasGps = samples.some(p => p.latitude !== undefined && p.longitude !== undefined);
   if (!hasGps) return "";
@@ -553,13 +582,29 @@ export async function openWorkoutDetail(startMs, onBack = null) {
     // below already treats as "nothing to show for this section".
   }
 
+  // Separate fetch, separate data source (see
+  // get_workout_raw_intensity's own docstring) - the watch's own
+  // always-on background monitoring, scoped by the workout's real
+  // start/duration rather than a GPX/FIT export tag, so it can be
+  // present even when samples above is empty (no export at all) and
+  // absent even when samples isn't. A failure here shouldn't take
+  // down the rest of the page either, same reasoning as above.
+  let intensitySeries = {};
+  try {
+    intensitySeries = await api(`/activity/workout/${startMs}/raw-intensity`);
+  } catch (e) {
+    // intensitySeries stays {}, which renderIntensityPanel already
+    // treats as "nothing to show for this section".
+  }
+
   content.innerHTML = `
     <p class="metric-sub" style="margin-bottom: 0.75rem;">${escapeHtml(dateLabel)} \u00b7 ${escapeHtml(workout.device || "")}</p>
     ${renderStatsRow(workout, samples)}
+    ${renderGpsMapCard(samples)}
     ${renderHeartRateSummary(workout, samples)}
     ${renderHeartRateZones(workout.hr_zones)}
+    ${renderIntensityPanel(intensitySeries)}
     ${renderTrainingEffectCard(workout)}
-    ${renderGpsMapCard(samples)}
     ${renderElevationPanel(workout, samples)}
     ${renderGradientDistribution(workout)}
     ${renderPerSampleChartCard("workout-speed-chart", "Speed", samples, "speed_mps", "speed")}
@@ -615,13 +660,22 @@ export async function openWorkoutDetail(startMs, onBack = null) {
   renderGpsMap(samples);
   renderGradientChart(workout);
 
+  const intensityCanvas = document.getElementById("workout-intensity-chart");
+  if (intensityCanvas) {
+    const intensityDevices = Object.keys(intensitySeries);
+    registerActiveChart(buildTieredBarChart(
+      intensityCanvas, intensitySeries, intensityDevices,
+      { bands: INTENSITY_BANDS, yMax: 255, unit: "", decimals: 0 }
+    ));
+  }
+
   document.querySelectorAll(".workout-zoom-trigger").forEach(btn => {
-    btn.onclick = () => openWorkoutZoom(workout, samples, btn.dataset.zoomKey);
+    btn.onclick = () => openWorkoutZoom(workout, samples, intensitySeries, btn.dataset.zoomKey);
   });
 }
 
 // Opens the shared zoom view for a workout, focused on whichever
-// panel's own button was tapped - all 5 metrics are still toggleable
+// panel's own button was tapped - all 6 metrics are still toggleable
 // together there (the original spec this shares with the sleep
 // hypnogram's zoom), `focusKey` just decides which one starts already
 // visible instead of requiring an extra tap to see the very chart the
@@ -630,8 +684,8 @@ export async function openWorkoutDetail(startMs, onBack = null) {
 // same pairing buildWorkoutZoomSeries's own default-on set already
 // used) - so tapping "Zoom" on Cadence, say, opens with HR + Cadence
 // visible, not Cadence alone.
-function openWorkoutZoom(workout, samples, focusKey) {
-  const series = buildWorkoutZoomSeries(workout, samples).map(s => ({
+function openWorkoutZoom(workout, samples, intensitySeries, focusKey) {
+  const series = buildWorkoutZoomSeries(workout, samples, intensitySeries).map(s => ({
     ...s,
     defaultOn: s.key === focusKey || (s.key === "hr" && focusKey !== "hr"),
   }));
@@ -678,7 +732,17 @@ function renderPerSampleChart(canvasId, samples, field, deviceName, convert, uni
 // overrides it per call based on which panel's own button was tapped,
 // so this only matters if this function is ever called directly
 // without going through that.
-function buildWorkoutZoomSeries(workout, samples) {
+//
+// Activity Intensity is handled separately from the other 5 - it
+// comes from `intensitySeries` (get_workout_raw_intensity's own
+// {"<device>": [{t,v}]} shape, the watch's own always-on background
+// stream), not from `samples` (a GPX/FIT export correlated by tag) -
+// so it needs its own per-device flattening rather than fitting the
+// shared per-sample-field pattern the other 5 all follow. Only the
+// FIRST reporting device's points are used, same "realistically
+// single-device" simplification used elsewhere in this app (e.g.
+// sleep-overview.js's own HR/respiratory zoom series).
+function buildWorkoutZoomSeries(workout, samples, intensitySeries = {}) {
   const fieldConfigs = [
     { key: "hr", label: "Heart Rate", color: WORKOUT_COLORS.hr, unit: "bpm", field: "hr", convert: v => v, decimals: 0, defaultOn: true },
     { key: "elevation", label: "Elevation", color: WORKOUT_COLORS.elevation, unit: "m", field: "altitude_m", convert: v => v, decimals: 0, defaultOn: true },
@@ -686,7 +750,7 @@ function buildWorkoutZoomSeries(workout, samples) {
     { key: "cadence", label: "Cadence", color: WORKOUT_COLORS.cadence, unit: "spm", field: "cadence_rpm", convert: v => v, decimals: 0, defaultOn: false },
     { key: "stride", label: "Stride", color: WORKOUT_COLORS.stride, unit: "in", field: "step_length_mm", convert: v => v / 10 * CM_TO_INCHES, decimals: 1, defaultOn: false },
   ];
-  return fieldConfigs
+  const series = fieldConfigs
     .map(c => ({
       key: c.key,
       label: c.label,
@@ -697,6 +761,21 @@ function buildWorkoutZoomSeries(workout, samples) {
       points: samples.filter(p => p[c.field] !== undefined).map(p => ({ t: p.time, v: c.convert(p[c.field]) })),
     }))
     .filter(s => s.points.length > 0);
+
+  const intensityPoints = Object.values(intensitySeries)[0] || [];
+  if (intensityPoints.length > 0) {
+    series.push({
+      key: "intensity",
+      label: "Activity Intensity",
+      color: WORKOUT_COLORS.intensity,
+      unit: "",
+      decimals: 0,
+      defaultOn: false,
+      points: intensityPoints,
+    });
+  }
+
+  return series;
 }
 
 

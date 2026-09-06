@@ -6,22 +6,9 @@ import {
 } from "./metric-detail.js";
 import {
   buildRangeBarChart, buildTieredBarChart, buildStackedMinutesChart,
-  buildActivityTimeChart, renderTierLegend,
+  buildActivityTimeChart, renderTierLegend, INTENSITY_BANDS,
 } from "./metric-charts.js";
 import { openWorkoutDetail } from "./workout-detail.js";
-
-// Our own bands, anchored on real confirmed data (STAND_INTENSITY_THRESHOLD=50,
-// confirmed against the watch's own hourly Stand display; the ~0-255
-// raw scale, confirmed against real values) - not an official Zepp/
-// Gadgetbridge scheme the way Stress's tiers are. See
-// parser/activefit/FIELD_RESEARCH.md for the full reasoning behind
-// these specific boundaries.
-const INTENSITY_BANDS = [
-  { max: 24, label: "Resting", color: "#6ea8fe" },
-  { max: 49, label: "Light", color: "#6ecf97" },
-  { max: 99, label: "Active", color: "#f0c674" },
-  { max: 255, label: "Vigorous", color: "#e88a8a" },
-];
 
 // A single flat band spanning the whole range - reuses
 // buildTieredBarChart's per-point bar rendering (sparse, discrete

@@ -1714,6 +1714,34 @@ def get_workout_laps(user: str, start_ms: int) -> list[dict]:
     return laps
 
 
+def get_workout_raw_intensity(user: str, start_ms: int) -> dict[str, list[dict]]:
+    ''' raw_intensity readings during one specific workout's own real
+    time window - the same continuous background activity-monitoring
+    stream the Activity page's own day-view intensity chart reads
+    (_grouped_series, shared with get_today_series()), just scoped to
+    a workout's own start/duration instead of a full calendar day.
+
+    Unlike get_workout_detail_series() (which correlates by the
+    workout_start_time TAG present on GPX/FIT-derived per-sample
+    points), raw_intensity isn't workout-specific data at all - it's
+    the watch's own always-on monitoring, with no such tag - so this
+    needs the workout's own real start/end TIMES to scope a plain
+    range query instead. Looked up via get_workout_summary_detail()
+    itself (start + duration_s), not requested as a parameter, so the
+    caller doesn't need to already know or separately fetch those.
+
+    Returns {} (not an error) if the workout itself can't be found -
+    the caller should treat this the same as "no intensity data for
+    this workout", not surface a separate failure mode.
+    '''
+    summary = get_workout_summary_detail(user, start_ms)
+    if summary is None or summary.get("duration_s") is None:
+        return {}
+    start_dt = datetime.fromisoformat(summary["start"])
+    end_dt = start_dt + timedelta(seconds=summary["duration_s"])
+    return _grouped_series("raw_intensity", user, start_dt, end_dt)
+
+
 # Excluded from "sitting" time even though their intensity is
 # typically low too (see the real per-activity-kind distribution in
 # FIELD_RESEARCH.md - sleep's median intensity was 0, charging's was

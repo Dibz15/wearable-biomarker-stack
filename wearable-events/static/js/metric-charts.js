@@ -825,6 +825,25 @@ export function buildActivityTimeChart(canvas, series, devices, config) {
 // than a separate palette invented just for this chart, so the same
 // stage reads as the same color everywhere in the app.
 const HYPNOGRAM_STAGE_ORDER_TOP_TO_BOTTOM = ["awake", "rem", "light", "deep"];
+// Our own bands, anchored on real confirmed data (STAND_INTENSITY_THRESHOLD=50,
+// confirmed against the watch's own hourly Stand display; the ~0-255
+// raw scale, confirmed against real values) - not an official Zepp/
+// Gadgetbridge scheme the way Stress's tiers are. See
+// parser/activefit/FIELD_RESEARCH.md for the full reasoning behind
+// these specific boundaries. Lives here (not in activity.js, where it
+// was originally defined) so both activity.js and workout-detail.js
+// can import it without creating a circular dependency between them -
+// activity.js already imports openWorkoutDetail from workout-detail.js,
+// so workout-detail.js importing INTENSITY_BANDS back from activity.js
+// would form a cycle; metric-charts.js is a shared leaf module neither
+// of those two imports back, so it's the safe common home for this.
+export const INTENSITY_BANDS = [
+  { max: 24, label: "Resting", color: "#6ea8fe" },
+  { max: 49, label: "Light", color: "#6ecf97" },
+  { max: 99, label: "Active", color: "#f0c674" },
+  { max: 255, label: "Vigorous", color: "#e88a8a" },
+];
+
 export const HYPNOGRAM_STAGE_COLORS = { deep: "#7c6ce8", light: "#6ea8fe", rem: "#4fd8b8", awake: "#e88a8a" };
 export const HYPNOGRAM_STAGE_LABELS = { deep: "Deep", light: "Light", rem: "REM", awake: "Awake" };
 
