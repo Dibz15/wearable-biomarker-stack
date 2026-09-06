@@ -15,7 +15,7 @@ subjective sleep-quality score, so raw sensor trends can eventually be
 correlated against what was actually happening in your day.
 
 An Amazfit parser (`parser/amazfit/`) optionally runs alongside the ring parser
-for a second device — best-effort, some field semantics unverified. See
+for a second device. See
 [`parser/amazfit/README.md`](./parser/amazfit/README.md).
 
 Everything runs in Docker, tested against [CasaOS](https://casaos.io/)
@@ -28,7 +28,7 @@ device itself computes a basic HRV baseline, and this stack otherwise
 gives you the raw trends to build on.
 
 ![wearable-events UI — Today, Sleep, and Activity pages](./wearable-events/media/screenshots-hero.png)
-*The wearable-events companion app — daily summary, sleep detail, and workout detail.*
+*The wearable-events companion app; daily summary, sleep detail, and workout detail.*
 
 ## Quick start
 
