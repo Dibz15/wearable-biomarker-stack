@@ -116,6 +116,167 @@ main {
   margin: 0 auto;
 }
 
+/* Zoomed-chart overlay - shares #detail-screen's own fixed/inset/z-index
+   shape but sits on its own layer above it (z-index 30 vs 20), since
+   it can be opened FROM a #detail-screen view (e.g. Workout Detail) as
+   well as directly from a Today-tab card (the sleep hypnogram). */
+#zoom-screen {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  z-index: 30;
+  overflow-y: auto;
+}
+
+.zoom-content {
+  padding: 1rem;
+  max-width: 480px;
+  margin: 0 auto;
+}
+
+/* Overview strip: a low-res sparkline of the ENTIRE range, with a
+   highlighted rectangle marking the current zoom window - dragging the
+   scrubber below moves this rectangle, giving constant "where am I in
+   the whole picture" context the same way Zepp's own zoom view does. */
+.zoom-overview-wrap {
+  width: 100%;
+  height: 60px;
+  margin-bottom: 0.5rem;
+}
+
+.zoom-overview-wrap svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.zoom-window-rect {
+  fill: var(--accent);
+  fill-opacity: 0.18;
+  stroke: var(--accent);
+  stroke-width: 1;
+}
+
+/* Selected-point readout: exact timestamp + one value per enabled
+   series, in that series' own color - the precise-number counterpart
+   to the chart's own necessarily-approximate visual line, especially
+   important once multiple series with different units/scales are
+   overlaid together and a shared numeric axis stops being meaningful. */
+.zoom-readout {
+  min-height: 3.2rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--surface);
+  border-radius: 10px;
+  margin-bottom: 0.5rem;
+}
+
+.zoom-readout-time {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-bottom: 0.25rem;
+}
+
+.zoom-readout-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+}
+
+.zoom-readout-value {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.zoom-readout-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.zoom-readout-unit {
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.zoom-main-chart-wrap {
+  width: 100%;
+  height: 280px;
+  margin-bottom: 0.75rem;
+}
+
+.zoom-scrubber {
+  width: 100%;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-active);
+  margin: 0.5rem 0 1rem;
+}
+
+.zoom-scrubber::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: 2px solid var(--bg);
+}
+
+.zoom-scrubber::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: 2px solid var(--bg);
+}
+
+/* Series toggles: multiple can be on at once (checkboxes, not a
+   radio/tab group) - the person's own explicit spec, e.g. HR +
+   respiratory rate overlaid on the sleep hypnogram zoom, or HR +
+   elevation + cadence + stride + speed all together on a workout's
+   zoom. Each label's own dot matches that series' chart line color. */
+.zoom-series-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.zoom-series-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.65rem;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--surface-active);
+  font-size: 0.85rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.zoom-series-toggle input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.zoom-series-toggle-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
 .button-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);

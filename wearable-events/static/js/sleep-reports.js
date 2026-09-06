@@ -145,15 +145,16 @@ async function renderSleepReportsPeriod(period, anchorDate) {
   clearActiveCharts();
 
   try {
-    const [timingTrend, stageTrend, hrTrend, respTrend, journalRollup] = await Promise.all([
+    const [timingTrend, stageTrend, napTrend, hrTrend, respTrend, journalRollup] = await Promise.all([
       api(`/sleep/timing-trend?period=${period}&end_date=${anchorDate}`),
       api(`/sleep/stage-trend?period=${period}&end_date=${anchorDate}`),
+      api(`/sleep/nap-trend?period=${period}&end_date=${anchorDate}`),
       api(`/sleep/vitals-trend/heart_rate?period=${period}&end_date=${anchorDate}`),
       api(`/sleep/vitals-trend/sleep_respiratory_rate?period=${period}&end_date=${anchorDate}`),
       api(`/sleep/journal-rollup?period=${period}&end_date=${anchorDate}`),
     ]);
 
-    if (timingTrend.length === 0 && stageTrend.length === 0) {
+    if (timingTrend.length === 0 && stageTrend.length === 0 && napTrend.length === 0) {
       content.innerHTML = `
         ${renderPeriodButtons(period, SLEEP_REPORTS_PERIODS)}
         ${renderDateNav(period, anchorDate)}
@@ -170,10 +171,16 @@ async function renderSleepReportsPeriod(period, anchorDate) {
     // keeps them.
     const pointRadius = period === "week" ? undefined : 0;
 
+    // Composition shows whenever there's EITHER stage or nap data - a
+    // period with naps but genuinely no recorded main sleep sessions
+    // (unusual, but not impossible) should still show its own nap bars,
+    // not disappear just because stageTrend alone is empty.
+    const hasComposition = stageTrend.length > 0 || napTrend.length > 0;
+
     content.innerHTML = `
       ${renderPeriodButtons(period, SLEEP_REPORTS_PERIODS)}
       ${renderDateNav(period, anchorDate)}
-      ${stageTrend.length > 0 ? sectionCard("Sleep Composition", "sleep-reports-composition-chart") : ""}
+      ${hasComposition ? sectionCard("Sleep Composition", "sleep-reports-composition-chart") : ""}
       ${timingTrend.length > 0 ? sectionCard("Sleep Regularity", "sleep-reports-regularity-chart") : ""}
       ${stageTrend.length > 0 ? sectionCard("Deep Sleep", "sleep-reports-deep-chart") : ""}
       ${stageTrend.length > 0 ? sectionCard("REM Sleep", "sleep-reports-rem-chart") : ""}
@@ -184,12 +191,14 @@ async function renderSleepReportsPeriod(period, anchorDate) {
     `;
     wireDetailControls(renderSleepReportsPeriod, period, anchorDate);
 
-    if (stageTrend.length > 0) {
+    if (hasComposition) {
       const compositionChart = buildSleepStageStackedChart(
-        document.getElementById("sleep-reports-composition-chart"), stageTrend, { labelFormat: "day" }
+        document.getElementById("sleep-reports-composition-chart"), stageTrend, napTrend, { labelFormat: "day" }
       );
       if (compositionChart) registerActiveChart(compositionChart);
+    }
 
+    if (stageTrend.length > 0) {
       const deepChart = buildTrendBarChart(
         document.getElementById("sleep-reports-deep-chart"), buildStageMinutesSeries(stageTrend, "deep"), ["Minutes"],
         { yAxisTitle: "minutes", decimals: 0, unit: "m", meanLabel: "Average", colorOverride: REPORT_COLORS.deep }

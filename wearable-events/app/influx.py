@@ -477,6 +477,69 @@ def get_naps_for_date(user: str, local_date: date) -> list[dict]:
     return naps
 
 
+def get_nap_trend(user: str, start_date: date, end_date: date) -> list[dict]:
+    ''' Total nap minutes per calendar day across [start_date, end_date)
+    - the Sleep Reports page's own weekly/monthly composition chart,
+    showing naps as their own distinct category alongside Deep/Light/
+    REM/Awake - matching Zepp's own real treatment (UI_DESIGN_NOTES.md's
+    "Time Asleep (advanced)" page notes: naps shown as a separate,
+    distinctly-colored bar/legend entry, not folded into the main
+    stack).
+
+    One Flux query over the whole range (not one get_naps_for_date()
+    call per day in a loop) - same "fetch once, group client-side"
+    principle already used elsewhere in this file (e.g.
+    find_sleep_entries_in_range). Groups by each nap's own START time
+    converted to the configured local timezone, matching
+    get_naps_for_date()'s own per-day query bounds, so a day's total
+    here always matches what that function would return for the same
+    day.
+
+    Returns a chronologically-sorted list of {"date": "YYYY-MM-DD",
+    "total_nap_minutes": int} - days with no naps are omitted (not
+    zero-filled), same convention as get_sleep_stage_trend()/
+    get_sleep_timing_trend(). A day with more than one nap (confirmed
+    real - the person's own 2026-09-05 had two) sums to one combined
+    total for that day, matching how the stacked composition chart
+    itself works (one bar per day, not one segment per individual nap).
+    '''
+    tz = ZoneInfo(TZ_NAME)
+    range_start = datetime.combine(start_date, datetime.min.time(), tzinfo=tz)
+    range_end = datetime.combine(end_date, datetime.min.time(), tzinfo=tz)
+
+    client = get_client()
+    query_api = client.query_api()
+
+    flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: {range_start.astimezone(timezone.utc).isoformat()}, stop: {range_end.astimezone(timezone.utc).isoformat()})
+      |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+      |> filter(fn: (r) => r.sample_type == "nap")
+      |> filter(fn: (r) => r.user == "{user}")
+      |> filter(fn: (r) => r._field == "nap_duration_s")
+    '''
+
+    try:
+        tables = query_api.query(flux)
+    except Exception as e:
+        logger.warning(f"Failed to query nap trend for user={user}: {e}")
+        return []
+
+    seconds_by_date: dict[str, float] = {}
+    for table in tables:
+        for record in table.records:
+            local_date = record.get_time().astimezone(tz).date().isoformat()
+            duration_s = record.get_value()
+            if duration_s is None:
+                continue
+            seconds_by_date[local_date] = seconds_by_date.get(local_date, 0) + duration_s
+
+    return [
+        {"date": d, "total_nap_minutes": round(secs / 60)}
+        for d, secs in sorted(seconds_by_date.items())
+    ]
+
+
 def find_sleep_entry_by_id(user: str, entry_id: str) -> dict | None:
     ''' Look up a single sleep entry by its stable entry_id, for the
     edit/delete endpoints. entry_id is a tag, so this can be filtered

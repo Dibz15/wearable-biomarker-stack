@@ -13,6 +13,7 @@
 import { escapeHtml, api, formatNum } from "./core.js";
 import { openDetailScreen, registerActiveChart, clearActiveCharts } from "./metric-detail.js";
 import { buildLineChart, buildCategoryPieChart } from "./metric-charts.js";
+import { openZoomChart } from "./zoom-chart.js";
 
 // The person's own real watch setting (Zepp: Settings -> interval type
 // -> "lactate threshold heart rate zone") - matches
@@ -530,6 +531,11 @@ export async function openWorkoutDetail(startMs, onBack = null) {
     ${renderPerSampleChartCard("workout-speed-chart", "Speed", samples, "speed_mps")}
     ${renderCadencePanel(workout, samples)}
     ${renderStridePanel(workout, samples)}
+    ${samples.length > 0 ? `
+      <div class="sleep-summary-card metric-card-tappable" id="workout-zoom-trigger" role="button" tabindex="0">
+        <span class="metric-card-label">Zoom & Compare</span>
+      </div>
+    ` : ""}
     ${renderLapsTable(laps)}
   `;
 
@@ -576,6 +582,16 @@ export async function openWorkoutDetail(startMs, onBack = null) {
   renderPerSampleChart("workout-stride-chart", samples, "step_length_mm", workout.device, v => v / 10 * CM_TO_INCHES, "in", true, WORKOUT_COLORS.stride);
   renderGpsMap(samples);
   renderGradientChart(workout);
+
+  const zoomTrigger = document.getElementById("workout-zoom-trigger");
+  if (zoomTrigger) {
+    zoomTrigger.onclick = () => {
+      openZoomChart({
+        title: workout.name || "Workout",
+        series: buildWorkoutZoomSeries(workout, samples),
+      });
+    };
+  }
 }
 
 // Fills in the Gradient Distribution pie chart, if its own card was
@@ -607,6 +623,37 @@ function renderPerSampleChart(canvasId, samples, field, deviceName, convert, uni
   if (points.length === 0) return;
   registerActiveChart(buildLineChart(canvas, { [deviceName || "device"]: points }, [deviceName || "device"], 1, unit, minZero, colorOverride));
 }
+
+// The zoom view's own series config for a workout - one entry per
+// per-sample metric this workout actually has data for (a Yoga
+// session has no elevation/speed/cadence/stride at all, so those are
+// simply omitted rather than offered as an empty toggle). HR and
+// Elevation default on (the two most commonly meaningful together -
+// "how did effort/terrain relate"); Speed/Cadence/Stride start off,
+// available to add via their own checkboxes. Colors match
+// WORKOUT_COLORS exactly, so a series looks the same whether it's
+// shown in its own dedicated card above or overlaid in the zoom view.
+function buildWorkoutZoomSeries(workout, samples) {
+  const fieldConfigs = [
+    { key: "hr", label: "Heart Rate", color: WORKOUT_COLORS.hr, unit: "bpm", field: "hr", convert: v => v, decimals: 0, defaultOn: true },
+    { key: "elevation", label: "Elevation", color: WORKOUT_COLORS.elevation, unit: "m", field: "altitude_m", convert: v => v, decimals: 0, defaultOn: true },
+    { key: "speed", label: "Speed", color: WORKOUT_COLORS.speed, unit: "mph", field: "speed_mps", convert: v => v * MPS_TO_MPH, decimals: 1, defaultOn: false },
+    { key: "cadence", label: "Cadence", color: WORKOUT_COLORS.cadence, unit: "spm", field: "cadence_rpm", convert: v => v, decimals: 0, defaultOn: false },
+    { key: "stride", label: "Stride", color: WORKOUT_COLORS.stride, unit: "in", field: "step_length_mm", convert: v => v / 10 * CM_TO_INCHES, decimals: 1, defaultOn: false },
+  ];
+  return fieldConfigs
+    .map(c => ({
+      key: c.key,
+      label: c.label,
+      color: c.color,
+      unit: c.unit,
+      decimals: c.decimals,
+      defaultOn: c.defaultOn,
+      points: samples.filter(p => p[c.field] !== undefined).map(p => ({ t: p.time, v: c.convert(p[c.field]) })),
+    }))
+    .filter(s => s.points.length > 0);
+}
+
 
 // Renders the real GPS track on a Leaflet map (OpenStreetMap tiles,
 // loaded via CDN in index.html - the person's own explicit choice

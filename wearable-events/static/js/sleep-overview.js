@@ -11,9 +11,10 @@
 // own entry (see the journal section further down).
 import { escapeHtml, api, todayISO, shiftISODate } from "./core.js";
 import { renderDateNav } from "./metric-detail.js";
-import { buildHypnogramSVG } from "./metric-charts.js";
+import { buildHypnogramSVG, HYPNOGRAM_STAGE_COLORS, HYPNOGRAM_STAGE_LABELS } from "./metric-charts.js";
 import { openSleepDurationDetail, openSleepHeartRateDetail, openSleepRespiratoryRateDetail, openSleepRegularityDetail } from "./sleep-detail.js";
 import { openSleepReportsDetail } from "./sleep-reports.js";
+import { openZoomChart } from "./zoom-chart.js";
 
 const SLEEP_STAGE_ORDER = ["deep", "light", "rem", "awake"];
 const SLEEP_STAGE_LABELS = { deep: "Deep", light: "Light", rem: "REM", awake: "Awake" };
@@ -384,6 +385,51 @@ function renderNapsSection(naps) {
   `;
 }
 
+// Numeric "depth" encoding for the sleep stage stepped-line series in
+// the hypnogram zoom view - matches HYPNOGRAM_STAGE_ORDER_TOP_TO_BOTTOM's
+// own visual convention (awake highest/top, deep lowest/bottom) used by
+// buildHypnogramSVG itself, just as numbers instead of vertical
+// position, so the zoomed stepped line reads the same way the SVG
+// hypnogram already does (deep sleep dips low, awake spikes high).
+const STAGE_DEPTH = { deep: 0, light: 1, rem: 2, awake: 3 };
+const STAGE_DEPTH_LABELS = {
+  0: HYPNOGRAM_STAGE_LABELS.deep,
+  1: HYPNOGRAM_STAGE_LABELS.light,
+  2: HYPNOGRAM_STAGE_LABELS.rem,
+  3: HYPNOGRAM_STAGE_LABELS.awake,
+};
+// Same HR/respiratory colors used on the Sleep Reports page's own
+// REPORT_COLORS, so a series looks the same wherever it appears.
+const ZOOM_HR_COLOR = "#ff6b6b";
+const ZOOM_RESP_COLOR = "#6ea8fe";
+
+// Converts the hypnogram's own {stage, start, duration_min} segments
+// (buildHypnogramSVG's input shape) into a stepped-line zoom series -
+// the person's own explicit spec: on the hypnogram's zoom, HR and
+// respiratory rate are OPTIONAL overlays "on top" of the sleep stage
+// itself, so the stage line is the always-meaningful default-on
+// series here, not one of the optional toggles.
+function hypnogramToZoomSeries(segments) {
+  if (!segments || segments.length === 0) return null;
+  const points = segments.map(seg => ({ t: seg.start, v: STAGE_DEPTH[seg.stage] ?? 1 }));
+  // Extend one more point to the LAST segment's own end, so the
+  // stepped line runs all the way to the real wake time instead of
+  // stopping short at the final segment's start.
+  const last = segments[segments.length - 1];
+  const lastEndMs = new Date(last.start).getTime() + last.duration_min * 60000;
+  points.push({ t: new Date(lastEndMs).toISOString(), v: STAGE_DEPTH[last.stage] ?? 1 });
+
+  return {
+    key: "hypnogram",
+    label: "Sleep Stage",
+    color: HYPNOGRAM_STAGE_COLORS.deep,
+    defaultOn: true,
+    stepped: true,
+    valueLabels: STAGE_DEPTH_LABELS,
+    points,
+  };
+}
+
 export async function loadSleepOverview(anchorDate = todayISO()) {
   const container = document.getElementById("sleep-overview");
   container.innerHTML = `${renderDateNav("day", anchorDate)}<p class="muted">Loading...</p>`;
@@ -395,12 +441,14 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
   journalEditingExisting = false;
 
   try {
-    const [overview, hypnogram, journalEntry, regularityIndex, naps] = await Promise.all([
+    const [overview, hypnogram, journalEntry, regularityIndex, naps, hrSeries, respSeries] = await Promise.all([
       api(`/sleep/overview?date=${anchorDate}`),
       api(`/sleep/hypnogram?date=${anchorDate}`),
       api(`/sleep/entry?date=${anchorDate}`),
       api(`/sleep/regularity-index?end_date=${anchorDate}`),
       api(`/sleep/naps?date=${anchorDate}`),
+      api(`/sleep/vitals-series/heart_rate?date=${anchorDate}`),
+      api(`/sleep/vitals-series/sleep_respiratory_rate?date=${anchorDate}`),
     ]);
 
     if (overview === null) {
@@ -425,7 +473,7 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
           <span class="sleep-summary-date">${escapeHtml(anchorDate)}</span>
         </div>
         ${hasStageData
-          ? `<div class="sleep-hypnogram-card">${buildHypnogramSVG(hypnogram, { width: 800, height: 190 })}</div><div class="sleep-stage-legend">${renderHypnogramLegend(hypnogram)}</div>`
+          ? `<div class="sleep-hypnogram-card">${buildHypnogramSVG(hypnogram, { width: 800, height: 190 })}</div><div class="sleep-stage-legend">${renderHypnogramLegend(hypnogram)}</div><button id="hypnogram-zoom-trigger" class="small-btn" style="margin-top:0.5rem;">Zoom \u2197</button>`
           : `<p class="metric-card-empty">No stage data for this night</p>`}
       </div>
       ${renderSleepStatsRow(overview)}
@@ -464,6 +512,29 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
       });
     });
+
+    // Hypnogram zoom trigger - opens the shared zoom view with the
+    // sleep stage itself as the always-on stepped line, and HR /
+    // respiratory rate as OPTIONAL overlays "on top" (the person's own
+    // explicit spec) - both default off, since the stage line alone is
+    // what most taps into this want to see first.
+    const zoomTrigger = document.getElementById("hypnogram-zoom-trigger");
+    if (zoomTrigger) {
+      zoomTrigger.addEventListener("click", () => {
+        const stageSeries = hypnogramToZoomSeries(hypnogram);
+        const hrPoints = Object.values(hrSeries || {})[0] || [];
+        const respPoints = Object.values(respSeries || {})[0] || [];
+        const series = [stageSeries].filter(Boolean);
+        if (hrPoints.length > 0) {
+          series.push({ key: "hr", label: "Heart Rate", color: ZOOM_HR_COLOR, unit: "bpm", decimals: 0, defaultOn: false, points: hrPoints });
+        }
+        if (respPoints.length > 0) {
+          series.push({ key: "resp", label: "Respiratory Rate", color: ZOOM_RESP_COLOR, unit: "brpm", decimals: 1, defaultOn: false, points: respPoints });
+        }
+        openZoomChart({ title: "Sleep Stage", series, windowMinutes: 120 });
+      });
+    }
+
     wireJournalSection(anchorDate, journalEntry);
   } catch (e) {
     container.innerHTML = `${renderDateNav("day", anchorDate)}<p class="status">Error loading sleep data: ${escapeHtml(e.message)}</p>`;

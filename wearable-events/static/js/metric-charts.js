@@ -826,7 +826,7 @@ export function buildActivityTimeChart(canvas, series, devices, config) {
 // stage reads as the same color everywhere in the app.
 const HYPNOGRAM_STAGE_ORDER_TOP_TO_BOTTOM = ["awake", "rem", "light", "deep"];
 export const HYPNOGRAM_STAGE_COLORS = { deep: "#7c6ce8", light: "#6ea8fe", rem: "#4fd8b8", awake: "#e88a8a" };
-const HYPNOGRAM_STAGE_LABELS = { deep: "Deep", light: "Light", rem: "REM", awake: "Awake" };
+export const HYPNOGRAM_STAGE_LABELS = { deep: "Deep", light: "Light", rem: "REM", awake: "Awake" };
 
 // Per-night sleep-stage composition across a week/month/year - the
 // Sleep Duration page's own week/month/year rollup view (see
@@ -841,17 +841,39 @@ const HYPNOGRAM_STAGE_LABELS = { deep: "Deep", light: "Light", rem: "REM", awake
 // bottom-to-top as Deep/Light/REM/Awake - reading a stacked bar
 // bottom-up as "deepest sleep first" mirrors the hypnogram's own
 // top-to-bottom depth convention, not an arbitrary new order.
-export function buildSleepStageStackedChart(canvas, stageTrend, config) {
-  const labels = stageTrend.map(entry => formatBucketLabel(entry.date, config.labelFormat));
-  const stageKeys = ["deep", "light", "rem", "awake"];
+// A color for naps distinct from all four HYPNOGRAM_STAGE_COLORS -
+// naps are shown as their own stacked-bar category, never folded into
+// the Deep/Light/REM/Awake stack (matching Zepp's own real treatment
+// - see get_nap_trend's own docstring in app/influx.py).
+const NAP_COLOR = "#f0c674";
 
-  const datasets = stageKeys.map(stage => ({
+export function buildSleepStageStackedChart(canvas, stageTrend, napTrend, config) {
+  // Union of both date sets, not just stageTrend's own - a day with a
+  // nap but no full night's sleep recorded (rare, but not impossible)
+  // still needs its own bar/x-axis label, not silently dropped just
+  // because stageTrend alone wouldn't have included that date.
+  const allDates = [...new Set([...stageTrend.map(e => e.date), ...napTrend.map(e => e.date)])].sort();
+  const labels = allDates.map(d => formatBucketLabel(d, config.labelFormat));
+
+  const stageByDate = Object.fromEntries(stageTrend.map(e => [e.date, e.stages_min]));
+  const napByDate = Object.fromEntries(napTrend.map(e => [e.date, e.total_nap_minutes]));
+
+  const stageKeys = ["deep", "light", "rem", "awake"];
+  const stageDatasets = stageKeys.map(stage => ({
     label: HYPNOGRAM_STAGE_LABELS[stage],
-    data: stageTrend.map(entry => entry.stages_min[stage] ?? 0),
+    data: allDates.map(d => (stageByDate[d] && stageByDate[d][stage]) ?? 0),
     backgroundColor: HYPNOGRAM_STAGE_COLORS[stage],
     stack: "stages",
     borderRadius: 2,
   }));
+  const napDataset = {
+    label: "Nap",
+    data: allDates.map(d => napByDate[d] ?? 0),
+    backgroundColor: NAP_COLOR,
+    stack: "stages",
+    borderRadius: 2,
+  };
+  const datasets = [...stageDatasets, napDataset];
 
   return new Chart(canvas, {
     type: "bar",

@@ -44,6 +44,24 @@
   <div id="detail-content" class="detail-content"></div>
 </div>
 
+<!-- Full-screen zoomed-chart view, shared by every "expand" button on a
+     time-series chart (sleep hypnogram, workout detail per-sample
+     charts). A minimap strip shows the whole range with the current
+     zoom window highlighted; a scrubber pans that window; checkboxes
+     toggle which series overlay the main chart, multiple at once.
+     Content is fully rebuilt per open (zoom-chart.js owns everything
+     under #zoom-content), same "hidden by default, replaced per-view"
+     convention as #detail-screen. -->
+<div id="zoom-screen" style="display:none">
+  <header class="detail-header">
+    <button id="zoom-back-btn" class="detail-back-btn" aria-label="Back">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+    </button>
+    <span id="zoom-title"></span>
+  </header>
+  <div id="zoom-content" class="zoom-content"></div>
+</div>
+
 <nav class="tabs">
   <button class="tab-btn active" data-tab="today">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 12 8 12 10 18 14 6 16 12 21 12"/></svg>

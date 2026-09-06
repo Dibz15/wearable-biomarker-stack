@@ -52,6 +52,7 @@ from app.influx import (
     get_sleep_timing_trend,
     get_sleep_journal_rollup,
     get_naps_for_date,
+    get_nap_trend,
     get_sleep_regularity_index,
     get_sleep_vitals_series,
     get_sleep_vitals_trend,
@@ -1145,6 +1146,23 @@ def get_naps_endpoint(date: str, current_user: dict = Depends(get_current_user))
         }
         for n in naps
     ]
+
+
+@app.get("/sleep/nap-trend")
+def get_nap_trend_endpoint(period: str, end_date: str | None = None, current_user: dict = Depends(get_current_user)):
+    ''' Total nap minutes per calendar day across a W/M range - the
+    Sleep Reports page's own weekly/monthly composition chart, adding
+    naps as their own distinct stacked-bar category alongside Deep/
+    Light/REM/Awake (see get_nap_trend's own docstring). Same period
+    restriction as /sleep/stage-trend and for the same reason (this
+    page's own week/month-only selector) - unlike that endpoint,
+    "year" isn't offered here at all rather than allowed-but-unused,
+    since nap totals have no standalone use outside this one chart.
+    '''
+    if period not in {"week", "month"}:
+        raise HTTPException(400, f"unsupported period: {period!r} (must be one of ['month', 'week'])")
+    start, end = _period_bounds(period, end_date)
+    return get_nap_trend(current_user["username"], start.date(), end.date())
 
 
 @app.get("/sleep/vitals-trend/{field}")
