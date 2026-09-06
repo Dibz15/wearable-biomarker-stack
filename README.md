@@ -1,4 +1,4 @@
-# Biomarker Stack
+# Self-Hosted Wearable Biomarker Stack
 
 A self-hosted alternative to subscription-gated wearable health apps.
 
