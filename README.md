@@ -2,11 +2,11 @@
 
 A self-hosted alternative to subscription-gated wearable health apps.
 
-Wear a cheap smart ring, own your own data. This stack pulls biomarker
+Wear a cheap smart device and own your own data. This stack pulls biomarker
 data (heart rate, HRV, SpO2, temperature, sleep) off a Colmi/Yawell smart
-ring via [Gadgetbridge](https://gadgetbridge.org/), stores it in your own
-InfluxDB instance, and visualizes it in Grafana — no vendor cloud, no
-per-user fees, no app you don't control. A companion service
+ring via [Gadgetbridge](https://gadgetbridge.org/) (or Amazfit watch), stores it in your own
+InfluxDB instance, and visualizes it in Grafana. No vendor cloud need, no
+per-user fees, etc. A companion service
 ([`wearable-events`](./wearable-events/README.md)) adds manual context
 tagging (caffeine, alcohol, meetings pulled from your calendar) and a
 subjective sleep-quality score, so raw sensor trends can eventually be
@@ -19,9 +19,9 @@ for a second device — best-effort, some field semantics unverified. See
 Everything runs in Docker, tested against [CasaOS](https://casaos.io/)
 but works with plain `docker compose` anywhere.
 
-**Is:** a data-ownership layer — your raw sensor data, your database,
+**Is:** a data-ownership layer. It's your raw sensor data, your database,
 your dashboards and alerting rules.
-**Isn't:** a polished consumer app. No fancy "readiness score" — the
+**Isn't:** a polished consumer app. No proprietary "readiness score". The
 device itself computes a basic HRV baseline, and this stack otherwise
 gives you the raw trends to build on.
 
