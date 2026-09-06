@@ -347,6 +347,43 @@ function renderSleepStatsRow(overview) {
   `;
 }
 
+// Naps, shown as their own distinct section - matching Zepp's own
+// real treatment (confirmed directly from their app's screenshots
+// this session: naps are never folded into the main sleep
+// composition, always their own separate category). Reuses the
+// existing .activity-session-* row shape from the Activity page's own
+// session list (a name + time-range + a right-aligned stat - the same
+// shape fits a nap row just as well as an activity session), rather
+// than inventing new markup for what's structurally the same kind of
+// "list of time-bounded events" display. Renders nothing at all (not
+// an empty-state message) when there are no naps that day - most days
+// have none, and a permanent "No naps" card on every single day would
+// be far more noise than signal.
+function renderNapsSection(naps) {
+  if (!naps || naps.length === 0) return "";
+  const rows = naps.map(n => {
+    const start = new Date(n.start_time).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const end = new Date(n.end_time).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const durationMin = Math.round(n.duration_s / 60);
+    return `
+      <div class="activity-session-row">
+        <div class="activity-session-main">
+          <span class="activity-session-label">Nap</span>
+          <span class="metric-sub">${escapeHtml(start)} \u2013 ${escapeHtml(end)}</span>
+        </div>
+        <div class="activity-session-side">
+          <span class="metric-sub">${durationMin} min</span>
+          <span class="metric-device-name">${escapeHtml(n.device || "")}</span>
+        </div>
+      </div>
+    `;
+  }).join("");
+  return `
+    <p class="today-section-label">Naps</p>
+    <div class="activity-session-list">${rows}</div>
+  `;
+}
+
 export async function loadSleepOverview(anchorDate = todayISO()) {
   const container = document.getElementById("sleep-overview");
   container.innerHTML = `${renderDateNav("day", anchorDate)}<p class="muted">Loading...</p>`;
@@ -358,11 +395,12 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
   journalEditingExisting = false;
 
   try {
-    const [overview, hypnogram, journalEntry, regularityIndex] = await Promise.all([
+    const [overview, hypnogram, journalEntry, regularityIndex, naps] = await Promise.all([
       api(`/sleep/overview?date=${anchorDate}`),
       api(`/sleep/hypnogram?date=${anchorDate}`),
       api(`/sleep/entry?date=${anchorDate}`),
       api(`/sleep/regularity-index?end_date=${anchorDate}`),
+      api(`/sleep/naps?date=${anchorDate}`),
     ]);
 
     if (overview === null) {
@@ -371,6 +409,7 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
         <div class="sleep-summary-card">
           <p class="metric-card-empty">No sleep session recorded for this night.</p>
         </div>
+        ${renderNapsSection(naps)}
       `;
       wireSleepOverviewDateNav(anchorDate);
       return;
@@ -391,6 +430,7 @@ export async function loadSleepOverview(anchorDate = todayISO()) {
       </div>
       ${renderSleepStatsRow(overview)}
       ${renderSleepQuality(overview.sleep_quality)}
+      ${renderNapsSection(naps)}
       <div class="sleep-summary-card metric-card-tappable" data-detail-field="sleep-regularity" role="button" tabindex="0">
         <div class="sleep-summary-top">
           <span class="metric-card-label">Sleep Regularity</span>

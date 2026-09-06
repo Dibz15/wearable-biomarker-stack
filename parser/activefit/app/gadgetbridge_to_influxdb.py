@@ -1130,7 +1130,16 @@ def decode_sleep_session_blob(data: bytes):
                     even though the comment isn't, so the code is what
                     this follows)
       0x0c (12):   sleepEnd           uint16  same unit as sleepStart
-      0x0d-0x14:   unused/unknown gap (7 bytes)
+      0x0e-0x14:   unused/unknown gap (7 bytes) - NOT 0x0d-0x14 as an
+                    earlier version of this comment said: sleepEnd is
+                    itself a uint16 starting at 0x0c, so it occupies
+                    BOTH 0x0c and 0x0d - 0x0d is sleepEnd's own second
+                    byte, not part of the gap. The gap is genuinely 7
+                    bytes (0x0e through 0x14 inclusive), consistent
+                    with avgHr starting cleanly at 0x15 right after -
+                    the off-by-one was in this comment's own label
+                    only, never in the decode arithmetic below, which
+                    was always correct.
       0x15 (21):   avgHr              uint8
       0x16 (22):   score              uint8   (Gadgetbridge's own
                     computed sleep score, 0-100)
@@ -1306,6 +1315,145 @@ def deduplicate_sleep_session_rows(decoded_rows: list[tuple]) -> list[tuple]:
         if existing is None or row_ts > existing[0]:
             best_by_night[key] = (row_ts, device_id, decoded)
     return list(best_by_night.values())
+
+
+# Byte offset of the second unknown gap decode_sleep_session_blob()'s
+# own docstring documents (0x17-0x53, 61 bytes) - the region the
+# confirmed nap sub-structure below was found in. The first gap
+# (0x0e-0x14, only 7 bytes) is also searched, defensively, in case a
+# future nap's data ever lands there instead - not yet observed, but
+# the 6-byte structure would technically still fit.
+_NAP_GAP_REGIONS = [(0x0e, 0x15), (0x17, 0x54)]
+
+
+def decode_nap_candidates_from_blob(data: bytes) -> list[dict]:
+    ''' Naps hide in a real, CONFIRMED (2026-09) 6-byte sub-structure
+    inside HUAMI_SLEEP_SESSION_SAMPLE.DATA's own still-otherwise-
+    unlabeled byte gaps - found via a real investigation this session,
+    verified end to end against the person's own precise real ground
+    truth from their Zepp app across THREE separate real naps on TWO
+    separate dates (not a one-off coincidental match):
+
+        [0x01 flag][u16 LE start][u16 LE end][u8 duration]
+
+    start/end are minutes since the PREVIOUS midnight relative to this
+    blob's own timestamp_midnight - the EXACT SAME reference and
+    convention the main sleepStart/sleepEnd fields already use just
+    below (midnight_prev = timestamp_midnight - 86400). An earlier
+    version of this function got this wrong in a way worth recording:
+    it assumed naps must use a DIFFERENT reference (same day's own
+    midnight, hour-zeroed) since a nap doesn't cross a midnight
+    boundary the way overnight sleep does - and that version's own
+    decoded values happened to match the person's real nap times
+    almost exactly, which is what made the bug hard to catch: it was
+    off by exactly the local UTC offset (1 hour, BST), because
+    timestamp_midnight itself encodes LOCAL midnight (not UTC
+    midnight), and hour-zeroing without accounting for that offset
+    silently produced values whose UTC-labeled digits matched the
+    real LOCAL digits - correct-looking on inspection, wrong by
+    exactly one hour once genuinely converted to the person's own
+    timezone downstream. Caught only because the person reported the
+    real displayed nap time was an hour off. The actual fix needed no
+    timezone awareness in this function AT ALL: matching the SAME
+    "minutes since previous midnight" reference sleepStart/sleepEnd
+    already use makes start_min/end_min values naturally exceed 1440
+    (over a full day) for a nap happening well into the day after that
+    reference point - which is exactly what the real decoded values
+    (e.g. 2406) already were, a sign this function's own earlier
+    "must be within one day" assumption was wrong from the start.
+    duration is consistently end-start+1 (an inclusive count) across
+    every confirmed example, not an independently tracked value.
+
+    Runs on the RAW blob bytes directly, independent of
+    decode_sleep_session_blob() - naps were originally FOUND on rows
+    where that function returns None (sleepStart/sleepEnd hit the
+    0xFFFF "unset sentinel", as FULL 594-byte blobs, not the
+    truncated/pre-pairing-placeholder kind that sentinel is otherwise
+    documented for) - but this searches every row regardless of that
+    function's own result, in case a future nap ever attaches to a
+    session that decodes successfully as normal main sleep instead.
+    Blobs too short to contain even the fixed header (0x55 bytes)
+    return an empty list, same graceful-degradation convention as
+    decode_sleep_session_blob().
+
+    Returns a list of {"start_epoch_s": int, "end_epoch_s": int,
+    "duration_min": int} dicts - usually 0 or 1 per blob in practice
+    so far, but returns every match found rather than assuming exactly
+    one.
+    '''
+    if data is None or len(data) < 0x55:
+        return []
+
+    timestamp_midnight = int.from_bytes(data[0x04:0x08], "little")
+    midnight_prev_epoch_s = timestamp_midnight - 86400
+
+    candidates = []
+    for region_start, region_end in _NAP_GAP_REGIONS:
+        region = data[region_start:region_end]
+        for i in range(len(region) - 6 + 1):
+            flag = region[i]
+            if flag != 0x01:
+                continue
+            start_min = int.from_bytes(region[i + 1:i + 3], "little")
+            end_min = int.from_bytes(region[i + 3:i + 5], "little")
+            duration_min = region[i + 5]
+            if end_min >= start_min and (end_min - start_min + 1) == duration_min and duration_min > 0:
+                candidates.append({
+                    "start_epoch_s": midnight_prev_epoch_s + start_min * 60,
+                    "end_epoch_s": midnight_prev_epoch_s + end_min * 60,
+                    "duration_min": duration_min,
+                })
+    return candidates
+
+
+def deduplicate_and_merge_naps(nap_candidates: list[tuple]) -> list[tuple]:
+    ''' Naps get re-synced as checkpoints the same way main sleep
+    sessions do (confirmed directly - two rows were byte-IDENTICAL for
+    the same real nap, and two others gave slightly different, close-
+    together start/end times for what was clearly the same nap
+    bracketing its real boundary) - so this needs the same "most
+    recently synced wins" dedup deduplicate_sleep_session_rows()
+    already applies, adapted for naps specifically.
+
+    CANNOT reuse that function's own dedup KEY directly, though -
+    it groups by (device_id, timestamp_midnight), which for naps would
+    wrongly MERGE two genuinely different naps that happen to share
+    the same timestamp_midnight (confirmed directly: two real, clearly
+    separate naps on the same real day both had timestamp_midnight
+    pointing at that same day). Naps instead need grouping by rough
+    START TIME proximity - candidates within NAP_MERGE_WINDOW_MINUTES
+    of each other are treated as re-syncs of the same underlying nap,
+    picked chronologically by device+start time, then merged greedily
+    (each candidate joins the open group if it's within the window of
+    that group's own MOST RECENT member, so a slowly-drifting chain of
+    close-together candidates can still merge into one group even if
+    the first and last are further apart than the window alone would
+    allow).
+
+    Takes a list of (row_ts, device_id, nap_dict) tuples (nap_dict
+    being one of decode_nap_candidates_from_blob()'s own returned
+    dicts), returns the same shape, deduplicated - one tuple per
+    real underlying nap, keeping the candidate with the highest row_ts
+    (most recently synced) in each merged group.
+    '''
+    NAP_MERGE_WINDOW_MINUTES = 15
+
+    by_device: dict[str, list[tuple]] = {}
+    for row_ts, device_id, nap in nap_candidates:
+        by_device.setdefault(device_id, []).append((row_ts, device_id, nap))
+
+    merged: list[tuple] = []
+    for device_id, candidates in by_device.items():
+        candidates.sort(key=lambda c: c[2]["start_epoch_s"])
+        group: list[tuple] = []
+        for candidate in candidates:
+            if group and (candidate[2]["start_epoch_s"] - group[-1][2]["start_epoch_s"]) > NAP_MERGE_WINDOW_MINUTES * 60:
+                merged.append(max(group, key=lambda c: c[0]))
+                group = []
+            group.append(candidate)
+        if group:
+            merged.append(max(group, key=lambda c: c[0]))
+    return merged
 
 
 def extract_data(cur, client, webdav_client):
@@ -1748,6 +1896,7 @@ def extract_data(cur, client, webdav_client):
         f"WHERE TIMESTAMP >= {sleep_session_query_start_bound_scaled} ORDER BY TIMESTAMP ASC")
     session_points = 0
     stage_points = 0
+    nap_points = 0
     if rows is not None:
         # First pass: decode every row, skipping malformed/unpopulated
         # blobs (same as before). Deliberately NOT writing session/stage
@@ -1756,10 +1905,22 @@ def extract_data(cur, client, webdav_client):
         # single most-recently-synced one per (device, night), not one
         # at a time as they're decoded.
         decoded_rows = []
+        nap_candidate_rows = []
         for r in rows:
             row_ts = to_nanos(r[0], HUAMI_SLEEP_SESSION_TIMESTAMPS_ARE_MS)
             device_id = r[1]
-            decoded = decode_sleep_session_blob(bytes(r[2]) if r[2] is not None else None)
+            blob = bytes(r[2]) if r[2] is not None else None
+
+            # Naps decoded from the RAW blob, independent of whether
+            # decode_sleep_session_blob() below succeeds for this same
+            # row - naps were originally found specifically on rows
+            # where that function returns None, but every row is
+            # checked regardless (see decode_nap_candidates_from_blob's
+            # own docstring for why).
+            for nap in decode_nap_candidates_from_blob(blob):
+                nap_candidate_rows.append((row_ts, device_id, nap))
+
+            decoded = decode_sleep_session_blob(blob)
             if decoded is None:
                 logger.warning(f"HUAMI_SLEEP_SESSION_SAMPLE: could not decode blob for a row "
                                f"(device_id={device_id}, timestamp={r[0]}) - too short, malformed, "
@@ -1872,9 +2033,39 @@ def extract_data(cur, client, webdav_client):
                     })
                 stage_points += 1
 
+        # --- Naps, decoded from the same rows' raw blobs (see
+        # decode_nap_candidates_from_blob's own docstring for the full
+        # confirmed byte layout and reference-timestamp reasoning).
+        # Deduplicated/merged separately from main sleep sessions
+        # (deduplicate_and_merge_naps, not deduplicate_sleep_session_rows -
+        # that function's own dedup key would wrongly merge two
+        # genuinely different naps sharing the same timestamp_midnight).
+        deduped_nap_count = len(nap_candidate_rows)
+        nap_candidate_rows = deduplicate_and_merge_naps(nap_candidate_rows)
+        if deduped_nap_count != len(nap_candidate_rows):
+            logger.info(f"HUAMI_SLEEP_SESSION_SAMPLE: {deduped_nap_count - len(nap_candidate_rows)} "
+                        f"duplicate/re-synced nap candidate(s) merged (kept the most recently "
+                        f"synced version of each real underlying nap)")
+
+        for row_ts, device_id, nap in nap_candidate_rows:
+            tags_base = device_tags(device_id)
+            results.append({
+                "timestamp": to_nanos(nap["start_epoch_s"], is_ms=False),
+                "fields": {
+                    "nap_start": nap["start_epoch_s"],
+                    "nap_end": nap["end_epoch_s"],
+                    "nap_duration_s": nap["end_epoch_s"] - nap["start_epoch_s"],
+                },
+                "tags": {**tags_base, "sample_type": "nap"},
+            })
+            observed.note(device_id, row_ts)
+            nap_points += 1
+
     if session_points:
         section_counts["sleep_session (HUAMI_SLEEP_SESSION_SAMPLE)"] = session_points
         section_counts["sleep_stage (HUAMI_SLEEP_SESSION_SAMPLE)"] = stage_points
+    if nap_points:
+        section_counts["nap (HUAMI_SLEEP_SESSION_SAMPLE)"] = nap_points
 
     now = time.time_ns()
     for device_key, row_ts in observed.observed.items():

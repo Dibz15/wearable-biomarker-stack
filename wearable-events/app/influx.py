@@ -417,6 +417,66 @@ def get_sleep_journal_rollup(user: str, start_date: date, end_date: date) -> dic
     }
 
 
+def get_naps_for_date(user: str, local_date: date) -> list[dict]:
+    ''' Naps (sample_type="nap", written by the parser's own
+    decode_nap_candidates_from_blob() - see
+    parser/activefit/FIELD_RESEARCH.md for the full confirmed byte
+    layout and reference-timestamp reasoning, verified end to end
+    against real ground truth across 3 real naps on 2 separate dates)
+    whose own start time falls within `local_date`'s calendar day, in
+    the configured TZ_NAME.
+
+    Deliberately NOT a "wake date" resolution the way overnight sleep
+    sessions need (_sleep_sessions_by_wake_date()'s own docstring) - a
+    nap happens entirely within one day and has no midnight-crossing
+    ambiguity to resolve, so a plain calendar-day range is enough.
+
+    Returns a chronologically-sorted list of {"device": str,
+    "start_time": datetime, "end_time": datetime, "duration_s": int} -
+    every nap that day, not just one. The person's own real Zepp
+    screenshots showed two separate naps on the same real day
+    (2026-09-05) - this returns all of them, not just the first/last.
+    '''
+    tz = ZoneInfo(TZ_NAME)
+    day_start = datetime.combine(local_date, datetime.min.time(), tzinfo=tz)
+    day_end = day_start + timedelta(days=1)
+
+    client = get_client()
+    query_api = client.query_api()
+
+    flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: {day_start.astimezone(timezone.utc).isoformat()}, stop: {day_end.astimezone(timezone.utc).isoformat()})
+      |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+      |> filter(fn: (r) => r.sample_type == "nap")
+      |> filter(fn: (r) => r.user == "{user}")
+      |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+    '''
+
+    try:
+        tables = query_api.query(flux)
+    except Exception as e:
+        logger.warning(f"Failed to query naps for user={user}, date={local_date}: {e}")
+        return []
+
+    naps = []
+    for table in tables:
+        for record in table.records:
+            values = record.values
+            nap_start = values.get("nap_start")
+            nap_end = values.get("nap_end")
+            if nap_start is None or nap_end is None:
+                continue
+            naps.append({
+                "device": values.get("device"),
+                "start_time": datetime.fromtimestamp(nap_start, tz=timezone.utc),
+                "end_time": datetime.fromtimestamp(nap_end, tz=timezone.utc),
+                "duration_s": values.get("nap_duration_s"),
+            })
+    naps.sort(key=lambda n: n["start_time"])
+    return naps
+
+
 def find_sleep_entry_by_id(user: str, entry_id: str) -> dict | None:
     ''' Look up a single sleep entry by its stable entry_id, for the
     edit/delete endpoints. entry_id is a tag, so this can be filtered

@@ -51,6 +51,7 @@ from app.influx import (
     get_sleep_stage_trend,
     get_sleep_timing_trend,
     get_sleep_journal_rollup,
+    get_naps_for_date,
     get_sleep_regularity_index,
     get_sleep_vitals_series,
     get_sleep_vitals_trend,
@@ -1121,6 +1122,29 @@ def get_sleep_journal_rollup_endpoint(period: str, end_date: str | None = None, 
         raise HTTPException(400, f"unsupported period: {period!r} (must be one of {sorted(SLEEP_TREND_PERIODS)})")
     start, end = _period_bounds(period, end_date)
     return get_sleep_journal_rollup(current_user["username"], start.date(), end.date())
+
+
+@app.get("/sleep/naps")
+def get_naps_endpoint(date: str, current_user: dict = Depends(get_current_user)):
+    ''' Every nap for one specific calendar day - see
+    get_naps_for_date's own docstring for the full confirmed byte
+    layout this is decoded from. Returns an empty list (not a 404)
+    when there were none that day - a normal, expected state (most
+    days have zero naps), not an error.
+    '''
+    parsed_date = _parse_optional_date(date)
+    if parsed_date is None:
+        raise HTTPException(400, "date is required (YYYY-MM-DD)")
+    naps = get_naps_for_date(current_user["username"], parsed_date)
+    return [
+        {
+            "device": n["device"],
+            "start_time": n["start_time"].isoformat(),
+            "end_time": n["end_time"].isoformat(),
+            "duration_s": n["duration_s"],
+        }
+        for n in naps
+    ]
 
 
 @app.get("/sleep/vitals-trend/{field}")
