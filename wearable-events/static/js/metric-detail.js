@@ -593,33 +593,58 @@ async function renderDetailPeriod(view, period, anchorDate) {
   let differentialSeries = null;
   let manualReadings = null;
   let manualCounts = null;
+  // Everything this view needs is requested in ONE batch. It used to
+  // go in stages - all the range series, THEN all the rolling means,
+  // THEN the differential, THEN the manual readings - each stage
+  // awaiting the previous one to fully settle. Nothing needs that
+  // ordering: the responses are independent and none is consumed
+  // until all of them have landed. On a mobile connection each stage
+  // boundary cost a full round trip, so a Temperature or Stress week
+  // view paid three sequential RTTs where one would do.
+  const isDay = period === "day";
+  const wantsRollingMean = period === "week" || period === "month";
+  const baselineCharts = isDay ? view.charts.filter(c => c.showBaseline) : [];
+
   try {
-    seriesByField = Object.fromEntries(await Promise.all(
-      view.charts.map(async c => [c.field, await fetchDetailSeries(c, period, anchorDate)])
-    ));
-    if (period === "day") {
-      const baselineCharts = view.charts.filter(c => c.showBaseline);
-      baselineByField = Object.fromEntries(await Promise.all(
-        baselineCharts.map(async c => [c.field, await api(`/vitals/baseline/${c.field}?days=${BASELINE_DAYS}&date=${anchorDate}`)])
-      ));
-      if (view.differential) {
-        differentialBaseline = await api(`/vitals/baseline/${view.differential.field}?days=${BASELINE_DAYS}&date=${anchorDate}`);
-      }
-      if (view.stressBreakdown) {
-        manualReadings = await api(`/vitals/manual-readings/${view.stressBreakdown.field}?period=day&end_date=${anchorDate}`);
-      }
+    const [
+      seriesResults,
+      baselineResults,
+      rollingMeanResults,
+      differentialBaselineResult,
+      differentialSeriesResult,
+      manualResult,
+    ] = await Promise.all([
+      Promise.all(view.charts.map(c => fetchDetailSeries(c, period, anchorDate))),
+      Promise.all(baselineCharts.map(c => api(`/vitals/baseline/${c.field}?days=${BASELINE_DAYS}&date=${anchorDate}`))),
+      Promise.all(wantsRollingMean
+        ? view.charts.map(c => api(`/vitals/rolling-mean/${c.field}?period=${period}&end_date=${anchorDate}`))
+        : []),
+      (isDay && view.differential)
+        ? api(`/vitals/baseline/${view.differential.field}?days=${BASELINE_DAYS}&date=${anchorDate}`)
+        : null,
+      (!isDay && wantsRollingMean && view.differential)
+        ? api(`/vitals/differential/${view.differential.field}?period=${period}&end_date=${anchorDate}`)
+        : null,
+      view.stressBreakdown
+        ? api(`/vitals/manual-readings/${view.stressBreakdown.field}?period=${isDay ? "day" : period}&end_date=${anchorDate}`)
+        : null,
+    ]);
+
+    seriesByField = Object.fromEntries(view.charts.map((c, i) => [c.field, seriesResults[i]]));
+    if (isDay) {
+      baselineByField = Object.fromEntries(baselineCharts.map((c, i) => [c.field, baselineResults[i]]));
+      differentialBaseline = differentialBaselineResult;
+      // The Day view wants the manual readings as a LIST; every other
+      // period wants the same response as a COUNT. Same request either
+      // way, so it's issued once above and just assigned to whichever
+      // variable the render code below reads for this period.
+      manualReadings = manualResult;
     } else {
-      if (period === "week" || period === "month") {
-        rollingMeanByField = Object.fromEntries(await Promise.all(
-          view.charts.map(async c => [c.field, await api(`/vitals/rolling-mean/${c.field}?period=${period}&end_date=${anchorDate}`)])
-        ));
-        if (view.differential) {
-          differentialSeries = await api(`/vitals/differential/${view.differential.field}?period=${period}&end_date=${anchorDate}`);
-        }
+      if (wantsRollingMean) {
+        rollingMeanByField = Object.fromEntries(view.charts.map((c, i) => [c.field, rollingMeanResults[i]]));
+        differentialSeries = differentialSeriesResult;
       }
-      if (view.stressBreakdown) {
-        manualCounts = await api(`/vitals/manual-readings/${view.stressBreakdown.field}?period=${period}&end_date=${anchorDate}`);
-      }
+      manualCounts = manualResult;
     }
   } catch (e) {
     content.innerHTML = renderPeriodButtons(period, view.periods) + renderDateNav(period, anchorDate) + `<p class="status">Error loading chart data: ${escapeHtml(e.message)}</p>`;

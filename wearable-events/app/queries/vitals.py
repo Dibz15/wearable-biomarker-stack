@@ -1,4 +1,5 @@
 """Heart rate / HRV / stress / SpO2 / temperature series, baselines, rolling means."""
+import bisect
 import statistics
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -202,6 +203,142 @@ def _grouped_series(field: str, user: str, start: datetime, end: datetime) -> di
             })
     return result
 
+# Cap on how many session windows go into a single _windowed_series()
+# query. Two things are being bounded at once: the size of the ORed
+# time predicate Flux has to parse, and the size of a single response
+# body. A Year view (365 nights) split at this size costs ~10 round
+# trips instead of one enormous one or - as before this existed - one
+# per night per stat. Chosen as a round number well inside what Flux
+# handles comfortably, not tuned against a measured cliff.
+_MAX_WINDOWS_PER_QUERY = 40
+
+def _merge_windows(windows: list[tuple[datetime, datetime]]) -> list[tuple[datetime, datetime]]:
+    ''' Sorts and coalesces overlapping/touching [start, end) windows.
+    Sleep sessions from two different devices on the same night
+    overlap heavily, so without this a two-device night contributes
+    two nearly-identical time clauses to the predicate below for no
+    added coverage. Merging is purely an optimization - the caller
+    still slices each device's own exact session window out of the
+    result afterwards, so a merged window never widens what any
+    individual night is actually computed over.
+    '''
+    if not windows:
+        return []
+    ordered = sorted(windows, key=lambda w: w[0])
+    merged = [ordered[0]]
+    for start, end in ordered[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+def _windowed_series(field: str, user: str, windows: list[tuple[datetime, datetime]]) -> dict[str, tuple[list[datetime], list[float]]]:
+    ''' Raw points for one field, per device, restricted to the union
+    of `windows` - the bulk primitive behind every "one value per
+    night, across a whole period" function in app/queries/sleep_sessions.py.
+
+    Those functions all need per-night aggregates over each night's
+    OWN recorded sleep-session boundaries, which vary night to night
+    and so can't be expressed as a single aggregateWindow() call.
+    Before this existed they each looped _device_stat_by_field() once
+    per night (four times per night, in get_sleep_vitals_trend's case),
+    which measured at 121 sequential Flux round trips for a single
+    month view - the dominant cost of the Sleep Reports page. This
+    fetches the same underlying readings in one query (or a small
+    handful, see _MAX_WINDOWS_PER_QUERY) and leaves the per-night
+    reduction to Python, which is free by comparison.
+
+    The ORed `_time` predicate matters: a plain range() spanning the
+    whole period would also pull every DAYTIME reading in it (for a
+    dense field like heart_rate, roughly 3x the rows actually needed),
+    so the windows are pushed down into the query rather than filtered
+    out after transfer.
+
+    Returns {device: (times, values)} with both lists sorted
+    chronologically and index-aligned - the shape _slice_values()
+    expects. Times are the tz-aware UTC datetimes InfluxDB returns;
+    comparing those against the callers' local-timezone session
+    boundaries is correct, since both sides are timezone-aware.
+    '''
+    merged = _merge_windows(windows)
+    if not merged:
+        return {}
+
+    client = get_client()
+    query_api = client.query_api()
+
+    by_device: dict[str, list[tuple[datetime, float]]] = {}
+
+    for i in range(0, len(merged), _MAX_WINDOWS_PER_QUERY):
+        chunk = merged[i:i + _MAX_WINDOWS_PER_QUERY]
+        # Flux time literals are RFC3339. Formatted explicitly with a
+        # trailing Z rather than via isoformat() (which renders UTC as
+        # "+00:00") - both are legal RFC3339, but the Z form is what
+        # Flux's own documentation and examples use throughout.
+        def _lit(dt: datetime) -> str:
+            return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+        span_start = _lit(chunk[0][0])
+        span_stop = _lit(chunk[-1][1])
+        clauses = " or ".join(
+            f'(r._time >= {_lit(w_start)} and r._time < {_lit(w_end)})'
+            for w_start, w_end in chunk
+        )
+
+        flux = f'''
+        from(bucket: "{INFLUX_BUCKET}")
+          |> range(start: {span_start}, stop: {span_stop})
+          |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+          |> filter(fn: (r) => r.user == "{user}")
+          |> filter(fn: (r) => r._field == "{field}")
+          |> filter(fn: (r) => {clauses})
+          |> group(columns: ["device"])
+          |> sort(columns: ["_time"])
+        '''
+
+        try:
+            tables = query_api.query(flux)
+        except Exception as e:
+            # Loud (not warning) on purpose: unlike the per-field
+            # queries elsewhere in this file, a failure here silently
+            # empties a whole period's worth of trend data rather than
+            # one chart, so it should be obvious in the logs.
+            logger.error(f"Failed to query windowed {field} series for user={user}: {e}")
+            continue
+
+        for table in tables:
+            for record in table.records:
+                device = record.values.get("device")
+                value = record.get_value()
+                t = record.get_time()
+                if device is None or value is None or t is None:
+                    continue
+                by_device.setdefault(device, []).append((t, value))
+
+    result: dict[str, tuple[list[datetime], list[float]]] = {}
+    for device, points in by_device.items():
+        # Already sorted within each chunk, but chunks are appended in
+        # order and could in principle interleave if two merged windows
+        # ever overlapped across a chunk boundary - a cheap re-sort
+        # makes the bisect below safe regardless.
+        points.sort(key=lambda p: p[0])
+        result[device] = ([p[0] for p in points], [p[1] for p in points])
+    return result
+
+def _slice_values(series: dict[str, tuple[list[datetime], list[float]]], device: str, start: datetime, end: datetime) -> list[float]:
+    ''' The values one device recorded within [start, end), pulled out
+    of a _windowed_series() result. Half-open on both ends to match
+    Flux's own range(start:, stop:) semantics exactly - a reading
+    timestamped precisely at `end` belongs to the next window, which
+    is what the per-night queries this replaces were already doing.
+    '''
+    times, values = series.get(device, ([], []))
+    lo = bisect.bisect_left(times, start)
+    hi = bisect.bisect_left(times, end)
+    return values[lo:hi]
+
 def get_manual_readings(field: str, user: str, start: datetime, end: datetime) -> dict[str, list[dict]]:
     ''' Per-device manually-triggered readings only (as opposed to the
     device's own automatic periodic sampling) for one field, over an
@@ -271,11 +408,17 @@ def get_period_range_series(field: str, user: str, start: datetime, end: datetim
     Returns {"<device>": [{"t": <period start ISO8601>, "min": v,
     "max": v, "median": v}, ...]}.
 
-    Three separate aggregateWindow() queries (min, max, median), zipped
-    together by (device, period start) - matches this file's established
-    style of simple single-purpose queries over one cleverer combined
-    query (see _device_stat_by_field's own docstring for the same
-    reasoning). median needs different Flux syntax from the other two:
+    Three aggregateWindow() passes (min, max, median) over ONE shared
+    source stream, yielded separately and zipped back together by
+    (device, period start). This used to be three independent queries
+    with identical range/filter/group prefixes - the "several simple
+    queries over one cleverer one" tradeoff _device_stat_by_field's own
+    docstring describes. That tradeoff is still the right default, but
+    not here: this is the single most-requested endpoint in the app
+    (every W/M/Y chart, once per chart per period switch), the three
+    queries were exact duplicates apart from the reducer, and merging
+    them costs only the `result`-column dispatch below. median needs
+    different Flux syntax from the other two:
     plain `fn: median` doesn't work in aggregateWindow() (median()
     lacks the `column` parameter aggregateWindow tries to pass to it -
     confirmed via InfluxDB's own docs, not assumed), so it needs the
@@ -303,47 +446,61 @@ def get_period_range_series(field: str, user: str, start: datetime, end: datetim
 
     by_device_and_time: dict[str, dict[str, dict]] = {}
 
-    def run_and_collect(flux: str, key: str):
-        try:
-            tables = query_api.query(flux)
-        except Exception as e:
-            logger.warning(f"Failed to query {key}({field}) range series for user={user}: {e}")
-            return
-        for table in tables:
-            for record in table.records:
-                device = record.values.get("device")
-                value = record.get_value()
-                period_start = record.get_time()
-                if device is None or value is None or period_start is None:
-                    continue
-                period_key = period_start.isoformat()
-                by_device_and_time.setdefault(device, {}).setdefault(period_key, {"t": period_key})[key] = value
-
-    for stat in ("min", "max"):
-        run_and_collect(f'''
-        from(bucket: "{INFLUX_BUCKET}")
-          |> range(start: {start_iso}, stop: {stop_iso})
-          |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
-          |> filter(fn: (r) => r.user == "{user}")
-          |> filter(fn: (r) => r._field == "{field}")
-          |> group(columns: ["device"])
-          |> aggregateWindow(every: {window}, fn: {stat}, createEmpty: false, timeSrc: "_start")
-        ''', stat)
-
-    run_and_collect(f'''
-    from(bucket: "{INFLUX_BUCKET}")
+    # One query, three yields, sharing a single filtered+grouped source
+    # stream - previously three separate round trips with byte-for-byte
+    # identical range/filter/group prefixes. This is the endpoint EVERY
+    # W/M/Y chart hits (and the metric detail pages hit it once per
+    # chart), so the two round trips saved here are paid back per chart
+    # per period switch.
+    #
+    # Each yielded result is tagged with a name, which comes back on
+    # every record as the "result" column - that's what tells the three
+    # streams apart on the way out, replacing the per-query `key`
+    # argument the old three-call version passed in explicitly.
+    flux = f'''
+    data = from(bucket: "{INFLUX_BUCKET}")
       |> range(start: {start_iso}, stop: {stop_iso})
       |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
       |> filter(fn: (r) => r.user == "{user}")
       |> filter(fn: (r) => r._field == "{field}")
       |> group(columns: ["device"])
+
+    data
+      |> aggregateWindow(every: {window}, fn: min, createEmpty: false, timeSrc: "_start")
+      |> yield(name: "min")
+
+    data
+      |> aggregateWindow(every: {window}, fn: max, createEmpty: false, timeSrc: "_start")
+      |> yield(name: "max")
+
+    data
       |> aggregateWindow(
            every: {window},
            fn: (tables=<-, column) => tables |> median(method: "exact_selector"),
            createEmpty: false,
            timeSrc: "_start",
          )
-    ''', "median")
+      |> yield(name: "median")
+    '''
+
+    try:
+        tables = query_api.query(flux)
+    except Exception as e:
+        logger.warning(f"Failed to query range series for {field}, user={user}: {e}")
+        return {}
+
+    for table in tables:
+        for record in table.records:
+            key = record.values.get("result")
+            device = record.values.get("device")
+            value = record.get_value()
+            period_start = record.get_time()
+            if key not in ("min", "max", "median"):
+                continue
+            if device is None or value is None or period_start is None:
+                continue
+            period_key = period_start.isoformat()
+            by_device_and_time.setdefault(device, {}).setdefault(period_key, {"t": period_key})[key] = value
 
     result: dict[str, list[dict]] = {}
     for device, periods in by_device_and_time.items():

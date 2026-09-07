@@ -783,18 +783,71 @@ function buildWorkoutZoomSeries(workout, samples, intensitySeries = {}) {
 }
 
 
-// Renders the real GPS track on a Leaflet map (OpenStreetMap tiles,
-// loaded via CDN in index.html - the person's own explicit choice
-// over a track-only/no-basemap rendering) - does nothing if the map
-// container doesn't exist (renderGpsMapCard already decided this
-// workout has no GPS data at all).
-function renderGpsMap(samples) {
+// Loads Leaflet's script + stylesheet from the CDN, once, the first
+// time a GPS map is actually rendered.
+//
+// Both used to be plain tags in index.html's <head>, which meant every
+// page load - Today, Sleep, every metric detail view - paid for a
+// mapping library that only this one card ever uses, as a
+// render-blocking request on the critical path. Deferring them isn't
+// enough on its own; most sessions never open a workout with GPS data
+// at all, so the right amount to download for those is none.
+//
+// Memoized on the promise rather than a boolean, so two maps rendered
+// in quick succession share one load instead of racing to inject two
+// copies of the script tag.
+let _leafletPromise = null;
+
+function ensureLeaflet() {
+  if (window.L) return Promise.resolve();
+  if (_leafletPromise) return _leafletPromise;
+
+  _leafletPromise = new Promise((resolve, reject) => {
+    const css = document.createElement("link");
+    css.rel = "stylesheet";
+    css.href = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css";
+    document.head.appendChild(css);
+
+    const script = document.createElement("script");
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js";
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("failed to load Leaflet from CDN"));
+    document.head.appendChild(script);
+  });
+  // A failed load must not be memoized, or the map stays permanently
+  // broken for the rest of the session after one flaky request.
+  _leafletPromise.catch(() => { _leafletPromise = null; });
+  return _leafletPromise;
+}
+
+// Renders the real GPS track on a Leaflet map (OpenStreetMap tiles -
+// the person's own explicit choice over a track-only/no-basemap
+// rendering) - does nothing if the map container doesn't exist
+// (renderGpsMapCard already decided this workout has no GPS data at
+// all).
+//
+// Async now, purely because of the on-demand Leaflet load above. The
+// call site doesn't await it: the map fills itself in a moment after
+// the rest of the page, rather than holding the whole render back on
+// a CDN request.
+async function renderGpsMap(samples) {
   const container = document.getElementById("workout-map");
   if (!container) return;
   const points = samples
     .filter(p => p.latitude !== undefined && p.longitude !== undefined)
     .map(p => [p.latitude, p.longitude]);
   if (points.length === 0) return;
+
+  try {
+    await ensureLeaflet();
+  } catch (e) {
+    container.innerHTML = `<p class="metric-card-empty">Map unavailable (could not load Leaflet).</p>`;
+    return;
+  }
+  // The detail screen can be navigated away from while the CDN request
+  // is in flight - if this container is no longer in the document,
+  // there's nothing left to draw onto.
+  if (!container.isConnected) return;
 
   const map = L.map(container, { attributionControl: true });
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {

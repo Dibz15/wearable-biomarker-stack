@@ -41,7 +41,70 @@ export function escapeHtml(str) {
     .replace(/'/g, "&#39;");
 }
 
+// --- GET response cache ---
+//
+// Paging back and forth through periods (or day-by-day through a
+// detail view) re-requests the exact same URLs constantly, and every
+// one of those was a full round trip. This keeps recent GET responses
+// so a revisit is instant.
+//
+// TTL'd rather than permanent, even though past days look immutable:
+// Gadgetbridge exports on its own schedule, so a night's data can be
+// backfilled into InfluxDB hours after the fact. An unbounded cache
+// keyed on "the requested date is in the past" would pin the empty
+// or partial version of that night until a full page reload. Sixty
+// seconds is long enough to cover the back-and-forth navigation this
+// exists for and short enough that a sync lands on its own.
+const CACHE_TTL_MS = 60 * 1000;
+const MAX_CACHE_ENTRIES = 120;
+const _apiCache = new Map(); // path -> { at, promise }
+
+export function clearApiCache() {
+  _apiCache.clear();
+}
+
 export async function api(path, options = {}) {
+  const method = (options.method || "GET").toUpperCase();
+  // Auth endpoints are deliberately never cached - /auth/me is how the
+  // app detects that a session has been revoked, and serving a stale
+  // "you're still logged in" from cache would defeat that.
+  const cacheable = method === "GET" && !path.startsWith("/auth/");
+
+  if (cacheable) {
+    const hit = _apiCache.get(path);
+    if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
+      // Returns the stored PROMISE, not a stored value - so several
+      // callers firing the same request in one tick (the detail views
+      // batch four to six at a time) share one round trip instead of
+      // racing to start identical ones.
+      return hit.promise;
+    }
+    _apiCache.delete(path);
+  } else {
+    // Any write can invalidate anything - a new tag, a sleep-journal
+    // edit and a reprocess all change what unrelated GETs return, and
+    // working out exactly which ones is more machinery than this is
+    // worth. Dropping everything costs at most one refetch.
+    clearApiCache();
+  }
+
+  const promise = _apiFetch(path, options);
+
+  if (cacheable) {
+    if (_apiCache.size >= MAX_CACHE_ENTRIES) {
+      // Map preserves insertion order, so the first key is the oldest.
+      _apiCache.delete(_apiCache.keys().next().value);
+    }
+    _apiCache.set(path, { at: Date.now(), promise });
+    // A failed request must not be left in the cache, or the error
+    // gets replayed for the next full minute.
+    promise.catch(() => _apiCache.delete(path));
+  }
+
+  return promise;
+}
+
+async function _apiFetch(path, options = {}) {
   const resp = await fetch(path, {
     headers: { "Content-Type": "application/json" },
     ...options,
