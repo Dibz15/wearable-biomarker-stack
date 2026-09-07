@@ -5,9 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>Wearable Events</title>
 <link rel="stylesheet" href="/style.css">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.1/chart.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<!-- Warms the DNS lookup + TLS handshake for the CDN while the rest of
+     the head is still parsing. On a mobile connection the handshake is
+     most of the cost of a CDN asset, and Chart.js below (plus Leaflet,
+     loaded on demand - see workout-detail.js) both come from here. -->
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+<!-- defer, not blocking: this used to halt HTML parsing until the CDN
+     responded. Deferred classic scripts and ES modules share one
+     execution queue in document order, so Chart.js is still guaranteed
+     to have run before /js/app.js at the bottom of this file - the
+     ordering the charting modules rely on is unchanged.
+
+     Leaflet's script and stylesheet used to sit here too. They're only
+     ever used by the GPS map on the Workout Detail page, so they now
+     load on demand when that map is actually rendered
+     (ensureLeaflet() in js/workout-detail.js) rather than on every
+     page load for everyone. -->
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.1/chart.umd.min.js"></script>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 </head>

@@ -1,4 +1,5 @@
 """Objective sleep sessions: overview, hypnogram, stages, regularity, quality."""
+import bisect
 import statistics
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -16,7 +17,15 @@ from app.config import (
     TZ_NAME,
 )
 from app.queries.client import get_client
-from app.queries.vitals import _device_stat_by_field, _grouped_series, _zscore_comparison
+from app.queries.vitals import (
+    _MAX_WINDOWS_PER_QUERY,
+    _device_stat_by_field,
+    _grouped_series,
+    _merge_windows,
+    _slice_values,
+    _windowed_series,
+    _zscore_comparison,
+)
 
 def find_last_completed_sleep_session(user: str, lookback_days: int = 7, before: datetime | None = None) -> dict | None:
     ''' Query the ring parser's sensor measurement for the most recent
@@ -227,52 +236,97 @@ def _sleep_session_for_night(user: str, wake_date: date) -> dict[str, dict]:
     '''
     return _sleep_sessions_by_wake_date(user, wake_date, wake_date + timedelta(days=1)).get(wake_date, {})
 
-def _nightly_mean_for_date(field: str, user: str, for_date: date) -> dict[str, float]:
-    ''' Per-device mean of `field` readings during the ACTUAL sleep
-    session that ended (woke up) on `for_date` - see
-    _sleep_session_for_night() - one night's representative value for
-    a field like HRV, where "today's HRV" conventionally means last
-    night's mean, not a calendar-day average (which would dilute the
-    figure with daytime readings for a device - the Colmi ring - that
-    also samples HRV while awake). A device with no detected sleep
-    session that night is simply absent - no fallback window is used.
+def _session_windows(by_date: dict[date, dict[str, dict]]) -> list[tuple[datetime, datetime]]:
+    ''' Every (start, end) window in a _sleep_sessions_by_wake_date()
+    result, flattened across nights and devices - what
+    _windowed_series() needs to fetch a whole period's readings in one
+    query instead of one per night.
     '''
-    sessions = _sleep_session_for_night(user, for_date)
-    result: dict[str, float] = {}
-    for device, session in sessions.items():
-        device_means = _device_stat_by_field(field, user, session["start_time"], session["end_time"], "mean")
-        if device in device_means:
-            result[device] = device_means[device]
+    return [
+        (session["start_time"], session["end_time"])
+        for sessions in by_date.values()
+        for session in sessions.values()
+    ]
+
+def _nightly_means_in_bulk(field: str, user: str, by_date: dict[date, dict[str, dict]]) -> dict[str, dict[date, float]]:
+    ''' Per-device, per-night mean of `field` over each night's own
+    recorded sleep session, for every night in `by_date`.
+
+    Replaces a former _nightly_mean_for_date() helper that answered
+    this for a single night and was only ever called in a loop - once
+    per night for the session lookup AND once more for the readings,
+    which is what made get_nightly_baseline_comparison() and
+    get_nightly_differential_series() as query-heavy as they were.
+    There is deliberately no single-night variant any more: every
+    caller wants a range, and leaving a convenient per-night version
+    in place is how the loop would come back.
+
+    Each device keeps its OWN session boundaries for a given night
+    (two devices that both recorded the same night rarely agree on
+    exactly when it started and ended), so the windows are pooled only
+    for the fetch; the mean itself is still computed over that one
+    device's own window, exactly as the per-night version did.
+    '''
+    series = _windowed_series(field, user, _session_windows(by_date))
+    if not series:
+        return {}
+
+    result: dict[str, dict[date, float]] = {}
+    for wake_date, sessions in by_date.items():
+        for device, session in sessions.items():
+            values = _slice_values(series, device, session["start_time"], session["end_time"])
+            if values:
+                result.setdefault(device, {})[wake_date] = statistics.mean(values)
     return result
 
 def get_nightly_baseline_comparison(field: str, user: str, baseline_days: int = 7, for_date: date | None = None) -> dict[str, dict]:
     ''' Same z-score-vs-trailing-baseline comparison as
     get_baseline_comparison(), but using each day's NIGHTLY mean (the
     mean over that night's ACTUAL recorded sleep session - see
-    _nightly_mean_for_date()) as that day's representative value,
+    _nightly_means_in_bulk()) as that day's representative value,
     instead of a calendar-midnight-to-midnight mean. Built for HRV
     specifically.
 
-    One query per night (today's night plus each baseline night, so
-    up to baseline_days + 1 total) rather than one aggregateWindow()
-    call for the whole range - each night's window is a different,
-    data-derived span (that night's own sleep session), not a fixed
-    period Flux's aggregateWindow() offset could express in one query.
-    baseline_days is always small (7 or 14), so the extra queries cost
-    little - consistent with this file's existing preference for
-    several simple queries over one cleverer one.
+    Each night's window is a different, data-derived span (that night's
+    own sleep session), not a fixed period Flux's aggregateWindow()
+    offset could express in one query - so this resolves the session
+    boundaries for the whole span in one query, then fetches the
+    readings inside those boundaries in one more (see
+    _windowed_series()), and reduces per night in Python.
+
+    This used to resolve each night independently, re-querying BOTH
+    the session boundaries and the readings for every one of them -
+    16 sequential round trips for the default 7-day baseline, on every
+    HRV/SpO2/temperature detail page open. The "baseline_days is
+    always small, so the extra queries cost little" reasoning that
+    justified it undercounted by half, since each night cost two
+    queries rather than one.
     '''
     tz = ZoneInfo(TZ_NAME)
     if for_date is None:
         for_date = datetime.now(tz).date()
 
-    today_value = _nightly_mean_for_date(field, user, for_date)
+    # One session lookup spanning the compared night AND its whole
+    # trailing baseline, rather than one per night.
+    by_date = _sleep_sessions_by_wake_date(
+        user, for_date - timedelta(days=baseline_days), for_date + timedelta(days=1)
+    )
+    nightly = _nightly_means_in_bulk(field, user, by_date)
 
+    today_value = {
+        device: by_night[for_date]
+        for device, by_night in nightly.items()
+        if for_date in by_night
+    }
+
+    # Baseline nights only - the compared night itself is excluded, so
+    # a value is never compared against a baseline containing itself.
     daily: dict[str, list[float]] = {}
     for i in range(1, baseline_days + 1):
-        night_values = _nightly_mean_for_date(field, user, for_date - timedelta(days=i))
-        for device, v in night_values.items():
-            daily.setdefault(device, []).append(v)
+        night = for_date - timedelta(days=i)
+        for device, by_night in nightly.items():
+            if night in by_night:
+                daily.setdefault(device, []).append(by_night[night])
 
     return _zscore_comparison(today_value, daily)
 
@@ -496,13 +550,37 @@ def get_sleep_stage_trend(user: str, start_date: date, end_date: date) -> list[d
     omitted, same convention as get_sleep_timing_trend().
     '''
     by_date = _sleep_sessions_by_wake_date(user, start_date, end_date)
+    if not by_date:
+        return []
+
+    # One fetch of every night's stage segments, instead of one
+    # get_sleep_stage_breakdown() round trip per night (31 for a month).
+    # The docstring above notes this "needs its own call per night - a
+    # real query per night, not free to compute from the same rows
+    # get_sleep_timing_trend() already has", which is true; what it
+    # missed is that it IS free to compute from one query covering
+    # every night's window at once.
+    stage_data = _bulk_stage_segments(user, _session_windows(by_date))
+
     result = []
     for wake_date in sorted(by_date):
         sessions = by_date[wake_date]
         if not sessions:
             continue
         device, session = _primary_device_session(sessions)
-        stages = get_sleep_stage_breakdown(user, session["start_time"], session["end_time"], device=device)
+        times, entries = stage_data.get(device, ([], []))
+        lo = bisect.bisect_left(times, session["start_time"])
+        hi = bisect.bisect_left(times, session["end_time"])
+
+        seconds_by_stage: dict[str, float] = {}
+        for stage, duration_s in entries[lo:hi]:
+            seconds_by_stage[stage] = seconds_by_stage.get(stage, 0.0) + duration_s
+        # Sum first, THEN convert to whole minutes - matches Flux's
+        # sum() followed by round(value / 60) exactly. Rounding each
+        # segment individually and adding those up would drift by a
+        # minute or two across a night of short segments.
+        stages = {stage: round(total / 60) for stage, total in seconds_by_stage.items()}
+
         result.append({
             "date": wake_date.strftime("%Y-%m-%d"),
             "stages_min": stages,
@@ -527,25 +605,48 @@ def get_sleep_vitals_trend(field: str, user: str, start_date: date, end_date: da
     chart don't need to filter these out themselves.
     '''
     by_date = _sleep_sessions_by_wake_date(user, start_date, end_date)
+    if not by_date:
+        return []
+
+    # Was FOUR _device_stat_by_field() round trips per night (min, max,
+    # median, mean over the identical window), i.e. 121 sequential Flux
+    # queries for a month - and the Sleep Reports page requests this
+    # endpoint twice (heart_rate and sleep_respiratory_rate), which
+    # measured as the single largest contributor to that page's load
+    # time by a wide margin. All four are now computed in Python from
+    # one windowed fetch of the same readings the four queries were
+    # each independently scanning.
+    series = _windowed_series(field, user, _session_windows(by_date))
+
     result = []
     for wake_date in sorted(by_date):
         sessions = by_date[wake_date]
         if not sessions:
             continue
         device, session = _primary_device_session(sessions)
-        mins = _device_stat_by_field(field, user, session["start_time"], session["end_time"], "min")
-        if device not in mins:
+        values = _slice_values(series, device, session["start_time"], session["end_time"])
+        # Matches the old "if device not in mins: continue" guard - a
+        # night whose session exists but has no readings of this field
+        # is omitted entirely rather than returned with null values.
+        if not values:
             continue
-        maxs = _device_stat_by_field(field, user, session["start_time"], session["end_time"], "max")
-        medians = _device_stat_by_field(field, user, session["start_time"], session["end_time"], "median")
-        means = _device_stat_by_field(field, user, session["start_time"], session["end_time"], "mean")
+        ordered = sorted(values)
         result.append({
             "date": wake_date.strftime("%Y-%m-%d"),
             "device": device,
-            "min": round(mins[device], 1),
-            "max": round(maxs[device], 1),
-            "median": round(medians[device], 1) if device in medians else None,
-            "mean": round(means[device], 1) if device in means else None,
+            "min": round(ordered[0], 1),
+            "max": round(ordered[-1], 1),
+            # sorted[n // 2], deliberately NOT statistics.median: Flux's
+            # median() defaults to method "estimate_tdigest", but
+            # _device_stat_by_field's median passes no method and so
+            # returned the tdigest estimate here. Either way, what the
+            # UI wants (and what get_period_range_series already
+            # standardizes on via "exact_selector") is a real observed
+            # reading. statistics.median would average the two middle
+            # values on an even-length night, inventing a figure no
+            # device ever recorded - the upper-middle element does not.
+            "median": round(ordered[len(ordered) // 2], 1),
+            "mean": round(statistics.mean(values), 1),
         })
     return result
 
@@ -681,27 +782,29 @@ def get_nightly_differential_series(field: str, user: str, start_date: date, end
     meaningful).
 
     Needs each displayed night's own trailing baseline, so this pulls
-    in [start_date - baseline_days, end_date) of nightly values - the
-    sleep-SESSION lookup for that whole extended range is fetched ONCE
-    up front (_sleep_sessions_by_wake_date()), but each night's actual
-    field-value mean still needs its own query (one per night in the
-    extended range) - unlike get_rolling_mean_series()'s calendar-day
-    version, a real sleep session's boundaries differ night to night
-    and can't be expressed as a single batched aggregateWindow() call.
-    This means a Month view here costs roughly (30 + baseline_days)
-    queries - noticeably more than this file's other functions, and a
-    reasonable place to look first if this page ever turns out to load
-    slowly in practice; not optimized further here without evidence
-    that it actually needs to be.
+    in [start_date - baseline_days, end_date) of nightly values. Both
+    the sleep-SESSION lookup for that whole extended range AND the
+    field values inside those sessions are now fetched in bulk - one
+    query each (see _windowed_series()) rather than one value query
+    per night.
+
+    A real sleep session's boundaries differ night to night, so unlike
+    get_rolling_mean_series()'s calendar-day version this still can't
+    be a single aggregateWindow() call - but the per-night reduction
+    is done in Python over one windowed fetch instead. This function
+    previously cost roughly (30 + baseline_days) sequential queries
+    for a Month view; measured at 38, which was the second-largest
+    single contributor to W/M load time after get_sleep_vitals_trend().
+    The note that used to sit here - "a reasonable place to look first
+    if this page ever turns out to load slowly in practice" - was
+    correct, and this is that.
     '''
     sessions_by_date = _sleep_sessions_by_wake_date(user, start_date - timedelta(days=baseline_days), end_date)
 
-    nightly_by_device: dict[str, dict[str, float]] = {}
-    for wake_date, sessions in sessions_by_date.items():
-        for device, session in sessions.items():
-            device_means = _device_stat_by_field(field, user, session["start_time"], session["end_time"], "mean")
-            if device in device_means:
-                nightly_by_device.setdefault(device, {})[wake_date.isoformat()] = device_means[device]
+    nightly_by_device: dict[str, dict[str, float]] = {
+        device: {wake_date.isoformat(): value for wake_date, value in by_night.items()}
+        for device, by_night in _nightly_means_in_bulk(field, user, sessions_by_date).items()
+    }
 
     result: dict[str, list[dict]] = {}
     for device, by_date in nightly_by_device.items():
@@ -729,6 +832,79 @@ def get_nightly_differential_series(field: str, user: str, start_date: date, end
             d += timedelta(days=1)
         if series:
             result[device] = series
+    return result
+
+def _bulk_stage_segments(user: str, windows: list[tuple[datetime, datetime]]) -> dict[str, tuple[list[datetime], list[tuple[str, float]]]]:
+    ''' Every sleep-stage segment across the union of `windows`, kept
+    per device - the bulk counterpart to get_sleep_stage_breakdown(),
+    which answers the same question for a single session and therefore
+    costs one round trip per night when called in a loop.
+
+    Reads exactly the same sleep_stage_duration_s points that function
+    sums, but returns them unaggregated and device-tagged so a caller
+    can slice out any one session's window and sum it locally. The
+    device tag is kept rather than filtered in the query because the
+    whole point is to serve many nights (and potentially several
+    devices) from one fetch - the per-device filtering
+    get_sleep_stage_breakdown() does in Flux happens on the slice
+    instead, preserving the two-device correctness fix that function's
+    own docstring describes.
+
+    Returns {device: (times, [(stage, duration_s), ...])}, both lists
+    index-aligned and chronologically sorted.
+    '''
+    merged = _merge_windows(windows)
+    if not merged:
+        return {}
+
+    client = get_client()
+    query_api = client.query_api()
+
+    by_device: dict[str, list[tuple[datetime, str, float]]] = {}
+
+    for i in range(0, len(merged), _MAX_WINDOWS_PER_QUERY):
+        chunk = merged[i:i + _MAX_WINDOWS_PER_QUERY]
+
+        def _lit(dt: datetime) -> str:
+            return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+        clauses = " or ".join(
+            f'(r._time >= {_lit(w_start)} and r._time < {_lit(w_end)})'
+            for w_start, w_end in chunk
+        )
+
+        flux = f'''
+        from(bucket: "{INFLUX_BUCKET}")
+          |> range(start: {_lit(chunk[0][0])}, stop: {_lit(chunk[-1][1])})
+          |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
+          |> filter(fn: (r) => r.user == "{user}")
+          |> filter(fn: (r) => r.sample_type == "sleep_stage")
+          |> filter(fn: (r) => r._field == "sleep_stage_duration_s")
+          |> filter(fn: (r) => {clauses})
+          |> group(columns: ["device"])
+          |> sort(columns: ["_time"])
+        '''
+
+        try:
+            tables = query_api.query(flux)
+        except Exception as e:
+            logger.error(f"Failed to query bulk sleep stage segments for user={user}: {e}")
+            continue
+
+        for table in tables:
+            for record in table.records:
+                device = record.values.get("device")
+                stage = record.values.get("sleep_stage")
+                value = record.get_value()
+                t = record.get_time()
+                if device is None or stage is None or value is None or t is None:
+                    continue
+                by_device.setdefault(device, []).append((t, stage, value))
+
+    result: dict[str, tuple[list[datetime], list[tuple[str, float]]]] = {}
+    for device, segments in by_device.items():
+        segments.sort(key=lambda s: s[0])
+        result[device] = ([s[0] for s in segments], [(s[1], s[2]) for s in segments])
     return result
 
 def get_sleep_stage_breakdown(user: str, session_start: datetime, session_end: datetime, device: str | None = None) -> dict[str, int]:

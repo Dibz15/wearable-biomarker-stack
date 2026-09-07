@@ -33,12 +33,61 @@ def delete_session(token: str):
     db.delete_session(token)
 
 
+# How stale last_seen_at is allowed to get before it's worth a write.
+# last_seen_at exists to answer "is this session still in use", which
+# minute-level precision answers just as well as second-level.
+SESSION_TOUCH_INTERVAL_SECONDS = 60
+
+
 def get_user_from_token(token: str) -> dict | None:
+    ''' Resolves a session token to its user row, refreshing the
+    session's last_seen_at at most once every
+    SESSION_TOUCH_INTERVAL_SECONDS.
+
+    This used to write on EVERY authenticated request. Each write is
+    its own connection, transaction and commit (so, an fsync), and a
+    single page load in this app fires up to six API requests in
+    parallel - so six serialized write transactions, on storage that
+    is often an SD card. Since the value only needs to be roughly
+    right, skipping the write when it's already fresh removes almost
+    all of them.
+    '''
     row = db.get_session_with_user(token)
     if row is None:
         return None
-    db.touch_session(token)
+
+    # Not part of the user identity - callers get the same dict shape
+    # they always did.
+    last_seen_at = row.pop("session_last_seen_at", None)
+    if _session_touch_is_due(last_seen_at):
+        db.touch_session(token)
     return row
+
+
+def _session_touch_is_due(last_seen_at: str | None) -> bool:
+    ''' True when last_seen_at is missing, unparseable, or older than
+    the throttle interval. Anything unexpected errs toward writing -
+    the write is what the old behavior always did, so falling back to
+    it can only cost performance, never correctness.
+    '''
+    if not last_seen_at:
+        return True
+    try:
+        # Written by SQLite's datetime('now'), which is UTC without a
+        # timezone suffix - so it's parsed as naive and compared
+        # against a naive UTC now, not the local clock.
+        seen = datetime.strptime(last_seen_at, "%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return True
+    # datetime.now(timezone.utc) rather than the deprecated utcnow(),
+    # then dropped back to naive so it compares against the naive value
+    # parsed above.
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    age = (now - seen).total_seconds()
+    # A negative age means the stored value is in the future (clock
+    # skew, or a manually edited row) - treat that as due rather than
+    # letting it suppress writes indefinitely.
+    return age < 0 or age >= SESSION_TOUCH_INTERVAL_SECONDS
 
 
 def get_current_user(request: Request) -> dict:

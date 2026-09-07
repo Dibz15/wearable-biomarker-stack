@@ -1,9 +1,11 @@
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
@@ -36,6 +38,33 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Wearable Events", lifespan=lifespan)
 
 
+# Compresses both the JSON API responses and the static JS/CSS bundle.
+# The W/M endpoints return one entry per day and are small either way,
+# but the Day views' raw per-point series and the ~357 KB frontend
+# bundle both compress by roughly an order of magnitude - and gzip is
+# where almost all of that saving comes from on a mobile connection.
+# minimum_size skips the many tiny responses (auth checks, single
+# baseline objects) where the compression header overhead would
+# outweigh the saving.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+
+@app.middleware("http")
+async def server_timing(request: Request, call_next):
+    ''' Reports how long the server itself spent on each request, via
+    the standard Server-Timing header - surfaced directly in Chrome
+    and Firefox devtools' network Timing panel. This is the one thing
+    that makes "is this slow because of the server or the connection?"
+    answerable from a phone over remote debugging, rather than
+    guessed at. Cheap enough (one perf_counter pair) to leave on
+    permanently.
+    '''
+    started = time.perf_counter()
+    response = await call_next(request)
+    response.headers["Server-Timing"] = f"app;dur={(time.perf_counter() - started) * 1000:.1f}"
+    return response
+
+
 @app.middleware("http")
 async def no_cache_static(request: Request, call_next):
     ''' Forces the browser to always revalidate static assets (HTML/JS/
@@ -46,10 +75,22 @@ async def no_cache_static(request: Request, call_next):
     already-open browser tab, with no visible sign anything is wrong.
     This app is small and self-hosted, so trading away browser caching
     for "you always get what's actually on disk" is the right default.
+
+    "no-cache", not "no-store" - a deliberate distinction, not a
+    synonym. Both guarantee the browser never serves a stale asset
+    without asking the server first, which is the whole point above.
+    But no-store forbids keeping a copy at all, so every revalidation
+    re-downloads the full file; no-cache lets the browser keep the
+    copy and revalidate it, and StaticFiles already sends the ETag and
+    Last-Modified that turn that into a ~200-byte 304. The frontend is
+    ~357 KB across 18 ES modules plus the stylesheet, all of it
+    re-fetched on every load under no-store - the single largest
+    transfer in the app, and painful on mobile data. This keeps the
+    freshness guarantee and drops the bytes.
     '''
     response = await call_next(request)
     if request.url.path == "/" or request.url.path.endswith((".js", ".css", ".html")):
-        response.headers["Cache-Control"] = "no-store"
+        response.headers["Cache-Control"] = "no-cache"
     return response
 
 

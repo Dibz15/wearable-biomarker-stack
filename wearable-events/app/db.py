@@ -38,6 +38,14 @@ def init_db():
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     with get_conn() as conn:
+        # Persistent (stored in the database file itself, so this only
+        # needs setting once, not per connection). In the default
+        # rollback-journal mode a writer blocks every reader, which
+        # matters here because a single page load fires several API
+        # requests in parallel and each one reads the sessions table.
+        # WAL lets those reads proceed alongside a write instead of
+        # queueing behind it.
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SCHEMA_PATH.read_text())
         _ensure_column(conn, "calendar_events_cache", "manually_tagged", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "keyword_rules", "exclusive", "INTEGER NOT NULL DEFAULT 1")
@@ -94,9 +102,16 @@ def create_session(token: str, user_id: int):
 
 
 def get_session_with_user(token: str) -> dict | None:
+    ''' Also selects the session's own last_seen_at (aliased so it can't
+    collide with the user columns), so auth.get_user_from_token() can
+    decide whether the session actually needs touching without a
+    second query for it. Callers that only want the user should pop
+    that key - see get_user_from_token(), the only caller.
+    '''
     with get_conn() as conn:
         row = conn.execute(
-            """SELECT users.id, users.username, users.created_at
+            """SELECT users.id, users.username, users.created_at,
+                      sessions.last_seen_at AS session_last_seen_at
                FROM sessions JOIN users ON sessions.user_id = users.id
                WHERE sessions.token = ?""",
             (token,)
