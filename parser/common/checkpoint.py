@@ -109,6 +109,46 @@ class ObservedTracker:
     def __init__(self, max_future_tolerance_seconds):
         self.max_future_tolerance_seconds = max_future_tolerance_seconds
         self.observed = {}
+        self.held_back = {}
+
+    def hold_back(self, device_id, row_ts):
+        ''' Records that a row was READ but deliberately not written,
+        so the checkpoint must not advance past it - the next run has
+        to see this row again.
+
+        Needed because note() keeps the MAXIMUM timestamp per device
+        across every section of a run. Simply not calling note() for a
+        skipped row is not enough on its own: any other section
+        (activity, workouts) noting a LATER timestamp for the same
+        device would carry the checkpoint straight past the skipped
+        row, and CHECKPOINT_OVERLAP_SECONDS is far too short to bring
+        it back. The skipped data would then never be retried - it
+        would be silently lost rather than deferred.
+
+        Call this instead of note() whenever a row is intentionally
+        left unwritten and should be reprocessed next run.
+        '''
+        key = f"dev-{device_id}"
+        if key not in self.held_back or row_ts < self.held_back[key]:
+            self.held_back[key] = row_ts
+
+    def checkpoint_for(self, device_key):
+        ''' The timestamp safe to record as this device's checkpoint:
+        the newest row actually processed, but never at or past the
+        oldest row held back. Returns None when everything observed
+        for this device is held back, meaning the checkpoint should be
+        left exactly where it was.
+        '''
+        observed = self.observed.get(device_key)
+        held = self.held_back.get(device_key)
+        if observed is None:
+            return None
+        if held is None:
+            return observed
+        # 1ns before the held-back row, so the next run's window
+        # (which starts at checkpoint - overlap) definitely includes it.
+        safe = min(observed, held - 1)
+        return safe if safe > 0 else None
 
     def note(self, device_id, row_ts):
         now_ns = time.time_ns()

@@ -69,7 +69,7 @@ import huami_pb2
 from common.webdav import fetch_database, open_database
 from common.devices import run_query, fetch_devices, device_tags_factory
 from common.checkpoint import get_last_checkpoint_ns, ObservedTracker
-from common.influx import build_client, write_results
+from common.influx import build_client, replace_session_points, write_results
 
 ### Config section
 
@@ -1945,6 +1945,38 @@ def extract_data(cur, client, webdav_client):
             # have no Colmi equivalent, so they're new, clearly-named fields.
             session_start_epoch_s = midnight_prev + decoded["sleep_start_min"] * 60
             session_end_epoch_s = midnight_prev + decoded["sleep_end_min"] * 60
+
+            # Clear any version of this same night a PREVIOUS run
+            # already wrote before emitting this one - see
+            # replace_session_points() for the full reasoning. The
+            # short version: the watch re-sends refined summaries of a
+            # night it already sent, and their stage timestamps are
+            # derived from the blob's own clock, so they land beside
+            # the earlier points rather than overwriting them.
+            # deduplicate_sleep_session_rows() above already covers the
+            # case where both blobs are in THIS batch; this covers the
+            # case where the earlier one was written by an earlier run.
+            #
+            # Note this makes extraction no longer purely read-only -
+            # the delete happens here, while the matching write happens
+            # later via write_results(). A crash in between loses this
+            # one night's sleep data until the next run rewrites it,
+            # which is the right trade against leaving a permanently
+            # double-counted night in place.
+            if not replace_session_points(
+                influx_client, INFLUXDB_BUCKET, INFLUXDB_ORG, INFLUXDB_MEASUREMENT,
+                GADGETBRIDGE_USER, PARSER_SOURCE, tags_base,
+                to_nanos(session_start_epoch_s, is_ms=False),
+                to_nanos(session_end_epoch_s, is_ms=False),
+            ):
+                # hold_back(), not merely "don't note()": note() keeps
+                # the max timestamp per device across the whole run, so
+                # a later activity row would otherwise carry the
+                # checkpoint straight past this unwritten session and
+                # it would never be retried. See ObservedTracker.
+                observed.hold_back(device_id, row_ts)
+                continue
+
             session_fields = {
                 "sleep_session_start": session_start_epoch_s,
                 "sleep_session_wakeup": session_end_epoch_s,
@@ -2062,8 +2094,18 @@ def extract_data(cur, client, webdav_client):
         section_counts["nap (HUAMI_SLEEP_SESSION_SAMPLE)"] = nap_points
 
     now = time.time_ns()
-    for device_key, row_ts in observed.observed.items():
+    for device_key in observed.observed:
         device_id = device_key.replace("dev-", "")
+        # Not observed.observed[device_key] directly: a session whose
+        # previous-version delete failed was read but deliberately not
+        # written, and the checkpoint must stay behind it so the next
+        # run picks it up again. See ObservedTracker.checkpoint_for().
+        row_ts = observed.checkpoint_for(device_key)
+        if row_ts is None:
+            logger.warning(f"Device {devices.get(device_key, {}).get('name', device_key)}: "
+                           f"every row this run was held back for reprocessing - "
+                           f"leaving the checkpoint unchanged")
+            continue
         row_age = now - row_ts
         row_age_hours = row_age / 1_000_000_000 / 3600
         if row_age_hours > 24:
