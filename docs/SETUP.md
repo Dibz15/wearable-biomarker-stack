@@ -191,6 +191,11 @@ subjective sleep score. Add a second household member from the Manage
 tab, using the same username as their `GADGETBRIDGE_USER` (see
 [Multi-user notes](#multi-user-notes)) so their data lines up.
 
+If a calendar event didn't actually happen, click **Didn't attend** on
+it in the Timeline tab. It stays on the timeline (struck through) but
+its tags are removed from InfluxDB and future syncs won't re-add them,
+so it no longer counts towards tag or event stats. **Restore** undoes it.
+
 Developing or modifying this component? See
 [`wearable-events/README.md`](../wearable-events/README.md).
 

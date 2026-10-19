@@ -754,6 +754,39 @@ main {
   font-size: 0.75rem;
 }
 
+.timeline-entry-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-left: auto;
+}
+
+.timeline-exclude-btn {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+/* Struck off via "Didn't attend" - still shown, but clearly not counted */
+.timeline-entry-excluded {
+  border-left-color: var(--surface-active);
+}
+
+.timeline-entry-excluded .timeline-title,
+.timeline-entry-excluded .timeline-time,
+.timeline-entry-excluded .timeline-cal-name {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.timeline-entry-excluded .timeline-tags {
+  opacity: 0.45;
+}
+
+.chip-excluded {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
 .timeline-edit-form {
   display: flex;
   flex-direction: column;

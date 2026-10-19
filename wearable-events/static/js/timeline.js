@@ -195,15 +195,27 @@ function renderTimelineEntryReadonly(entry) {
   const overrideBadge = entry.manually_tagged ? ' <span class="chip-small">manually tagged</span>' : "";
 
   if (entry.kind === "calendar") {
+    // exclude_incomplete: struck off, but some Influx points couldn't be
+    // removed (or a restore failed part-way), so it may still be counted.
+    const excludedBadge = !entry.excluded ? ""
+      : entry.exclude_incomplete
+        ? ' <span class="chip-small chip-excluded">not attended · removal failed, may still be counted</span>'
+        : ' <span class="chip-small chip-excluded">not attended · not counted</span>';
+    const retryBtn = entry.exclude_incomplete ? '<button class="small-btn timeline-exclude-retry-btn">Retry removal</button>' : "";
+    const excludeBtnLabel = entry.excluded ? "Restore" : "Didn't attend";
     return `
       <div class="timeline-entry-main">
         <span class="timeline-time">${time}</span>
         <span class="timeline-kind-badge cal">Calendar</span>
         <span class="timeline-title">${escapeHtml(entry.title) || "(untitled event)"}</span>
         <span class="muted timeline-cal-name">${escapeHtml(entry.calendar) || ""}${durationNote}</span>
-        <button class="small-btn timeline-edit-btn">Edit tags</button>
+        <span class="timeline-entry-actions">
+          <button class="small-btn timeline-edit-btn">Edit tags</button>
+          ${retryBtn}
+          <button class="small-btn timeline-exclude-btn">${excludeBtnLabel}</button>
+        </span>
       </div>
-      ${renderTagChips(entry.tags)}${overrideBadge}
+      ${renderTagChips(entry.tags)}${overrideBadge}${excludedBadge}
     `;
   }
   return `
@@ -217,7 +229,35 @@ function renderTimelineEntryReadonly(entry) {
   `;
 }
 
+async function setTimelineEntryExcluded(entry, action) {
+  for (;;) {
+    try {
+      await api(`/calendar_events/${entry.event_id}/${action}`, { method: "POST" });
+      break;
+    } catch (e) {
+      // 502 means InfluxDB couldn't be fully updated; the server keeps
+      // the event excluded and remembers what's left, so repeating the
+      // same call is safe. If declined, the row shows "removal failed"
+      // with a Retry button instead of claiming it isn't counted.
+      // (api() doesn't expose the status; both 502 messages name InfluxDB.)
+      if (!e.message.includes("InfluxDB")) {
+        alert(`Error: ${e.message}`);
+        break;
+      }
+      if (!confirm(`${e.message}\n\nRetry now?`)) break;
+    }
+  }
+  loadTimeline();
+}
+
+function toggleTimelineEntryExcluded(entry) {
+  if (entry.excluded) return setTimelineEntryExcluded(entry, "restore");
+  if (!confirm("Mark this event as not attended? It stays on the timeline (struck through) but stops counting towards tags and event stats. You can restore it later.")) return;
+  return setTimelineEntryExcluded(entry, "exclude");
+}
+
 function rerenderTimelineEntry(row, entry) {
+  row.classList.toggle("timeline-entry-excluded", Boolean(entry.excluded));
   if (timelineEditDrafts.has(entry.event_id)) {
     row.innerHTML = renderTimelineEditForm(entry);
     wireTimelineEditForm(row, entry);
@@ -227,6 +267,10 @@ function rerenderTimelineEntry(row, entry) {
       timelineEditDrafts.set(entry.event_id, new Set(entry.tags));
       rerenderTimelineEntry(row, entry);
     });
+    const excludeBtn = row.querySelector(".timeline-exclude-btn");
+    if (excludeBtn) excludeBtn.addEventListener("click", () => toggleTimelineEntryExcluded(entry));
+    const retryBtn = row.querySelector(".timeline-exclude-retry-btn");
+    if (retryBtn) retryBtn.addEventListener("click", () => setTimelineEntryExcluded(entry, "exclude"));
   }
 }
 

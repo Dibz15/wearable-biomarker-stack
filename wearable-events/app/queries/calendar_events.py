@@ -1,5 +1,6 @@
 """Manual/calendar event read-writes (events measurement)."""
 import hashlib
+import threading
 import uuid
 from datetime import datetime, time, timedelta, timezone
 
@@ -9,6 +10,37 @@ from loguru import logger
 
 from app.config import EVENTS_MEASUREMENT, INFLUX_BUCKET, INFLUX_ORG
 from app.queries.client import get_client
+
+# Serializes "read a calendar event's cache row (excluded flag, tags),
+# then write/delete its Influx points" across the scheduled sync, the
+# reprocess thread and the per-event Timeline endpoints. Without it, a
+# sync that read excluded=0 just before someone clicked "Didn't attend"
+# could write the points straight back after they'd been deleted.
+#
+# In-process only: correct because the app runs as ONE uvicorn process
+# (Dockerfile CMD, no --workers) with its scheduler thread inside it.
+# Running several workers would also run several schedulers and need a
+# cross-process guard instead - see docs/REFERENCE.md.
+calendar_points_lock = threading.RLock()
+
+def _predicate_str(value: str) -> str:
+    ''' Escape a value for a double-quoted string in an InfluxDB delete
+    predicate. The predicate parser reads backslash escapes (escaped
+    backslash, double quote, newline) and rejects a lone backslash, a bare
+    double quote or a raw newline, so calendar names / tags containing any
+    of those would otherwise make every delete fail - verified against
+    InfluxDB 2.7's delete endpoint.
+    '''
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _flux_str(value: str) -> str:
+    ''' Escape a value for a double-quoted Flux string literal (InfluxDB
+    OSS doesn't support parameterized queries). Flux also treats "${" as
+    the start of string interpolation. '''
+    return (value.replace("\\", "\\\\").replace('"', '\\"')
+                 .replace("\n", "\\n").replace("${", "\\${"))
+
 
 def calendar_event_id(calendar: str, start_time: str, title: str) -> str:
     ''' Deterministic event_id for calendar-derived events, per spec §6 -
@@ -21,7 +53,7 @@ def calendar_event_id(calendar: str, start_time: str, title: str) -> str:
 def manual_event_id() -> str:
     return str(uuid.uuid4())
 
-def delete_event_tag_point(*, tag: str, source: str, timestamp: datetime, calendar: str | None = None):
+def delete_event_tag_point(*, user: str, tag: str, source: str, timestamp: datetime, calendar: str | None = None):
     ''' Delete the single Influx point for one (event, tag) pairing.
 
     event_id is stored as a FIELD, not a tag, on events points - and
@@ -34,9 +66,10 @@ def delete_event_tag_point(*, tag: str, source: str, timestamp: datetime, calend
     Known edge case: two events sharing the same tag/source/calendar
     starting at the exact same second would collide here; for personal
     use this is vanishingly unlikely and not worth the complexity of
-    handling. Doesn't filter on `user` (the rest of the predicate scopes
-    tightly enough in practice, and `user` isn't guaranteed stable if an
-    account were ever renamed - a real but narrow edge case).
+    handling. Always scoped to `user`: household members commonly
+    subscribe to the same shared calendar, so without it one person's
+    edit/strike-off would also delete the other's identical point.
+    (Usernames can't be renamed, so the `user` tag is stable.)
 
     Shared by the reprocess job (reclassifying calendar events under new
     keyword rules) and the manual event/calendar-tag-override edit
@@ -51,12 +84,15 @@ def delete_event_tag_point(*, tag: str, source: str, timestamp: datetime, calend
     # parsing with "bad logical expression, at position 26", landing
     # exactly on the "t" of "tag=" - the same class of bug documented for
     # "from=" in InfluxDB's own issue tracker/forums). Quoting the key
-    # itself, not just the value, is the documented fix. Quoting "source"
-    # and "calendar" defensively too, since there's no published
+    # itself, not just the value, is the documented fix. Quoting "user",
+    # "source" and "calendar" defensively too, since there's no published
     # authoritative list of every reserved word in this specific grammar.
-    predicate = f'_measurement="{EVENTS_MEASUREMENT}" AND "tag"="{tag}" AND "source"="{source}"'
+    predicate = (
+        f'_measurement="{_predicate_str(EVENTS_MEASUREMENT)}" AND "user"="{_predicate_str(user)}" '
+        f'AND "tag"="{_predicate_str(tag)}" AND "source"="{_predicate_str(source)}"'
+    )
     if calendar is not None:
-        predicate += f' AND "calendar"="{calendar}"'
+        predicate += f' AND "calendar"="{_predicate_str(calendar)}"'
     delete_api.delete(start, stop, predicate, bucket=INFLUX_BUCKET, org=INFLUX_ORG)
 
 def find_manual_event_by_id(user: str, event_id: str, lookback_days: int = 1825) -> dict | None:
@@ -206,3 +242,80 @@ def find_manual_events_in_range(user: str, start: datetime, end: datetime) -> li
         }
         for e in grouped.values()
     ]
+
+
+def find_calendar_event_points(*, user: str, event_id: str, timestamp: datetime) -> set[tuple[str, str]]:
+    ''' The points this calendar event ACTUALLY has in Influx for this
+    user, as (tag, calendar) pairs - looked up by its event_id field over
+    the same 1-second window the deletes use. Exclude/restore use this
+    rather than trusting the cache, which can lag behind Influx: a sync
+    that retagged an event writes the new tag without deleting the old
+    one, a retag whose delete failed leaves the old point behind, and
+    renaming a calendar leaves its existing points under the OLD
+    `calendar` tag value (so deletes must use each point's own value).
+
+    Raises on query failure (unlike the other lookups here) - the caller
+    must not treat "couldn't check" as "nothing there".
+    '''
+    start = timestamp.astimezone(timezone.utc)
+    stop = start + timedelta(seconds=1)
+    flux = f'''
+    from(bucket: "{_flux_str(INFLUX_BUCKET)}")
+      |> range(start: {start.strftime("%Y-%m-%dT%H:%M:%S.%fZ")}, stop: {stop.strftime("%Y-%m-%dT%H:%M:%S.%fZ")})
+      |> filter(fn: (r) => r._measurement == "{_flux_str(EVENTS_MEASUREMENT)}")
+      |> filter(fn: (r) => r.source == "calendar" and r.user == "{_flux_str(user)}")
+      |> filter(fn: (r) => r._field == "event_id" and r._value == "{_flux_str(event_id)}")
+      |> keep(columns: ["tag", "calendar"])
+    '''
+    tables = get_client().query_api().query(flux)
+    return {
+        (record.values["tag"], record.values.get("calendar") or "")
+        for table in tables for record in table.records if record.values.get("tag")
+    }
+
+
+def delete_calendar_event_points(*, user: str, event_id: str, points, timestamp: datetime,
+                                 action: str) -> set[tuple[str, str]]:
+    ''' Best-effort delete of one calendar event's points, given as
+    (tag, calendar) pairs - the calendar is part of the delete predicate,
+    so it must be the value the point was written with. Failures are
+    logged, not raised - returns the pairs whose delete failed so callers
+    that care (exclude/restore) can act on them. A delete that matches
+    nothing is NOT an error to Influx, so callers that need certainty
+    re-check with find_calendar_event_points. `action` is only for the
+    log line ("excluding", "retagging", ...).
+    '''
+    failed = set()
+    for tag, calendar in sorted(set(points)):
+        try:
+            delete_event_tag_point(user=user, tag=tag, source="calendar", timestamp=timestamp, calendar=calendar)
+        except Exception as e:
+            logger.warning(f"Failed to delete point while {action} calendar event {event_id} (tag={tag}): {e}")
+            failed.add((tag, calendar))
+    return failed
+
+
+def replace_calendar_event_points(*, user: str, event_id: str, old_tags, new_tags: list[str],
+                                  timestamp: datetime, calendar: str, duration_min: int | None,
+                                  action: str) -> list[str]:
+    ''' Move one calendar event's Influx points from old_tags to new_tags:
+    deletes points for tags no longer present (best-effort, see
+    delete_calendar_event_points), then writes the full new set.
+    Rewriting unchanged tags is safe - identical tag-set + timestamp
+    overwrites in InfluxDB rather than duplicating. Write failures DO
+    raise. Returns the tags whose delete failed.
+    '''
+    failed = delete_calendar_event_points(
+        user=user, event_id=event_id, points={(t, calendar) for t in set(old_tags) - set(new_tags)},
+        timestamp=timestamp, action=action,
+    )
+    write_event_points(
+        user=user,
+        tags=new_tags,
+        source="calendar",
+        timestamp=timestamp,
+        event_id=event_id,
+        calendar=calendar,
+        duration_min=duration_min,
+    )
+    return sorted(tag for tag, _ in failed)

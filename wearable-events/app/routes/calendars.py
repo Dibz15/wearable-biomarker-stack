@@ -10,7 +10,12 @@ from pydantic import BaseModel
 from app import db
 from app.auth import get_current_user
 from app.ics_sync import classify_event
-from app.queries.calendar_events import delete_event_tag_point, write_event_points
+from app.queries.calendar_events import (
+    calendar_points_lock,
+    delete_calendar_event_points,
+    find_calendar_event_points,
+    replace_calendar_event_points,
+)
 from app.reprocess import compute_reclassification_diff
 
 router = APIRouter()
@@ -85,6 +90,21 @@ def trigger_calendar_sync(calendar_id: int, current_user: dict = Depends(get_cur
     sync_calendar(calendar, rules, current_user["username"])
     return {"ok": True}
 
+def _load_event_and_calendar(event_id: str, user_id: int) -> tuple[dict, dict]:
+    ''' Shared 404/409 lookup for the per-event endpoints below. Callers
+    hold calendar_points_lock while calling this, so the row they act on
+    can't be changed underneath them by a sync/reprocess/other request
+    between this read and their Influx writes.
+    '''
+    cached = db.get_cached_event(event_id, user_id)
+    if cached is None:
+        raise HTTPException(404, "calendar event not found")
+    calendar = db.get_calendar(cached["calendar_id"], user_id)
+    if calendar is None:
+        raise HTTPException(409, "this event's calendar no longer exists")
+    return cached, calendar
+
+
 @router.patch("/calendar_events/{event_id}/tags")
 def patch_calendar_event_tags(event_id: str, payload: CalendarEventTagsIn, current_user: dict = Depends(get_current_user)):
     ''' Manually override a calendar-derived event's tags (add/edit/
@@ -99,37 +119,28 @@ def patch_calendar_event_tags(event_id: str, payload: CalendarEventTagsIn, curre
         raise HTTPException(400, "at least one tag is required")
 
     user_id = current_user["id"]
-    cached = db.get_cached_event(event_id, user_id)
-    if cached is None:
-        raise HTTPException(404, "calendar event not found")
+    new_tags = sorted(set(payload.tags))
+    with calendar_points_lock:
+        cached, calendar = _load_event_and_calendar(event_id, user_id)
 
-    calendar = db.get_calendar(cached["calendar_id"], user_id)
-    if calendar is None:
-        raise HTTPException(409, "this event's calendar no longer exists")
+        # A struck-off event has no points in Influx - only update the
+        # cache, so the new tags take effect if/when it's restored. Any
+        # stranded_tags from an incomplete strike-off are left alone, so
+        # a retry still deletes them.
+        if not cached["excluded"]:
+            replace_calendar_event_points(
+                user=current_user["username"],
+                event_id=event_id,
+                old_tags=json.loads(cached["applied_tags"] or "[]"),
+                new_tags=new_tags,
+                timestamp=datetime.fromisoformat(cached["start_iso"]),
+                calendar=calendar["name"],
+                duration_min=cached["duration_min"],
+                action="retagging",
+            )
+        db.set_cached_event_tags(event_id, user_id, new_tags, manually_tagged=True)
 
-    old_tags = set(json.loads(cached["applied_tags"] or "[]"))
-    new_tags = set(payload.tags)
-    start_dt = datetime.fromisoformat(cached["start_iso"])
-
-    removed = old_tags - new_tags
-    for tag in removed:
-        try:
-            delete_event_tag_point(tag=tag, source="calendar", timestamp=start_dt, calendar=calendar["name"])
-        except Exception as e:
-            logger.warning(f"Failed to delete stale point for calendar event {event_id} (tag={tag}): {e}")
-
-    write_event_points(
-        user=current_user["username"],
-        tags=sorted(new_tags),
-        source="calendar",
-        timestamp=start_dt,
-        event_id=event_id,
-        calendar=calendar["name"],
-        duration_min=cached["duration_min"],
-    )
-    db.set_cached_event_tags(event_id, sorted(new_tags), manually_tagged=True)
-
-    return {"event_id": event_id, "tags": sorted(new_tags)}
+    return {"event_id": event_id, "tags": new_tags}
 
 @router.post("/calendar_events/{event_id}/reset_tags")
 def reset_calendar_event_tags(event_id: str, current_user: dict = Depends(get_current_user)):
@@ -139,40 +150,177 @@ def reset_calendar_event_tags(event_id: str, current_user: dict = Depends(get_cu
     syncs/reprocess apply normally to this event again.
     '''
     user_id = current_user["id"]
-    cached = db.get_cached_event(event_id, user_id)
-    if cached is None:
-        raise HTTPException(404, "calendar event not found")
-    if not cached["manually_tagged"]:
-        raise HTTPException(400, "this event isn't manually tagged - nothing to reset")
+    with calendar_points_lock:
+        cached, calendar = _load_event_and_calendar(event_id, user_id)
+        if not cached["manually_tagged"]:
+            raise HTTPException(400, "this event isn't manually tagged - nothing to reset")
 
-    calendar = db.get_calendar(cached["calendar_id"], user_id)
-    if calendar is None:
-        raise HTTPException(409, "this event's calendar no longer exists")
+        rules = db.list_keyword_rules(user_id, enabled_only=True)
+        new_tags = classify_event(cached["title"], cached["description"], rules, calendar["default_tag"])
 
-    rules = db.list_keyword_rules(user_id, enabled_only=True)
-    new_tags = classify_event(cached["title"], cached["description"], rules, calendar["default_tag"])
-    old_tags = set(json.loads(cached["applied_tags"] or "[]"))
-    start_dt = datetime.fromisoformat(cached["start_iso"])
-
-    removed = old_tags - set(new_tags)
-    for tag in removed:
-        try:
-            delete_event_tag_point(tag=tag, source="calendar", timestamp=start_dt, calendar=calendar["name"])
-        except Exception as e:
-            logger.warning(f"Failed to delete stale point while resetting calendar event {event_id} (tag={tag}): {e}")
-
-    write_event_points(
-        user=current_user["username"],
-        tags=new_tags,
-        source="calendar",
-        timestamp=start_dt,
-        event_id=event_id,
-        calendar=calendar["name"],
-        duration_min=cached["duration_min"],
-    )
-    db.set_cached_event_tags(event_id, new_tags, manually_tagged=False)
+        # Same as the tag override above - cache only while struck off.
+        if not cached["excluded"]:
+            replace_calendar_event_points(
+                user=current_user["username"],
+                event_id=event_id,
+                old_tags=json.loads(cached["applied_tags"] or "[]"),
+                new_tags=new_tags,
+                timestamp=datetime.fromisoformat(cached["start_iso"]),
+                calendar=calendar["name"],
+                duration_min=cached["duration_min"],
+                action="resetting",
+            )
+        db.set_cached_event_tags(event_id, user_id, new_tags, manually_tagged=False)
 
     return {"event_id": event_id, "tags": new_tags}
+
+def _tags(points) -> set[str]:
+    return {tag for tag, _ in points}
+
+
+@router.post("/calendar_events/{event_id}/exclude")
+def exclude_calendar_event(event_id: str, current_user: dict = Depends(get_current_user)):
+    ''' Strike a calendar event off ("didn't attend / didn't do it").
+    Removes the event's tag points from Influx so it stops counting
+    towards tags and event stats, but keeps the cache row so it still
+    shows (struck through) on the timeline and can be restored. Sync,
+    reprocess and the tag-edit endpoints all skip Influx writes for an
+    excluded event - see the excluded comment in schema.sql.
+
+    Driven by what's actually in Influx, not the cache (which can lag
+    behind it - see find_calendar_event_points):
+      1. mark the row excluded, with every tag the cache knows about in
+         stranded_tags (pessimistic);
+      2. look up the event's real points, and record those tags as
+         stranded too BEFORE deleting anything;
+      3. delete every point, each with its own `calendar` tag value (a
+         renamed calendar's old points still carry the old name);
+      4. look again - whatever is still there stays in stranded_tags.
+    If either lookup fails, everything stays stranded since we couldn't
+    check. Anything left stranded -> 502, and the Timeline shows the event
+    as needing a retry; calling this again is safe.
+    '''
+    user_id = current_user["id"]
+    username = current_user["username"]
+    with calendar_points_lock:
+        cached, calendar = _load_event_and_calendar(event_id, user_id)
+        start_dt = datetime.fromisoformat(cached["start_iso"])
+
+        known = set(json.loads(cached["stranded_tags"] or "[]"))
+        if not cached["excluded"]:
+            known |= set(json.loads(cached["applied_tags"] or "[]"))
+        db.set_cached_event_excluded(event_id, user_id, True, stranded_tags=known)
+
+        try:
+            actual = find_calendar_event_points(user=username, event_id=event_id, timestamp=start_dt)
+        except Exception as e:
+            logger.warning(f"Failed to look up Influx points while excluding calendar event {event_id}: {e}")
+            actual = None
+        else:
+            known |= _tags(actual)
+            db.set_cached_event_excluded(event_id, user_id, True, stranded_tags=known)
+
+        delete_calendar_event_points(
+            user=username, event_id=event_id, timestamp=start_dt, action="excluding",
+            points={(tag, calendar["name"]) for tag in known} | (actual or set()),
+        )
+
+        remaining = None
+        if actual is not None:
+            try:
+                remaining = find_calendar_event_points(user=username, event_id=event_id, timestamp=start_dt)
+            except Exception as e:
+                logger.warning(f"Failed to re-check Influx points while excluding calendar event {event_id}: {e}")
+        # Couldn't check (before or after) -> keep everything stranded.
+        stranded = known if remaining is None else _tags(remaining)
+        db.set_cached_event_excluded(event_id, user_id, True, stranded_tags=stranded)
+
+    if remaining is None:
+        raise HTTPException(
+            502,
+            "Marked as not attended, but couldn't check InfluxDB for all of its tag points, "
+            "so it may still be counted - try again.",
+        )
+    if stranded:
+        raise HTTPException(
+            502,
+            f"Marked as not attended, but couldn't remove {len(stranded)} tag point(s) from InfluxDB, "
+            "so it may still be counted - try again.",
+        )
+
+    return {"event_id": event_id, "excluded": True}
+
+@router.post("/calendar_events/{event_id}/restore")
+def restore_calendar_event(event_id: str, current_user: dict = Depends(get_current_user)):
+    ''' Undoes exclude: writes the event's tag points back to Influx and
+    clears the flag. A manually-tagged event gets its cached tags back;
+    otherwise it's reclassified against the *current* ruleset, since
+    sync/reprocess may have skipped it while it was excluded.
+
+    Works the same for a disabled calendar: disabling only stops future
+    syncs, it doesn't remove that calendar's existing points, so the
+    restored event counts exactly like its non-excluded siblings.
+
+    Before writing, any points still in Influx (leftovers of an
+    incomplete strike-off) that won't be overwritten by the restored set -
+    a tag not being restored, or one under a renamed calendar's old name -
+    are deleted, so nothing is double-counted. If Influx can't be checked
+    or fails part-way, the event stays excluded with every tag that might
+    now have a point recorded in stranded_tags (so the Timeline shows it
+    as needing a retry rather than claiming it isn't counted), and this
+    returns 502. Restoring again is safe.
+    '''
+    user_id = current_user["id"]
+    username = current_user["username"]
+    with calendar_points_lock:
+        cached, calendar = _load_event_and_calendar(event_id, user_id)
+        if not cached["excluded"]:
+            raise HTTPException(400, "this event isn't excluded - nothing to restore")
+
+        if cached["manually_tagged"]:
+            tags = json.loads(cached["applied_tags"] or "[]")
+        else:
+            rules = db.list_keyword_rules(user_id, enabled_only=True)
+            tags = classify_event(cached["title"], cached["description"], rules, calendar["default_tag"])
+            db.set_cached_event_tags(event_id, user_id, tags, manually_tagged=False)
+
+        start_dt = datetime.fromisoformat(cached["start_iso"])
+        stranded = set(json.loads(cached["stranded_tags"] or "[]"))
+        keep = {(tag, calendar["name"]) for tag in tags}
+
+        try:
+            actual = find_calendar_event_points(user=username, event_id=event_id, timestamp=start_dt)
+        except Exception as e:
+            logger.warning(f"Failed to look up Influx points while restoring calendar event {event_id}: {e}")
+            raise HTTPException(502, "Couldn't check InfluxDB, so the event is still excluded - try again.")
+
+        stale = (actual - keep) | {(tag, calendar["name"]) for tag in stranded - set(tags)}
+        failed = delete_calendar_event_points(
+            user=username, event_id=event_id, points=stale, timestamp=start_dt, action="restoring",
+        )
+        if failed:
+            db.set_cached_event_excluded(event_id, user_id, True, stranded_tags=stranded | _tags(actual))
+            raise HTTPException(502, "Couldn't update InfluxDB, so the event is still excluded - try again.")
+
+        db.set_cached_event_excluded(event_id, user_id, True, stranded_tags=stranded | _tags(actual) | set(tags))
+        try:
+            # old_tags=() - stale points were handled just above
+            replace_calendar_event_points(
+                user=username,
+                event_id=event_id,
+                old_tags=(),
+                new_tags=tags,
+                timestamp=start_dt,
+                calendar=calendar["name"],
+                duration_min=cached["duration_min"],
+                action="restoring",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write points while restoring calendar event {event_id}: {e}")
+            raise HTTPException(502, "Couldn't write to InfluxDB, so the event is still excluded - try again.")
+        db.set_cached_event_excluded(event_id, user_id, False, stranded_tags=[])
+
+    return {"event_id": event_id, "excluded": False, "tags": tags}
 
 # --- keyword rules ---
 
