@@ -8,7 +8,7 @@ from loguru import logger
 
 from app.config import INFLUX_BUCKET, INFLUX_ORG, SLEEP_MEASUREMENT
 from app.queries.client import get_client
-from app.queries.sleep_sessions import _primary_device_session, _sleep_session_for_night
+from app.queries.sleep_sessions import primary_sleep_session_for_night
 
 def sleep_entry_id(user: str, session_start: datetime) -> str:
     ''' Deterministic id for a subjective sleep score entry, derived
@@ -316,10 +316,10 @@ def find_sleep_entry_for_wake_date(user: str, wake_date: date) -> dict | None:
     the caller already knows separately (from /sleep/overview) whether
     a session exists at all.
     '''
-    sessions = _sleep_session_for_night(user, wake_date)
-    if not sessions:
+    primary = primary_sleep_session_for_night(user, wake_date)
+    if primary is None:
         return None
-    _, session = _primary_device_session(sessions)
+    _, session = primary
     entry_id = sleep_entry_id(user, session["start_time"])
     return find_sleep_entry_by_id(user, entry_id)
 
@@ -331,9 +331,8 @@ def write_sleep_entry_for_wake_date(user: str, wake_date: date, score: int, qual
     Rate/Sleep Duration/etc. pages' own journal section to submit for
     THIS SPECIFIC night, replacing the old behavior of always writing
     against "whatever the most recently completed session happens to
-    be" (find_last_completed_sleep_session) - a real gap once several
-    different nights' pages could all be open/edited independently
-    rather than only ever the latest one.
+    be" - a real gap once several different nights' pages could all
+    be open/edited independently rather than only ever the latest one.
 
     write_sleep_point() itself is keyed by the session's own real start
     time (see its own docstring), so re-submitting for the SAME night
@@ -345,10 +344,10 @@ def write_sleep_entry_for_wake_date(user: str, wake_date: date, score: int, qual
     subjective entry can't be logged against a night with no session
     to anchor it to.
     '''
-    sessions = _sleep_session_for_night(user, wake_date)
-    if not sessions:
+    primary = primary_sleep_session_for_night(user, wake_date)
+    if primary is None:
         return None
-    _, session = _primary_device_session(sessions)
+    _, session = primary
     resolved_sleep_date = session["start_time"].strftime("%Y-%m-%d")
     entry_id = write_sleep_point(
         user=user,

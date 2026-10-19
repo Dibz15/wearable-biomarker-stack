@@ -22,11 +22,16 @@ function formatDuration(totalSeconds) {
   return hr > 0 ? `${hr}<span class="unit">hr</span> ${min}<span class="unit">min</span>` : `${min}<span class="unit">min</span>`;
 }
 
-function renderSleepCard(sleep) {
+function renderSleepCard(sleep, isToday) {
   if (!sleep) {
+    // "yet" only makes sense for today: a past night that isn't
+    // recorded by now won't be.
+    const message = isToday
+      ? "No sleep session recorded for last night yet."
+      : "No sleep session recorded for this night.";
     return `
       <div class="sleep-summary-card">
-        <p class="metric-card-empty">No completed sleep session in the last 7 days.</p>
+        <p class="metric-card-empty">${message}</p>
       </div>
     `;
   }
@@ -52,7 +57,7 @@ function renderSleepCard(sleep) {
     <div class="sleep-summary-card">
       <div class="sleep-summary-top">
         <span class="sleep-summary-duration">${formatDuration(sleep.duration_s)}</span>
-        <span class="sleep-summary-date">${escapeHtml(sleep.sleep_date)}</span>
+        <span class="sleep-summary-date">${escapeHtml(sleep.wake_date)}</span>
       </div>
       ${bar ? `<div class="sleep-stage-bar">${bar}</div><div class="sleep-stage-legend">${legend}</div>` : ""}
     </div>
@@ -180,7 +185,7 @@ export async function loadToday(anchorDate = todayISO()) {
       api(`/activity/hourly-breakdown?date=${anchorDate}`),
     ]);
 
-    const sleepHtml = renderSleepCard(data.sleep);
+    const sleepHtml = renderSleepCard(data.sleep, anchorDate === todayISO());
     const activityHtml = renderActivityCard(data.steps || {}, sittingMinutes, stoodHours, hourlyBreakdown);
     const metricsHtml = METRIC_FIELDS.map(f => renderMetricCard(f, (data.vitals || {})[f.key] || {})).join("");
 

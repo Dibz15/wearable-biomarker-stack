@@ -1,13 +1,15 @@
 """ /today, /today/series/{field} - the Today tab's own summary + per-field chart data. """
 
-from datetime import timedelta
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.auth import get_current_user
+from app.config import TZ_NAME
 from app.queries.activity import get_today_steps
-from app.queries.sleep_sessions import find_last_completed_sleep_session, get_sleep_stage_breakdown
-from app.queries.vitals import get_today_series, get_today_vitals, local_today_bounds
+from app.queries.sleep_sessions import get_sleep_stage_breakdown, primary_sleep_session_for_night
+from app.queries.vitals import get_today_series, get_today_vitals
 from app.routes._shared import TODAY_SERIES_FIELDS, _parse_optional_date
 
 router = APIRouter()
@@ -19,8 +21,15 @@ router = APIRouter()
 def get_today(date: str | None = None, current_user: dict = Depends(get_current_user)):
     ''' Read-only summary for the "Today" tab: vitals (per device, for
     whichever fields reported anything that day), that day's step
-    total, and the most recently completed sleep session as of that
-    day (duration + stage breakdown) if a qualifying one exists.
+    total, and the sleep session that ended (woke up) on that day
+    (duration + stage breakdown), if one was recorded.
+
+    The sleep session is resolved by wake date, the same rule the Sleep
+    tab uses (primary_sleep_session_for_night), and labelled by that
+    wake date, as the Sleep tab does. It
+    used to be "the most recent session before the end of the day",
+    which showed the previous night's sleep as last night's whenever
+    last night's hadn't synced yet (#8).
 
     `date` (YYYY-MM-DD) is optional and defaults to today - the Today
     tab's own date navigation (prev/next/date-picker, mirroring the
@@ -39,28 +48,18 @@ def get_today(date: str | None = None, current_user: dict = Depends(get_current_
     vitals = get_today_vitals(username, for_date=parsed_date)
     steps = get_today_steps(username, for_date=parsed_date)
 
-    # Always bounded at the END of the requested day (midnight going
-    # into the next one), rather than only doing this for a past date
-    # and leaving today's own case as an open-ended "now" - the two are
-    # provably equivalent for today specifically (there's no future
-    # sleep data to find either way), so one code path handles both
-    # rather than branching on whether a date was given.
-    _, before = local_today_bounds(parsed_date)
+    wake_date = parsed_date or datetime.now(ZoneInfo(TZ_NAME)).date()
 
     sleep = None
-    session = find_last_completed_sleep_session(username, before=before)
-    if session is not None:
-        stages = get_sleep_stage_breakdown(
-            username,
-            session["start_time"],
-            session["start_time"] + timedelta(seconds=session["duration_s"]),
-            device=session.get("device"),
-        )
+    primary = primary_sleep_session_for_night(username, wake_date)
+    if primary is not None:
+        device, session = primary
+        start, end = session["start_time"], session["end_time"]
         sleep = {
-            "sleep_date": session["sleep_date"],
-            "start_time": session["start_time"].isoformat(),
+            "wake_date": wake_date.isoformat(),
+            "start_time": start.isoformat(),
             "duration_s": session["duration_s"],
-            "stages_min": stages,
+            "stages_min": get_sleep_stage_breakdown(username, start, end, device=device),
         }
 
     return {
