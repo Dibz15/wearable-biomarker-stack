@@ -412,7 +412,7 @@ def get_stood_hours(user: str, for_date: date | None = None) -> dict[str, int]:
     isn't a whole number of... well, any offset at all, really, since
     UTC hour boundaries and local hour boundaries only coincide for
     UTC+0 itself. Same category of bug this project has hit more than
-    once before (see local_today_bounds, find_last_completed_sleep_session).
+    once before (see local_today_bounds).
 
     Returns {"<device>": <hour_count>, ...} - a device with zero
     qualifying hours is absent, not present with a 0, matching

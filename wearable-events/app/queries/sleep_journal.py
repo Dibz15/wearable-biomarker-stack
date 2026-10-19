@@ -331,7 +331,7 @@ def write_sleep_entry_for_wake_date(user: str, wake_date: date, score: int, qual
     Rate/Sleep Duration/etc. pages' own journal section to submit for
     THIS SPECIFIC night, replacing the old behavior of always writing
     against "whatever the most recently completed session happens to
-    be" (find_last_completed_sleep_session) - a real gap once several
+    be" - a real gap once several
     different nights' pages could all be open/edited independently
     rather than only ever the latest one.
 

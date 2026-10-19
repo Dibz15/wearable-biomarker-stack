@@ -12,8 +12,7 @@ from app.queries.client import get_client
 def local_today_bounds(for_date: date | None = None) -> tuple[datetime, datetime]:
     ''' Start/end (midnight to midnight) of one local calendar day in
     the configured local timezone (TZ_NAME) - not UTC's calendar day,
-    for the same reason find_last_completed_sleep_session() resolves
-    sleep_date locally: a person in a timezone ahead of UTC would
+    for the same reason sleep dates are resolved locally: a person in a timezone ahead of UTC would
     otherwise see "today" flip over hours before their own local
     midnight.
 
@@ -38,9 +37,9 @@ def _device_stat_by_field(field: str, user: str, start: datetime, end: datetime,
     Deliberately one simple query per (field, stat) pair rather than a
     cleverer combined Flux query (e.g. multiple yield() calls in one
     script) - this app's existing InfluxDB functions are all written
-    this way (see find_last_completed_sleep_session, list_distinct_
-    sensor_users above), favoring obviously-correct simple queries over
-    fewer-but-trickier round trips. Personal-use traffic volume makes
+    this way (see list_distinct_sensor_users in client.py), favoring
+    obviously-correct simple queries over fewer-but-trickier round
+    trips. Personal-use traffic volume makes
     that the right tradeoff here too.
     '''
     if stat not in ("last", "mean", "min", "max", "median"):

@@ -42,7 +42,6 @@ from app.queries.sleep_journal import (
     delete_sleep_entry,
 )
 from app.queries.sleep_sessions import (
-    find_last_completed_sleep_session,
     find_sleep_sessions_in_range,
     _sleep_sessions_by_wake_date,
     _sleep_session_for_night,

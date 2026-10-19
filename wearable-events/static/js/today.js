@@ -26,7 +26,7 @@ function renderSleepCard(sleep) {
   if (!sleep) {
     return `
       <div class="sleep-summary-card">
-        <p class="metric-card-empty">No completed sleep session in the last 7 days.</p>
+        <p class="metric-card-empty">No sleep session recorded for last night yet.</p>
       </div>
     `;
   }

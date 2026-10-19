@@ -27,103 +27,6 @@ from app.queries.vitals import (
     _zscore_comparison,
 )
 
-def find_last_completed_sleep_session(user: str, lookback_days: int = 7, before: datetime | None = None) -> dict | None:
-    ''' Query the ring parser's sensor measurement for the most recent
-    completed sleep session (has a wakeup time, i.e. duration_s field
-    present) belonging to `user`, at least MIN_SLEEP_SESSION_SECONDS long.
-
-    `user` must match the GADGETBRIDGE_USER value the ring parser tags
-    that person's sensor data with - otherwise this will correctly find
-    nothing, since the two are joined only by this shared tag value.
-
-    `before`, if given, shifts the whole lookback window to end there
-    instead of now - what the Today tab's date navigation uses to show
-    "the sleep session that had most recently completed as of that day"
-    rather than always today's actual most-recent session, regardless
-    of which day is being viewed.
-
-    Returns {"sleep_date": "YYYY-MM-DD", "start_time": datetime,
-    "duration_s": int} or None if nothing qualifying was found - in
-    which case the caller should reject the /sleep write per spec §6
-    rather than guessing.
-    '''
-    client = get_client()
-    query_api = client.query_api()
-
-    range_args = f"start: -{lookback_days}d" if before is None else (
-        f'start: {(before - timedelta(days=lookback_days)).astimezone(timezone.utc).isoformat()}, '
-        f'stop: {before.astimezone(timezone.utc).isoformat()}'
-    )
-
-    flux = f'''
-    from(bucket: "{INFLUX_BUCKET}")
-      |> range({range_args})
-      |> filter(fn: (r) => r._measurement == "{SENSOR_MEASUREMENT}")
-      |> filter(fn: (r) => r.sample_type == "sleep_session")
-      |> filter(fn: (r) => r.user == "{user}")
-      |> filter(fn: (r) => r._field == "sleep_session_duration_s")
-      |> filter(fn: (r) => r._value >= {MIN_SLEEP_SESSION_SECONDS})
-      |> filter(fn: (r) => r._value <= {MAX_SLEEP_SESSION_SECONDS})
-      |> sort(columns: ["_time"], desc: true)
-      |> limit(n: 1)
-    '''
-
-    try:
-        tables = query_api.query(flux)
-    except Exception as e:
-        logger.error(f"InfluxDB query failed while resolving last sleep session for user={user}: {e}")
-        return None
-
-    for table in tables:
-        for record in table.records:
-            start_time = record.get_time()
-            duration_s = record.get_value()
-            device = record.values.get("device")
-            # Resolve the calendar date in the user's own local
-            # timezone, not UTC's - a session starting shortly after
-            # local midnight (any timezone ahead of UTC) can otherwise
-            # resolve to the wrong day, since UTC's date for that same
-            # instant is still the previous one.
-            local_start_time = start_time.astimezone(ZoneInfo(TZ_NAME))
-            return {
-                "sleep_date": local_start_time.strftime("%Y-%m-%d"),
-                # Deliberately the LOCAL-timezone version, not the raw
-                # UTC one - astimezone() doesn't change which real
-                # instant this represents, only which timezone's clock
-                # face it displays, so this is safe for any absolute-
-                # time math a future caller might do. Returning the
-                # local version keeps this dict internally consistent
-                # with sleep_date above - if this were left as raw UTC
-                # instead, a future caller formatting it directly
-                # (e.g. to show "sleep started at HH:MM") would get a
-                # time that doesn't match the local date sitting right
-                # next to it in this same dict. Nothing currently reads
-                # this field, but that's exactly why the inconsistency
-                # would be easy to introduce unnoticed later.
-                "start_time": local_start_time,
-                "duration_s": int(duration_s),
-                # Which device this session's sleep_session_duration_s
-                # point came from - needed by get_sleep_stage_breakdown
-                # to scope its own query to the SAME device, now that
-                # more than one device can have sleep-stage data for
-                # overlapping nights (the ring's historical data
-                # persists in InfluxDB even after being unbound from
-                # Gadgetbridge).
-                # Real bug found and fixed here (2026-09): without this,
-                # get_sleep_stage_breakdown had no way to avoid summing
-                # BOTH devices' stage minutes together for the same
-                # night, confirmed against real reported values showing
-                # stage sums roughly 2-3x a plausible night's duration.
-                "device": device,
-            }
-
-    logger.debug(
-        f"No qualifying completed sleep session found in the last {lookback_days}d "
-        f"(measurement={SENSOR_MEASUREMENT}, user={user}, "
-        f"min_duration_s={MIN_SLEEP_SESSION_SECONDS})"
-    )
-    return None
-
 def find_sleep_sessions_in_range(user: str, start: datetime, end: datetime) -> list[dict]:
     ''' Device-recorded sleep sessions (not subjective sleep-journal
     entries - see find_sleep_entries_in_range() for those) whose START
@@ -133,10 +36,7 @@ def find_sleep_sessions_in_range(user: str, start: datetime, end: datetime) -> l
     local timezone.
 
     Reads the same sample_type=="sleep_session" / sleep_session_duration_s
-    data find_last_completed_sleep_session() already relies on -
-    generalized here to a date range and every device (that function
-    only ever returns the single most recent session across all
-    devices combined). end_time is computed as start + duration_s,
+    data, for a date range and every device. end_time is computed as start + duration_s,
     using the point's own reliable InfluxDB timestamp for the start and
     the already-correctly-scaled duration field - deliberately not the
     separate raw sleep_session_wakeup field the parsers also write,
@@ -353,9 +253,8 @@ def get_sleep_overview_for_night(user: str, wake_date: date) -> dict | None:
     the same night (see _primary_device_session()) - Zepp's own Sleep
     tab is a single-device view by construction (it only ever shows
     the one device you're using), so this doesn't attempt a genuinely
-    multi-device sleep tab, matching find_last_completed_sleep_session()'s
-    own existing single-session convention already used for the Today
-    tab.
+    multi-device sleep tab. The Today tab's sleep card uses the same
+    session-picking rule.
 
     Returns None if no sleep session is recorded for this night (an
     empty dict from _sleep_session_for_night() - e.g. a night before
