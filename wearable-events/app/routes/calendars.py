@@ -9,8 +9,12 @@ from pydantic import BaseModel
 
 from app import db
 from app.auth import get_current_user
-from app.ics_sync import calendar_points_lock, classify_event
-from app.queries.calendar_events import delete_event_tag_point, write_event_points
+from app.ics_sync import classify_event
+from app.queries.calendar_events import (
+    calendar_points_lock,
+    delete_calendar_event_points,
+    replace_calendar_event_points,
+)
 from app.reprocess import compute_reclassification_diff
 
 router = APIRouter()
@@ -100,19 +104,6 @@ def _load_event_and_calendar(event_id: str, user_id: int) -> tuple[dict, dict]:
     return cached, calendar
 
 
-def _delete_points(username: str, event_id: str, tags, start_dt: datetime, calendar_name: str, action: str) -> list[str]:
-    ''' Best-effort delete of one event's tag points. Returns the tags
-    whose delete failed (already logged). '''
-    failed = []
-    for tag in sorted(set(tags)):
-        try:
-            delete_event_tag_point(user=username, tag=tag, source="calendar", timestamp=start_dt, calendar=calendar_name)
-        except Exception as e:
-            logger.warning(f"Failed to delete point while {action} calendar event {event_id} (tag={tag}): {e}")
-            failed.append(tag)
-    return failed
-
-
 @router.patch("/calendar_events/{event_id}/tags")
 def patch_calendar_event_tags(event_id: str, payload: CalendarEventTagsIn, current_user: dict = Depends(get_current_user)):
     ''' Manually override a calendar-derived event's tags (add/edit/
@@ -136,17 +127,15 @@ def patch_calendar_event_tags(event_id: str, payload: CalendarEventTagsIn, curre
         # stranded_tags from an incomplete strike-off are left alone, so
         # a retry still deletes them.
         if not cached["excluded"]:
-            old_tags = set(json.loads(cached["applied_tags"] or "[]"))
-            start_dt = datetime.fromisoformat(cached["start_iso"])
-            _delete_points(current_user["username"], event_id, old_tags - set(new_tags), start_dt, calendar["name"], "retagging")
-            write_event_points(
+            replace_calendar_event_points(
                 user=current_user["username"],
-                tags=new_tags,
-                source="calendar",
-                timestamp=start_dt,
                 event_id=event_id,
+                old_tags=json.loads(cached["applied_tags"] or "[]"),
+                new_tags=new_tags,
+                timestamp=datetime.fromisoformat(cached["start_iso"]),
                 calendar=calendar["name"],
                 duration_min=cached["duration_min"],
+                action="retagging",
             )
         db.set_cached_event_tags(event_id, new_tags, manually_tagged=True)
 
@@ -170,17 +159,15 @@ def reset_calendar_event_tags(event_id: str, current_user: dict = Depends(get_cu
 
         # Same as the tag override above - cache only while struck off.
         if not cached["excluded"]:
-            old_tags = set(json.loads(cached["applied_tags"] or "[]"))
-            start_dt = datetime.fromisoformat(cached["start_iso"])
-            _delete_points(current_user["username"], event_id, old_tags - set(new_tags), start_dt, calendar["name"], "resetting")
-            write_event_points(
+            replace_calendar_event_points(
                 user=current_user["username"],
-                tags=new_tags,
-                source="calendar",
-                timestamp=start_dt,
                 event_id=event_id,
+                old_tags=json.loads(cached["applied_tags"] or "[]"),
+                new_tags=new_tags,
+                timestamp=datetime.fromisoformat(cached["start_iso"]),
                 calendar=calendar["name"],
                 duration_min=cached["duration_min"],
+                action="resetting",
             )
         db.set_cached_event_tags(event_id, new_tags, manually_tagged=False)
 
@@ -211,7 +198,10 @@ def exclude_calendar_event(event_id: str, current_user: dict = Depends(get_curre
         db.set_cached_event_excluded(event_id, user_id, True, stranded_tags=to_delete)
 
         start_dt = datetime.fromisoformat(cached["start_iso"])
-        failed = _delete_points(current_user["username"], event_id, to_delete, start_dt, calendar["name"], "excluding")
+        failed = delete_calendar_event_points(
+            user=current_user["username"], event_id=event_id, tags=to_delete,
+            timestamp=start_dt, calendar=calendar["name"], action="excluding",
+        )
         db.set_cached_event_excluded(event_id, user_id, True, stranded_tags=failed)
 
     if failed:
@@ -229,6 +219,10 @@ def restore_calendar_event(event_id: str, current_user: dict = Depends(get_curre
     clears the flag. A manually-tagged event gets its cached tags back;
     otherwise it's reclassified against the *current* ruleset, since
     sync/reprocess may have skipped it while it was excluded.
+
+    Works the same for a disabled calendar: disabling only stops future
+    syncs, it doesn't remove that calendar's existing points, so the
+    restored event counts exactly like its non-excluded siblings.
 
     If Influx fails part-way, the event stays excluded with every tag
     that might now have a point recorded in stranded_tags (so the
@@ -254,21 +248,26 @@ def restore_calendar_event(event_id: str, current_user: dict = Depends(get_curre
 
         # Leftovers from an incomplete strike-off that aren't part of the
         # restored tag set would otherwise keep counting - clear them first.
-        failed = _delete_points(username, event_id, stranded - set(tags), start_dt, calendar["name"], "restoring")
+        failed = delete_calendar_event_points(
+            user=username, event_id=event_id, tags=stranded - set(tags),
+            timestamp=start_dt, calendar=calendar["name"], action="restoring",
+        )
         if failed:
             db.set_cached_event_excluded(event_id, user_id, True, stranded_tags=(stranded & set(tags)) | set(failed))
             raise HTTPException(502, "Couldn't update InfluxDB, so the event is still excluded - try again.")
 
         db.set_cached_event_excluded(event_id, user_id, True, stranded_tags=stranded | set(tags))
         try:
-            write_event_points(
+            # old_tags=() - stranded leftovers were handled just above
+            replace_calendar_event_points(
                 user=username,
-                tags=tags,
-                source="calendar",
-                timestamp=start_dt,
                 event_id=event_id,
+                old_tags=(),
+                new_tags=tags,
+                timestamp=start_dt,
                 calendar=calendar["name"],
                 duration_min=cached["duration_min"],
+                action="restoring",
             )
         except Exception as e:
             logger.warning(f"Failed to write points while restoring calendar event {event_id}: {e}")

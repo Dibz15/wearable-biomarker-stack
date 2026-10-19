@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 from loguru import logger
 
 from app import db
-from app.ics_sync import calendar_points_lock, classify_event
-from app.influx import delete_event_tag_point, write_event_points
+from app.ics_sync import classify_event
+from app.queries.calendar_events import calendar_points_lock, replace_calendar_event_points
 
 _lock = threading.Lock()
 
@@ -61,6 +61,49 @@ def compute_reclassification_diff(user_id: int, old_rules: list[dict], new_rules
     return {"count": len(affected_titles), "sample_titles": affected_titles[:5]}
 
 
+def _reprocess_one(snapshot: dict, user_id: int, username: str, rules: list[dict]) -> bool:
+    ''' Reclassify one cached event; returns True if its tags changed.
+
+    `snapshot` comes from the list taken at the start of the run, so the
+    cheap "would the tags change?" check runs on it WITHOUT the lock -
+    most events don't change. Only for one that does is the row re-read
+    under calendar_points_lock and re-checked (the person may have struck
+    it off or retagged it since the snapshot) right before writing.
+    '''
+    if snapshot["manually_tagged"] or snapshot["excluded"]:
+        # Respect the manual override / strike-off - see the
+        # manually_tagged and excluded comments in schema.sql.
+        # (Restoring an excluded event reclassifies it then.)
+        return False
+    calendar = db.get_calendar(snapshot["calendar_id"])
+    if calendar is None:
+        return False
+    new_tags = classify_event(snapshot["title"], snapshot["description"], rules, calendar["default_tag"])
+    if set(new_tags) == set(json.loads(snapshot["applied_tags"] or "[]")):
+        return False
+
+    with calendar_points_lock:
+        ev = db.get_cached_event(snapshot["event_id"], user_id)
+        if ev is None or ev["manually_tagged"] or ev["excluded"]:
+            return False
+        new_tags = classify_event(ev["title"], ev["description"], rules, calendar["default_tag"])
+        old_tags = json.loads(ev["applied_tags"] or "[]")
+        if set(new_tags) == set(old_tags):
+            return False
+        replace_calendar_event_points(
+            user=username,
+            event_id=ev["event_id"],
+            old_tags=old_tags,
+            new_tags=new_tags,
+            timestamp=datetime.fromisoformat(ev["start_iso"]),
+            calendar=calendar["name"],
+            duration_min=ev["duration_min"],
+            action="reprocessing",
+        )
+        db.set_cached_event_tags(ev["event_id"], new_tags, manually_tagged=False)
+    return True
+
+
 def _run_reprocess(user_id: int, username: str):
     with _lock:
         _states[user_id] = _default_state()
@@ -74,60 +117,9 @@ def _run_reprocess(user_id: int, username: str):
             _states[user_id]["total"] = len(cached)
 
         for snapshot in cached:
-            # Re-read each row under calendar_points_lock: `cached` is a
-            # snapshot from the start of the run, and the person may have
-            # struck this event off (or retagged it) since. Holding the
-            # lock through the write stops a "Didn't attend" click from
-            # interleaving with it (see ics_sync.calendar_points_lock).
-            with calendar_points_lock:
-                ev = db.get_cached_event(snapshot["event_id"], user_id)
-                if ev is None or ev["manually_tagged"] or ev["excluded"]:
-                    # Respect the manual override / strike-off - see the
-                    # manually_tagged and excluded comments in schema.sql.
-                    # (Restoring an excluded event reclassifies it then.)
-                    # Still counts as "processed" for progress tracking,
-                    # just never "changed".
-                    with _lock:
-                        _states[user_id]["processed"] += 1
-                    continue
-
-                calendar = db.get_calendar(ev["calendar_id"])
-                if calendar is None:
-                    with _lock:
-                        _states[user_id]["processed"] += 1
-                    continue
-
-                new_tags = classify_event(ev["title"], ev["description"], rules, calendar["default_tag"])
-                old_tags = json.loads(ev["applied_tags"] or "[]")
-
-                if set(new_tags) != set(old_tags):
-                    start_dt = datetime.fromisoformat(ev["start_iso"])
-                    removed = set(old_tags) - set(new_tags)
-                    for tag in removed:
-                        try:
-                            delete_event_tag_point(user=username, tag=tag, source="calendar", timestamp=start_dt, calendar=calendar["name"])
-                        except Exception as e:
-                            logger.warning(
-                                f"Reprocess (user={username}): failed to delete stale point "
-                                f"(event_id={ev['event_id']}, tag={tag}): {e}"
-                            )
-
-                    # Writing the full new tag set is safe even for tags that
-                    # didn't change - identical tag-set + timestamp overwrites
-                    # in InfluxDB rather than duplicating.
-                    write_event_points(
-                        user=username,
-                        tags=new_tags,
-                        source="calendar",
-                        timestamp=start_dt,
-                        event_id=ev["event_id"],
-                        calendar=calendar["name"],
-                        duration_min=ev["duration_min"],
-                    )
-                    db.set_cached_event_tags(ev["event_id"], new_tags, manually_tagged=False)
-                    with _lock:
-                        _states[user_id]["changed"] += 1
-
+            if _reprocess_one(snapshot, user_id, username, rules):
+                with _lock:
+                    _states[user_id]["changed"] += 1
             with _lock:
                 _states[user_id]["processed"] += 1
 

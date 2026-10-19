@@ -1,5 +1,6 @@
 """Manual/calendar event read-writes (events measurement)."""
 import hashlib
+import threading
 import uuid
 from datetime import datetime, time, timedelta, timezone
 
@@ -9,6 +10,18 @@ from loguru import logger
 
 from app.config import EVENTS_MEASUREMENT, INFLUX_BUCKET, INFLUX_ORG
 from app.queries.client import get_client
+
+# Serializes "read a calendar event's cache row (excluded flag, tags),
+# then write/delete its Influx points" across the scheduled sync, the
+# reprocess thread and the per-event Timeline endpoints. Without it, a
+# sync that read excluded=0 just before someone clicked "Didn't attend"
+# could write the points straight back after they'd been deleted.
+#
+# In-process only: correct because the app runs as ONE uvicorn process
+# (Dockerfile CMD, no --workers) with its scheduler thread inside it.
+# Running several workers would also run several schedulers and need a
+# cross-process guard instead - see docs/REFERENCE.md.
+calendar_points_lock = threading.RLock()
 
 def calendar_event_id(calendar: str, start_time: str, title: str) -> str:
     ''' Deterministic event_id for calendar-derived events, per spec §6 -
@@ -207,3 +220,46 @@ def find_manual_events_in_range(user: str, start: datetime, end: datetime) -> li
         }
         for e in grouped.values()
     ]
+
+
+def delete_calendar_event_points(*, user: str, event_id: str, tags, timestamp: datetime,
+                                 calendar: str, action: str) -> list[str]:
+    ''' Best-effort delete of one calendar event's points for each tag.
+    Failures are logged, not raised - returns the tags whose delete
+    failed so callers that care (exclude/restore) can act on them.
+    `action` is only for the log line ("excluding", "retagging", ...).
+    '''
+    failed = []
+    for tag in sorted(set(tags)):
+        try:
+            delete_event_tag_point(user=user, tag=tag, source="calendar", timestamp=timestamp, calendar=calendar)
+        except Exception as e:
+            logger.warning(f"Failed to delete point while {action} calendar event {event_id} (tag={tag}): {e}")
+            failed.append(tag)
+    return failed
+
+
+def replace_calendar_event_points(*, user: str, event_id: str, old_tags, new_tags: list[str],
+                                  timestamp: datetime, calendar: str, duration_min: int | None,
+                                  action: str) -> list[str]:
+    ''' Move one calendar event's Influx points from old_tags to new_tags:
+    deletes points for tags no longer present (best-effort, see
+    delete_calendar_event_points), then writes the full new set.
+    Rewriting unchanged tags is safe - identical tag-set + timestamp
+    overwrites in InfluxDB rather than duplicating. Write failures DO
+    raise. Returns the tags whose delete failed.
+    '''
+    failed = delete_calendar_event_points(
+        user=user, event_id=event_id, tags=set(old_tags) - set(new_tags),
+        timestamp=timestamp, calendar=calendar, action=action,
+    )
+    write_event_points(
+        user=user,
+        tags=new_tags,
+        source="calendar",
+        timestamp=timestamp,
+        event_id=event_id,
+        calendar=calendar,
+        duration_min=duration_min,
+    )
+    return failed

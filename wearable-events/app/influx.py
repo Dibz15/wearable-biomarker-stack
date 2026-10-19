@@ -26,6 +26,9 @@ from app.queries.calendar_events import (
     find_manual_event_by_id,
     write_event_points,
     find_manual_events_in_range,
+    calendar_points_lock,
+    delete_calendar_event_points,
+    replace_calendar_event_points,
 )
 from app.queries.sleep_journal import (
     sleep_entry_id,

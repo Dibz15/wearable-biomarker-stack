@@ -1,5 +1,4 @@
 import json
-import threading
 from datetime import datetime, timezone
 
 import httpx
@@ -8,15 +7,7 @@ from icalendar import Calendar
 from loguru import logger
 
 from app import db
-from app.influx import calendar_event_id, write_event_points
-
-# Serializes "check the excluded flag, then write/delete an event's Influx
-# points" across the scheduled sync, the reprocess thread and the
-# exclude/restore endpoints. Without it, a sync that read excluded=0 just
-# before someone clicked "Didn't attend" could write the points straight
-# back after they'd been deleted. One process (uvicorn + its scheduler
-# thread), so a plain in-process lock is enough.
-calendar_points_lock = threading.RLock()
+from app.influx import calendar_event_id, calendar_points_lock, write_event_points
 
 
 def _to_utc_datetime(dt_value) -> datetime:

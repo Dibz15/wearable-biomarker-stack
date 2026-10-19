@@ -11,6 +11,7 @@ import sqlite3
 import pytest
 
 from app import db, ics_sync, reprocess
+from app.queries import calendar_events as ce
 from app.routes import calendars as calendars_routes
 
 START_ISO = "2026-10-01T09:00:00+00:00"
@@ -33,11 +34,12 @@ class Recorder:
 
 @pytest.fixture
 def influx(monkeypatch):
+    # Routes and reprocess go through the shared helpers in
+    # app.queries.calendar_events; sync writes directly.
     writes, deletes = Recorder(), Recorder()
-    for module in (calendars_routes, ics_sync, reprocess):
-        monkeypatch.setattr(module, "write_event_points", writes)
-    for module in (calendars_routes, reprocess):
-        monkeypatch.setattr(module, "delete_event_tag_point", deletes)
+    monkeypatch.setattr(ce, "write_event_points", writes)
+    monkeypatch.setattr(ce, "delete_event_tag_point", deletes)
+    monkeypatch.setattr(ics_sync, "write_event_points", writes)
     return writes, deletes
 
 
@@ -266,7 +268,7 @@ def test_exclude_sets_flag_before_deleting(auth_client, influx, monkeypatch):
     def deleter(**kwargs):
         seen.append(db.get_cached_event("evt1", _admin_id())["excluded"])
 
-    monkeypatch.setattr(calendars_routes, "delete_event_tag_point", deleter)
+    monkeypatch.setattr(ce, "delete_event_tag_point", deleter)
     auth_client.post("/calendar_events/evt1/exclude")
     assert seen == [1]
 
@@ -280,7 +282,7 @@ def test_exclude_delete_failure_returns_502_and_can_be_retried(auth_client, infl
             raise RuntimeError("influx down")
         deletes(**kwargs)
 
-    monkeypatch.setattr(calendars_routes, "delete_event_tag_point", failing)
+    monkeypatch.setattr(ce, "delete_event_tag_point", failing)
     resp = auth_client.post("/calendar_events/evt1/exclude")
     assert resp.status_code == 502
     assert "try again" in resp.json()["detail"]
@@ -292,7 +294,7 @@ def test_exclude_delete_failure_returns_502_and_can_be_retried(auth_client, infl
 
     # Retry only needs to delete what's still stranded
     deletes.calls.clear()
-    monkeypatch.setattr(calendars_routes, "delete_event_tag_point", deletes)
+    monkeypatch.setattr(ce, "delete_event_tag_point", deletes)
     assert auth_client.post("/calendar_events/evt1/exclude").status_code == 200
     assert [c["tag"] for c in deletes.calls] == ["meeting"]
     assert json.loads(db.get_cached_event("evt1", _admin_id())["stranded_tags"]) == []
@@ -306,7 +308,7 @@ def test_restore_write_failure_keeps_event_excluded(auth_client, influx, monkeyp
     def failing(**kwargs):
         raise RuntimeError("influx down")
 
-    monkeypatch.setattr(calendars_routes, "write_event_points", failing)
+    monkeypatch.setattr(ce, "write_event_points", failing)
     resp = auth_client.post("/calendar_events/evt1/restore")
     assert resp.status_code == 502
     assert "still excluded" in resp.json()["detail"]
@@ -335,7 +337,6 @@ def test_reprocess_rechecks_rows_excluded_after_its_snapshot(auth_client, influx
 
 def test_delete_event_tag_point_is_scoped_to_user(monkeypatch):
     from datetime import datetime, timezone
-    from app.queries import calendar_events as ce
 
     predicates = []
 
@@ -364,10 +365,10 @@ def test_editing_tags_after_partial_exclude_keeps_stranded_points(auth_client, i
         if kwargs["tag"] == "meeting":
             raise RuntimeError("influx down")
 
-    monkeypatch.setattr(calendars_routes, "delete_event_tag_point", failing)
+    monkeypatch.setattr(ce, "delete_event_tag_point", failing)
     assert auth_client.post("/calendar_events/evt1/exclude").status_code == 502
 
-    monkeypatch.setattr(calendars_routes, "delete_event_tag_point", deletes)
+    monkeypatch.setattr(ce, "delete_event_tag_point", deletes)
     assert auth_client.patch("/calendar_events/evt1/tags", json={"tags": ["focus"]}).status_code == 200
     assert deletes.calls == []
 
@@ -383,9 +384,9 @@ def test_restore_clears_stranded_points_not_in_restored_tags(auth_client, influx
         if kwargs["tag"] == "meeting":
             raise RuntimeError("influx down")
 
-    monkeypatch.setattr(calendars_routes, "delete_event_tag_point", failing)
+    monkeypatch.setattr(ce, "delete_event_tag_point", failing)
     auth_client.post("/calendar_events/evt1/exclude")
-    monkeypatch.setattr(calendars_routes, "delete_event_tag_point", deletes)
+    monkeypatch.setattr(ce, "delete_event_tag_point", deletes)
     auth_client.patch("/calendar_events/evt1/tags", json={"tags": ["focus"]})
 
     resp = auth_client.post("/calendar_events/evt1/restore")
@@ -408,7 +409,7 @@ def test_per_event_endpoints_read_the_row_under_the_lock(auth_client, influx, mo
     writes. Checked by trying to take the lock from another thread at
     the moment the row is read."""
     import threading
-    from app.ics_sync import calendar_points_lock
+    from app.queries.calendar_events import calendar_points_lock
 
     _seed_event(auth_client, manually_tagged=True)
     if path.endswith("restore"):
@@ -433,3 +434,26 @@ def test_per_event_endpoints_read_the_row_under_the_lock(auth_client, influx, mo
     resp = getattr(auth_client, method)(path, **({"json": body} if body else {}))
     assert resp.status_code == 200, resp.text
     assert lock_free_at_read and not any(lock_free_at_read)
+
+
+def test_reprocess_only_rereads_rows_it_will_rewrite(auth_client, influx, monkeypatch):
+    """Unchanged events are checked against the start-of-run snapshot
+    alone - only ones whose tags actually change get re-read under the
+    lock and rewritten."""
+    writes, _ = influx
+    calendar_id = _seed_event(auth_client, tags=("work",), event_id="same")
+    db.upsert_cached_event(
+        event_id="changes", user_id=_admin_id(), calendar_id=calendar_id, title="Gym",
+        description="", start_iso="2026-10-01T18:00:00+00:00", duration_min=60, applied_tags=["stale"],
+    )
+    monkeypatch.setattr(reprocess, "classify_event", lambda *a, **k: ["work"])
+
+    reread = []
+    real_get = db.get_cached_event
+    monkeypatch.setattr(reprocess.db, "get_cached_event", lambda eid, uid: reread.append(eid) or real_get(eid, uid))
+
+    reprocess._run_reprocess(_admin_id(), "testadmin")
+    assert reread == ["changes"]
+    assert [c["event_id"] for c in writes.calls] == ["changes"]
+    status = reprocess.get_status(_admin_id())
+    assert status["processed"] == 2 and status["changed"] == 1
