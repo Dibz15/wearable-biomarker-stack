@@ -23,6 +23,25 @@ from app.queries.client import get_client
 # cross-process guard instead - see docs/REFERENCE.md.
 calendar_points_lock = threading.RLock()
 
+def _predicate_str(value: str) -> str:
+    ''' Escape a value for a double-quoted string in an InfluxDB delete
+    predicate. The predicate parser reads backslash escapes (escaped
+    backslash, double quote, newline) and rejects a lone backslash, a bare
+    double quote or a raw newline, so calendar names / tags containing any
+    of those would otherwise make every delete fail - verified against
+    InfluxDB 2.7's delete endpoint.
+    '''
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _flux_str(value: str) -> str:
+    ''' Escape a value for a double-quoted Flux string literal (InfluxDB
+    OSS doesn't support parameterized queries). Flux also treats "${" as
+    the start of string interpolation. '''
+    return (value.replace("\\", "\\\\").replace('"', '\\"')
+                 .replace("\n", "\\n").replace("${", "\\${"))
+
+
 def calendar_event_id(calendar: str, start_time: str, title: str) -> str:
     ''' Deterministic event_id for calendar-derived events, per spec §6 -
     same event synced twice produces the same id, so re-syncs are
@@ -68,9 +87,12 @@ def delete_event_tag_point(*, user: str, tag: str, source: str, timestamp: datet
     # itself, not just the value, is the documented fix. Quoting "user",
     # "source" and "calendar" defensively too, since there's no published
     # authoritative list of every reserved word in this specific grammar.
-    predicate = f'_measurement="{EVENTS_MEASUREMENT}" AND "user"="{user}" AND "tag"="{tag}" AND "source"="{source}"'
+    predicate = (
+        f'_measurement="{_predicate_str(EVENTS_MEASUREMENT)}" AND "user"="{_predicate_str(user)}" '
+        f'AND "tag"="{_predicate_str(tag)}" AND "source"="{_predicate_str(source)}"'
+    )
     if calendar is not None:
-        predicate += f' AND "calendar"="{calendar}"'
+        predicate += f' AND "calendar"="{_predicate_str(calendar)}"'
     delete_api.delete(start, stop, predicate, bucket=INFLUX_BUCKET, org=INFLUX_ORG)
 
 def find_manual_event_by_id(user: str, event_id: str, lookback_days: int = 1825) -> dict | None:
@@ -220,6 +242,31 @@ def find_manual_events_in_range(user: str, start: datetime, end: datetime) -> li
         }
         for e in grouped.values()
     ]
+
+
+def find_calendar_event_point_tags(*, user: str, event_id: str, timestamp: datetime) -> set[str]:
+    ''' The tags this calendar event ACTUALLY has points for in Influx,
+    for this user - looked up by its event_id field over the same 1-second
+    window the deletes use. Exclude uses this rather than trusting the
+    cache's applied_tags, which can lag behind Influx: a sync that
+    retagged an event writes the new tag without deleting the old one,
+    and a retag whose delete failed leaves the old point behind.
+
+    Raises on query failure (unlike the other lookups here) - the caller
+    must not treat "couldn't check" as "nothing there".
+    '''
+    start = timestamp.astimezone(timezone.utc)
+    stop = start + timedelta(seconds=1)
+    flux = f'''
+    from(bucket: "{_flux_str(INFLUX_BUCKET)}")
+      |> range(start: {start.strftime("%Y-%m-%dT%H:%M:%S.%fZ")}, stop: {stop.strftime("%Y-%m-%dT%H:%M:%S.%fZ")})
+      |> filter(fn: (r) => r._measurement == "{_flux_str(EVENTS_MEASUREMENT)}")
+      |> filter(fn: (r) => r.source == "calendar" and r.user == "{_flux_str(user)}")
+      |> filter(fn: (r) => r._field == "event_id" and r._value == "{_flux_str(event_id)}")
+      |> keep(columns: ["tag"])
+    '''
+    tables = get_client().query_api().query(flux)
+    return {record.values["tag"] for table in tables for record in table.records if record.values.get("tag")}
 
 
 def delete_calendar_event_points(*, user: str, event_id: str, tags, timestamp: datetime,

@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -51,7 +52,71 @@ def init_db():
         _ensure_column(conn, "keyword_rules", "exclusive", "INTEGER NOT NULL DEFAULT 1")
         _ensure_column(conn, "calendar_events_cache", "excluded", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "calendar_events_cache", "stranded_tags", "TEXT NOT NULL DEFAULT '[]'")
+    _migrate_cache_to_per_user_key()
     logger.info(f"Initialized config db at {SQLITE_PATH}")
+
+
+def _cache_has_per_user_key(conn) -> bool:
+    # PRAGMA table_info's 6th column is the column's position in the
+    # primary key (0 = not part of it).
+    pk = {row[1]: row[5] for row in conn.execute("PRAGMA table_info(calendar_events_cache)")}
+    return pk.get("user_id", 0) > 0 and pk.get("event_id", 0) > 0
+
+
+def _migrate_cache_to_per_user_key():
+    ''' One-off migration for installs created before calendar_events_cache
+    was keyed by (user_id, event_id) - see the comment above that table in
+    schema.sql. SQLite can't change a primary key in place, so this is the
+    standard rebuild: create the new table from schema.sql's own definition,
+    copy every row and column across, drop the old table, rename. All in one
+    transaction - if anything fails (including a row-count mismatch) it
+    rolls back and the old table is untouched. No-op once migrated, and on
+    fresh installs (schema.sql already creates the new layout).
+
+    Existing rows keep every value. Old installs could only hold one row
+    per event_id, so no rows collide under the wider key.
+    '''
+    conn = sqlite3.connect(SQLITE_PATH, isolation_level=None)  # explicit BEGIN/COMMIT below
+    try:
+        if _cache_has_per_user_key(conn):
+            return
+
+        schema = _SCHEMA_PATH.read_text()
+        match = re.search(r"CREATE TABLE IF NOT EXISTS calendar_events_cache \(.*?\n\);", schema, re.S)
+        if match is None:
+            raise RuntimeError("calendar_events_cache definition not found in schema.sql")
+        new_table_ddl = match.group(0).replace(
+            "CREATE TABLE IF NOT EXISTS calendar_events_cache (", "CREATE TABLE calendar_events_cache_new (", 1
+        )
+
+        # Must be set outside a transaction; the rebuild drops and renames
+        # a table that references users/calendars.
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            columns = ", ".join(row[1] for row in conn.execute("PRAGMA table_info(calendar_events_cache)"))
+            before = conn.execute("SELECT COUNT(*) FROM calendar_events_cache").fetchone()[0]
+            conn.execute("DROP TABLE IF EXISTS calendar_events_cache_new")
+            conn.execute(new_table_ddl)
+            conn.execute(
+                f"INSERT INTO calendar_events_cache_new ({columns}) SELECT {columns} FROM calendar_events_cache"
+            )
+            after = conn.execute("SELECT COUNT(*) FROM calendar_events_cache_new").fetchone()[0]
+            if after != before:
+                raise RuntimeError(f"row count mismatch while migrating calendar_events_cache ({before} -> {after})")
+            conn.execute("DROP TABLE calendar_events_cache")
+            conn.execute("ALTER TABLE calendar_events_cache_new RENAME TO calendar_events_cache")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        # Re-applies the table's indexes (dropped with the old table);
+        # everything else in schema.sql is IF NOT EXISTS, so a no-op.
+        conn.executescript(schema)
+        logger.info(f"Migrated existing database: calendar_events_cache now keyed by (user_id, event_id), {after} row(s) kept")
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.close()
 
 
 @contextmanager
@@ -285,8 +350,7 @@ def upsert_cached_event(event_id: str, user_id: int, calendar_id: int, title: st
             """INSERT INTO calendar_events_cache
                (event_id, user_id, calendar_id, title, description, start_iso, duration_min, applied_tags, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-               ON CONFLICT(event_id) DO UPDATE SET
-                 user_id = excluded.user_id,
+               ON CONFLICT(user_id, event_id) DO UPDATE SET
                  calendar_id = excluded.calendar_id,
                  title = excluded.title,
                  description = excluded.description,
@@ -317,15 +381,16 @@ def list_cached_events(user_id: int):
         ).fetchall()]
 
 
-def set_cached_event_tags(event_id: str, tags: list[str], *, manually_tagged: bool):
+def set_cached_event_tags(event_id: str, user_id: int, tags: list[str], *, manually_tagged: bool):
     ''' Used both by the manual tag-override endpoint (manually_tagged=True)
     and by the background sync/reprocess jobs writing auto-classified
     tags for a not-yet-overridden event (manually_tagged=False).
     '''
     with get_conn() as conn:
         conn.execute(
-            "UPDATE calendar_events_cache SET applied_tags = ?, manually_tagged = ?, updated_at = datetime('now') WHERE event_id = ?",
-            (json.dumps(tags), int(manually_tagged), event_id)
+            "UPDATE calendar_events_cache SET applied_tags = ?, manually_tagged = ?, updated_at = datetime('now') "
+            "WHERE event_id = ? AND user_id = ?",
+            (json.dumps(tags), int(manually_tagged), event_id, user_id)
         )
 
 

@@ -13,6 +13,7 @@ from app.ics_sync import classify_event
 from app.queries.calendar_events import (
     calendar_points_lock,
     delete_calendar_event_points,
+    find_calendar_event_point_tags,
     replace_calendar_event_points,
 )
 from app.reprocess import compute_reclassification_diff
@@ -137,7 +138,7 @@ def patch_calendar_event_tags(event_id: str, payload: CalendarEventTagsIn, curre
                 duration_min=cached["duration_min"],
                 action="retagging",
             )
-        db.set_cached_event_tags(event_id, new_tags, manually_tagged=True)
+        db.set_cached_event_tags(event_id, user_id, new_tags, manually_tagged=True)
 
     return {"event_id": event_id, "tags": new_tags}
 
@@ -169,7 +170,7 @@ def reset_calendar_event_tags(event_id: str, current_user: dict = Depends(get_cu
                 duration_min=cached["duration_min"],
                 action="resetting",
             )
-        db.set_cached_event_tags(event_id, new_tags, manually_tagged=False)
+        db.set_cached_event_tags(event_id, user_id, new_tags, manually_tagged=False)
 
     return {"event_id": event_id, "tags": new_tags}
 
@@ -182,11 +183,15 @@ def exclude_calendar_event(event_id: str, current_user: dict = Depends(get_curre
     reprocess and the tag-edit endpoints all skip Influx writes for an
     excluded event - see the excluded comment in schema.sql.
 
-    Pessimistic: the row is first marked excluded with every point to
-    delete recorded in stranded_tags, then only the deletes that fail stay
-    there. If any fail this returns 502 and the Timeline shows the event
-    as needing a retry; calling this again deletes whatever is still
-    stranded (plus the current tags, for a not-yet-excluded event).
+    What gets deleted is every tag the event actually has points for in
+    Influx (find_calendar_event_point_tags), plus the cached applied_tags
+    and stranded_tags - the cache alone can lag behind Influx.
+
+    Pessimistic: the row is first marked excluded with every known point
+    recorded in stranded_tags, then only the deletes that fail stay there.
+    If any fail, or the Influx lookup itself fails (then everything stays
+    stranded, since we couldn't check), this returns 502 and the Timeline
+    shows the event as needing a retry; calling this again is safe.
     '''
     user_id = current_user["id"]
     with calendar_points_lock:
@@ -198,12 +203,30 @@ def exclude_calendar_event(event_id: str, current_user: dict = Depends(get_curre
         db.set_cached_event_excluded(event_id, user_id, True, stranded_tags=to_delete)
 
         start_dt = datetime.fromisoformat(cached["start_iso"])
+        lookup_failed = False
+        try:
+            to_delete |= find_calendar_event_point_tags(
+                user=current_user["username"], event_id=event_id, timestamp=start_dt,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to look up Influx points while excluding calendar event {event_id}: {e}")
+            lookup_failed = True
+
         failed = delete_calendar_event_points(
             user=current_user["username"], event_id=event_id, tags=to_delete,
             timestamp=start_dt, calendar=calendar["name"], action="excluding",
         )
-        db.set_cached_event_excluded(event_id, user_id, True, stranded_tags=failed)
+        # Couldn't check what's really there -> keep everything stranded so
+        # the event shows as needing a retry, which looks again.
+        stranded = to_delete if lookup_failed else set(failed)
+        db.set_cached_event_excluded(event_id, user_id, True, stranded_tags=stranded)
 
+    if lookup_failed:
+        raise HTTPException(
+            502,
+            "Marked as not attended, but couldn't check InfluxDB for all of its tag points, "
+            "so it may still be counted - try again.",
+        )
     if failed:
         raise HTTPException(
             502,
@@ -241,7 +264,7 @@ def restore_calendar_event(event_id: str, current_user: dict = Depends(get_curre
         else:
             rules = db.list_keyword_rules(user_id, enabled_only=True)
             tags = classify_event(cached["title"], cached["description"], rules, calendar["default_tag"])
-            db.set_cached_event_tags(event_id, tags, manually_tagged=False)
+            db.set_cached_event_tags(event_id, user_id, tags, manually_tagged=False)
 
         start_dt = datetime.fromisoformat(cached["start_iso"])
         stranded = set(json.loads(cached["stranded_tags"] or "[]"))

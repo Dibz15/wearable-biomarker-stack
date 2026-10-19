@@ -90,8 +90,15 @@ CREATE INDEX IF NOT EXISTS idx_tag_definitions_user ON tag_definitions(user_id);
 -- which old tag-points need deleting vs which are unchanged. For an
 -- excluded event it's the tag set to write back on restore, and
 -- stranded_tags is what may still be in Influx (see below).
+--
+-- Keyed per user, not by event_id alone: event_id hashes calendar name +
+-- start + title, so two household members who both subscribe to a shared
+-- calendar with the same name get the SAME event_id for the same event.
+-- Each needs their own row (own tags, own "didn't attend" flag). Older
+-- installs had event_id as the sole key - db.init_db() rebuilds the table
+-- in place to this layout (see _migrate_cache_to_per_user_key).
 CREATE TABLE IF NOT EXISTS calendar_events_cache (
-    event_id      TEXT PRIMARY KEY,
+    event_id      TEXT NOT NULL,
     user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     calendar_id   INTEGER NOT NULL REFERENCES calendars(id) ON DELETE CASCADE,
     title         TEXT NOT NULL,
@@ -121,7 +128,8 @@ CREATE TABLE IF NOT EXISTS calendar_events_cache (
     -- next exclude retry deletes these too. Empty means the strike-off
     -- is complete. Shown in the Timeline as "needs retry".
     stranded_tags TEXT NOT NULL DEFAULT '[]',
-    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, event_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_cache_user_calendar ON calendar_events_cache(user_id, calendar_id);

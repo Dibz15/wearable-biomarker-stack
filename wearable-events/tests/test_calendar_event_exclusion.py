@@ -7,6 +7,7 @@ assert on *what would have been written/deleted* instead.
 
 import json
 import sqlite3
+from datetime import datetime
 
 import pytest
 
@@ -25,21 +26,52 @@ def _no_manual_events(monkeypatch):
 
 
 class Recorder:
-    def __init__(self):
+    def __init__(self, effect=None):
         self.calls = []
+        self.effect = effect
 
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
+        if self.effect:
+            self.effect(**kwargs)
+
+
+class FakeInflux:
+    """Just enough of the events measurement to answer "which tags does
+    this event really have points for": points keyed the way the delete
+    predicate addresses them (user, calendar, timestamp, tag)."""
+
+    def __init__(self):
+        self.points = {}
+
+    def write(self, **kw):
+        for tag in kw["tags"]:
+            self.points[(kw["user"], kw["calendar"], kw["timestamp"], tag)] = kw["event_id"]
+
+    def delete(self, **kw):
+        self.points.pop((kw["user"], kw["calendar"], kw["timestamp"], kw["tag"]), None)
+
+    def find(self, *, user, event_id, timestamp):
+        return {k[3] for k, eid in self.points.items() if k[0] == user and eid == event_id}
+
+    def tags_for(self, event_id, user="testadmin"):
+        return self.find(user=user, event_id=event_id, timestamp=None)
 
 
 @pytest.fixture
-def influx(monkeypatch):
+def fake_influx():
+    return FakeInflux()
+
+
+@pytest.fixture
+def influx(monkeypatch, fake_influx):
     # Routes and reprocess go through the shared helpers in
     # app.queries.calendar_events; sync writes directly.
-    writes, deletes = Recorder(), Recorder()
+    writes, deletes = Recorder(fake_influx.write), Recorder(fake_influx.delete)
     monkeypatch.setattr(ce, "write_event_points", writes)
     monkeypatch.setattr(ce, "delete_event_tag_point", deletes)
     monkeypatch.setattr(ics_sync, "write_event_points", writes)
+    monkeypatch.setattr(calendars_routes, "find_calendar_event_point_tags", fake_influx.find)
     return writes, deletes
 
 
@@ -57,7 +89,7 @@ def _seed_event(auth_client, *, tags=("work",), event_id="evt1", title="Standup"
         description="", start_iso=START_ISO, duration_min=30, applied_tags=list(tags),
     )
     if manually_tagged:
-        db.set_cached_event_tags(event_id, list(tags), manually_tagged=True)
+        db.set_cached_event_tags(event_id, _admin_id(), list(tags), manually_tagged=True)
     return calendar_id
 
 
@@ -213,35 +245,57 @@ def test_reprocess_skips_excluded_events(auth_client, influx, monkeypatch):
     assert reprocess.get_status(_admin_id())["changed"] == 0
 
 
-def test_migration_adds_column_without_touching_existing_rows(tmp_path, monkeypatch):
-    """Simulates a live install on the pre-#7 schema: init_db() must only
-    ADD the column, leaving every existing row's data intact, and be a
-    no-op the second time it runs (it runs on every startup)."""
+_OLD_CACHE_DDL = """
+    CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+    CREATE TABLE calendars (id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL, ics_url TEXT NOT NULL, default_tag TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1, last_synced TEXT, last_error TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (user_id, ics_url));
+    CREATE TABLE calendar_events_cache (
+        event_id TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        calendar_id INTEGER NOT NULL REFERENCES calendars(id) ON DELETE CASCADE,
+        title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', start_iso TEXT NOT NULL,
+        duration_min INTEGER, applied_tags TEXT NOT NULL DEFAULT '[]',
+        manually_tagged INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')));
+    CREATE INDEX idx_cache_user_calendar ON calendar_events_cache(user_id, calendar_id);
+    INSERT INTO users (id, username, password_hash) VALUES (1, 'alice', 'x'), (2, 'bob', 'y');
+    INSERT INTO calendars (id, user_id, name, ics_url, default_tag) VALUES
+        (1, 1, 'Family', 'https://e/a.ics', 'family'), (2, 2, 'Family', 'https://e/b.ics', 'family');
+    INSERT INTO calendar_events_cache VALUES ('a', 1, 1, 'Standup', '', '2026-10-01T09:00:00+00:00', 30, '["work"]', 0, '2026-10-01 10:00:00');
+    INSERT INTO calendar_events_cache VALUES ('b', 1, 1, 'Gym', 'legs', '2026-10-01T18:00:00+00:00', 60, '["exercise"]', 1, '2026-10-01 19:00:00');
+"""
+
+_CACHE_COLS = ("event_id, user_id, calendar_id, title, description, start_iso, duration_min, "
+               "applied_tags, manually_tagged, updated_at")
+
+
+def _cache_pk(conn):
+    return sorted((r[5], r[1]) for r in conn.execute("PRAGMA table_info(calendar_events_cache)") if r[5])
+
+
+@pytest.mark.parametrize("with_issue7_columns", [False, True])
+def test_migration_rebuilds_cache_keyed_per_user_keeping_every_row(tmp_path, monkeypatch, with_issue7_columns):
+    """Simulates a live install: either on the pre-#7 schema, or on the
+    first #7 build (has excluded/stranded_tags, still keyed by event_id
+    alone - what the running test instance has). init_db() must add the
+    columns, rebuild the table keyed by (user_id, event_id), keep every
+    row and value, and be a no-op the second time (it runs on every
+    startup)."""
     path = tmp_path / "old.db"
     conn = sqlite3.connect(path)
-    conn.executescript("""
-        CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE,
-            password_hash TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));
-        CREATE TABLE calendars (id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            name TEXT NOT NULL, ics_url TEXT NOT NULL, default_tag TEXT NOT NULL,
-            enabled INTEGER NOT NULL DEFAULT 1, last_synced TEXT, last_error TEXT,
-            created_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (user_id, ics_url));
-        CREATE TABLE calendar_events_cache (
-            event_id TEXT PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            calendar_id INTEGER NOT NULL REFERENCES calendars(id) ON DELETE CASCADE,
-            title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', start_iso TEXT NOT NULL,
-            duration_min INTEGER, applied_tags TEXT NOT NULL DEFAULT '[]',
-            manually_tagged INTEGER NOT NULL DEFAULT 0,
-            updated_at TEXT NOT NULL DEFAULT (datetime('now')));
-        INSERT INTO users (id, username, password_hash) VALUES (1, 'alice', 'x');
-        INSERT INTO calendars (id, user_id, name, ics_url, default_tag) VALUES (1, 1, 'Work', 'https://e/x.ics', 'work');
-        INSERT INTO calendar_events_cache VALUES ('a', 1, 1, 'Standup', '', '2026-10-01T09:00:00+00:00', 30, '["work"]', 0, '2026-10-01 10:00:00');
-        INSERT INTO calendar_events_cache VALUES ('b', 1, 1, 'Gym', 'legs', '2026-10-01T18:00:00+00:00', 60, '["exercise"]', 1, '2026-10-01 19:00:00');
-    """)
+    conn.executescript(_OLD_CACHE_DDL)
+    if with_issue7_columns:
+        conn.executescript("""
+            ALTER TABLE calendar_events_cache ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE calendar_events_cache ADD COLUMN stranded_tags TEXT NOT NULL DEFAULT '[]';
+            UPDATE calendar_events_cache SET excluded = 1, stranded_tags = '["meeting"]' WHERE event_id = 'b';
+        """)
     conn.commit()
-    before = [tuple(r) for r in conn.execute("SELECT * FROM calendar_events_cache ORDER BY event_id")]
+    before = [tuple(r) for r in conn.execute(f"SELECT {_CACHE_COLS} FROM calendar_events_cache ORDER BY event_id")]
     conn.close()
 
     monkeypatch.setattr(db, "SQLITE_PATH", str(path))
@@ -249,14 +303,66 @@ def test_migration_adds_column_without_touching_existing_rows(tmp_path, monkeypa
     db.init_db()
 
     conn = sqlite3.connect(path)
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(calendar_events_cache)")]
-    assert cols[-2:] == ["excluded", "stranded_tags"]
-    assert cols.count("excluded") == 1 and cols.count("stranded_tags") == 1
-    after = [tuple(r) for r in conn.execute("SELECT * FROM calendar_events_cache ORDER BY event_id")]
+    assert _cache_pk(conn) == [(1, "user_id"), (2, "event_id")]
+    after = [tuple(r) for r in conn.execute(f"SELECT {_CACHE_COLS} FROM calendar_events_cache ORDER BY event_id")]
+    assert after == before  # every pre-existing value untouched
+    flags = conn.execute("SELECT excluded, stranded_tags FROM calendar_events_cache ORDER BY event_id").fetchall()
+    assert flags == ([(0, "[]"), (1, '["meeting"]')] if with_issue7_columns else [(0, "[]"), (0, "[]")])
+    indexes = [r[1] for r in conn.execute("PRAGMA index_list(calendar_events_cache)")]
+    assert "idx_cache_user_calendar" in indexes
+    assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'calendar_events_cache_new'").fetchone() is None
+
+    # The point of the new key: another user can now hold the same event_id
+    conn.execute("INSERT INTO calendar_events_cache (event_id, user_id, calendar_id, title, start_iso) "
+                 "VALUES ('a', 2, 2, 'Standup', '2026-10-01T09:00:00+00:00')")
+    conn.commit()
     conn.close()
 
-    assert [row[:-2] for row in after] == before  # every pre-existing value untouched
-    assert [row[-2:] for row in after] == [(0, "[]"), (0, "[]")]
+
+def test_migration_rolls_back_cleanly_on_failure(tmp_path, monkeypatch):
+    """If the rebuild fails part-way, the original table must be left
+    exactly as it was (and a later startup can retry)."""
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(_OLD_CACHE_DDL)
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(db, "SQLITE_PATH", str(path))
+
+    real_connect = sqlite3.connect
+
+    class FailingRename:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, *args):
+            if sql.startswith("ALTER TABLE calendar_events_cache_new RENAME"):
+                raise sqlite3.OperationalError("simulated failure")
+            return self._inner.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    def connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        return FailingRename(conn) if kwargs.get("isolation_level", "") is None else conn
+
+    monkeypatch.setattr(db.sqlite3, "connect", connect)
+    with pytest.raises(sqlite3.OperationalError):
+        db.init_db()
+    monkeypatch.setattr(db.sqlite3, "connect", real_connect)
+
+    conn = sqlite3.connect(path)
+    assert _cache_pk(conn) == [(1, "event_id")]
+    assert conn.execute("SELECT COUNT(*) FROM calendar_events_cache").fetchone()[0] == 2
+    assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'calendar_events_cache_new'").fetchone() is None
+    conn.close()
+
+    db.init_db()  # retry succeeds
+    conn = sqlite3.connect(path)
+    assert _cache_pk(conn) == [(1, "user_id"), (2, "event_id")]
+    assert conn.execute("SELECT COUNT(*) FROM calendar_events_cache").fetchone()[0] == 2
+    conn.close()
 
 
 def test_exclude_sets_flag_before_deleting(auth_client, influx, monkeypatch):
@@ -457,3 +563,142 @@ def test_reprocess_only_rereads_rows_it_will_rewrite(auth_client, influx, monkey
     assert [c["event_id"] for c in writes.calls] == ["changes"]
     status = reprocess.get_status(_admin_id())
     assert status["processed"] == 2 and status["changed"] == 1
+
+
+def _second_user(auth_client):
+    auth_client.post("/users", json={"username": "seconduser", "password": "password123"})
+    uid = db.get_user_by_username("seconduser")["id"]
+    calendar_id = db.add_calendar(uid, "Work", "https://example.com/shared.ics", "work")
+    return uid, calendar_id
+
+
+def test_excluded_flag_is_per_user_for_a_shared_calendar(auth_client, influx):
+    """Two accounts with a same-named calendar get the same event_id for
+    the same event - one person's strike-off must not touch the other's."""
+    _seed_event(auth_client)
+    b_id, b_cal = _second_user(auth_client)
+    auth_client.post("/calendar_events/evt1/exclude")
+
+    # The second user's sync of the same event (same event_id)
+    db.upsert_cached_event(
+        event_id="evt1", user_id=b_id, calendar_id=b_cal, title="Standup",
+        description="", start_iso=START_ISO, duration_min=30, applied_tags=["work"],
+    )
+
+    mine = db.get_cached_event("evt1", _admin_id())
+    theirs = db.get_cached_event("evt1", b_id)
+    assert mine["excluded"] == 1 and mine["user_id"] == _admin_id()
+    assert theirs["excluded"] == 0 and theirs["user_id"] == b_id
+    assert _timeline_entry(auth_client)["excluded"] is True
+
+
+def test_shared_calendar_sync_still_writes_other_users_points(auth_client, influx, monkeypatch):
+    writes, _ = influx
+    ics = (
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n"
+        "BEGIN:VEVENT\r\nUID:a\r\nSUMMARY:Standup\r\nDTSTART:20261001T090000Z\r\nDTEND:20261001T093000Z\r\nEND:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    ).encode()
+
+    class FakeResp:
+        content = ics
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(ics_sync.httpx, "get", lambda *a, **k: FakeResp())
+    my_cal = db.get_calendar(_seed_event(auth_client), _admin_id())
+    b_id, b_cal_id = _second_user(auth_client)
+
+    ics_sync.sync_calendar(my_cal, [], "testadmin")
+    event_id = writes.calls[0]["event_id"]
+    auth_client.post(f"/calendar_events/{event_id}/exclude")
+    writes.calls.clear()
+
+    ics_sync.sync_calendar(db.get_calendar(b_cal_id, b_id), [], "seconduser")
+    assert [(c["user"], c["event_id"]) for c in writes.calls] == [("seconduser", event_id)]
+    assert db.get_cached_event(event_id, _admin_id())["excluded"] == 1
+
+
+def test_exclude_deletes_points_the_cache_doesnt_know_about(auth_client, influx, fake_influx):
+    """A sync that retagged the event (rule change, no reprocess) leaves
+    the old tag's point behind while the cache only lists the new tag.
+    Exclude must find and delete it via Influx itself."""
+    _seed_event(auth_client, tags=("meeting",))
+    start = datetime.fromisoformat(START_ISO)
+    for tag in ("work", "meeting"):  # what's really in Influx
+        fake_influx.write(user="testadmin", tags=[tag], calendar="Work", timestamp=start, event_id="evt1")
+
+    assert auth_client.post("/calendar_events/evt1/exclude").status_code == 200
+    assert fake_influx.tags_for("evt1") == set()
+    assert _timeline_entry(auth_client)["exclude_incomplete"] is False
+
+
+def test_exclude_lookup_failure_keeps_event_incomplete_until_retry(auth_client, influx, fake_influx, monkeypatch):
+    _seed_event(auth_client, tags=("work",))
+    start = datetime.fromisoformat(START_ISO)
+    fake_influx.write(user="testadmin", tags=["work", "old"], calendar="Work", timestamp=start, event_id="evt1")
+
+    def failing_find(**kwargs):
+        raise RuntimeError("influx down")
+
+    monkeypatch.setattr(calendars_routes, "find_calendar_event_point_tags", failing_find)
+    resp = auth_client.post("/calendar_events/evt1/exclude")
+    assert resp.status_code == 502 and "InfluxDB" in resp.json()["detail"]
+    assert _timeline_entry(auth_client)["exclude_incomplete"] is True
+
+    monkeypatch.setattr(calendars_routes, "find_calendar_event_point_tags", fake_influx.find)
+    assert auth_client.post("/calendar_events/evt1/exclude").status_code == 200
+    assert fake_influx.tags_for("evt1") == set()
+    assert _timeline_entry(auth_client)["exclude_incomplete"] is False
+
+
+def test_delete_predicate_escapes_quotes_backslashes_and_newlines(monkeypatch):
+    from datetime import timezone as tz
+
+    predicates = []
+
+    class FakeDeleteApi:
+        def delete(self, start, stop, predicate, **kwargs):
+            predicates.append(predicate)
+
+    class FakeClient:
+        def delete_api(self):
+            return FakeDeleteApi()
+
+    monkeypatch.setattr(ce, "get_client", lambda: FakeClient())
+    ce.delete_event_tag_point(user="al\\ice", tag='a"b', source="calendar",
+                              timestamp=datetime(2026, 10, 1, 9, tzinfo=tz.utc), calendar="Work\nmain")
+    assert '"user"="al\\\\ice"' in predicates[0]
+    assert '"tag"="a\\"b"' in predicates[0]
+    assert '"calendar"="Work\\nmain"' in predicates[0]
+
+
+def test_find_calendar_event_point_tags_escapes_and_reads_tags(monkeypatch):
+    from datetime import timezone as tz
+
+    queries = []
+
+    class Record:
+        def __init__(self, tag):
+            self.values = {"tag": tag}
+
+    class Table:
+        records = [Record("work"), Record("meeting"), Record("work")]
+
+    class FakeQueryApi:
+        def query(self, flux):
+            queries.append(flux)
+            return [Table()]
+
+    class FakeClient:
+        def query_api(self):
+            return FakeQueryApi()
+
+    monkeypatch.setattr(ce, "get_client", lambda: FakeClient())
+    tags = ce.find_calendar_event_point_tags(user='bob"${x}', event_id="evt1",
+                                             timestamp=datetime(2026, 10, 1, 9, tzinfo=tz.utc))
+    assert tags == {"work", "meeting"}
+    assert 'r.user == "bob\\"\\${x}"' in queries[0]
+    assert 'r._value == "evt1"' in queries[0]
+    assert "range(start: 2026-10-01T09:00:00.000000Z, stop: 2026-10-01T09:00:01.000000Z)" in queries[0]

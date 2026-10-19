@@ -22,6 +22,13 @@ file. For the overall stack layout see
   (`calendar_event_id`). Renaming the calendar, or retitling or moving
   the event at the source, produces a new id, and any per-event flag on
   the old id is lost.
+- **Cache rows are keyed by `(user_id, event_id)`.** Two household
+  members who both add a shared calendar under the same name get the
+  same event id for the same event, so each needs their own row, with
+  their own tags and their own "Didn't attend" flag. Installs created
+  before this rebuild the table in place on startup
+  (`db._migrate_cache_to_per_user_key`). The rebuild runs in one
+  transaction, checks the row count and rolls back on any failure.
 - **Recurring events:** RRULE series aren't expanded, so only the master
   VEVENT and any overridden instances are synced.
 
@@ -44,9 +51,15 @@ file. For the overall stack layout see
 - **Exclude** (`POST /calendar_events/{id}/exclude`) is pessimistic.
   1. It marks the row `excluded` and records every tag to delete in
      `stranded_tags`.
-  2. It deletes those points.
-  3. It keeps in `stranded_tags` only the tags whose delete failed.
-  4. If any delete failed, it returns 502. The Timeline then shows
+  2. It looks up which tags the event actually has points for in Influx
+     (`find_calendar_event_point_tags`, by its `event_id` field) and adds
+     them. The cache can lag behind Influx: a sync that retags an event
+     writes the new tag without deleting the old one, and a retag whose
+     delete failed leaves the old point behind. If the lookup fails,
+     every known tag stays stranded and the endpoint returns 502.
+  3. It deletes those points.
+  4. It keeps in `stranded_tags` only the tags whose delete failed.
+  5. If any delete failed, it returns 502. The Timeline then shows
      "removal failed · may still be counted" with a **Retry removal**
      button. Calling exclude again deletes whatever is still stranded.
 - **Restore** (`POST /calendar_events/{id}/restore`):
@@ -66,6 +79,11 @@ file. For the overall stack layout see
 - **Deletes are scoped by `user`.** Household members often share a
   calendar, so one person's points can share a tag, calendar and
   timestamp with another person's.
+- **Values in Influx deletes and queries are escaped.** InfluxDB's delete
+  predicate reads backslash escapes and rejects a bare `"`, a lone `\` or
+  a raw newline, so names containing those used to make every delete
+  fail. OSS InfluxDB has no parameterized Flux queries, so Flux strings
+  are escaped too.
 
 ### Reprocessing
 

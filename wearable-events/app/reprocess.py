@@ -100,7 +100,7 @@ def _reprocess_one(snapshot: dict, user_id: int, username: str, rules: list[dict
             duration_min=ev["duration_min"],
             action="reprocessing",
         )
-        db.set_cached_event_tags(ev["event_id"], new_tags, manually_tagged=False)
+        db.set_cached_event_tags(ev["event_id"], user_id, new_tags, manually_tagged=False)
     return True
 
 
