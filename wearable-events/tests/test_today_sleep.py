@@ -72,9 +72,9 @@ def test_last_night_is_the_session_that_woke_up_today(auth_client, sessions):
     sleep = _sleep(auth_client)
 
     assert sleep["duration_s"] == last_night["duration_s"]
-    assert sleep["sleep_date"] == "2026-10-09"
+    # Labelled by wake date, like the Sleep tab, not by bedtime.
+    assert sleep["wake_date"] == DAY
     assert sleep["start_time"] == last_night["start_time"].isoformat()
-    assert sleep["end_time"] == last_night["end_time"].isoformat()
     assert sleep["stages_min"]["deep"] == 60
     assert stage_calls == [(last_night["start_time"], last_night["end_time"], "ring")]
 
@@ -87,7 +87,7 @@ def test_session_starting_after_midnight_still_counts(auth_client, sessions):
     sleep = _sleep(auth_client)
 
     assert sleep["duration_s"] == late["duration_s"]
-    assert sleep["sleep_date"] == "2026-10-10"
+    assert sleep["wake_date"] == DAY
 
 
 def test_main_sleep_wins_over_a_nap_ending_the_same_day(auth_client, sessions):
@@ -119,3 +119,29 @@ def test_past_date_shows_that_nights_sleep_not_a_newer_one(auth_client, sessions
 
     assert _sleep(auth_client, "2026-10-07")["duration_s"] == older["duration_s"]
     assert _sleep(auth_client, "2026-10-08") is None
+
+
+def test_influx_failure_leaves_the_card_empty_not_the_page(auth_client, monkeypatch):
+    """If the sleep-session query fails, /today still answers with the
+    rest of the dashboard and an empty sleep card. The real
+    find_sleep_sessions_in_range runs here; only its Influx client is
+    broken."""
+
+    class BrokenQueryApi:
+        def query(self, flux):
+            raise ConnectionError("influx is down")
+
+    class BrokenClient:
+        def query_api(self):
+            return BrokenQueryApi()
+
+    monkeypatch.setattr(sleep_sessions, "get_client", lambda: BrokenClient())
+    monkeypatch.setattr(today_routes, "get_today_vitals", lambda *a, **k: {"heart_rate": {}})
+    monkeypatch.setattr(today_routes, "get_today_steps", lambda *a, **k: {"ring": 1234})
+
+    resp = auth_client.get(f"/today?date={DAY}")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["sleep"] is None
+    assert body["steps"] == {"ring": 1234}

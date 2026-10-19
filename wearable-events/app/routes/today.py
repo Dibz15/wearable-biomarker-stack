@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.auth import get_current_user
 from app.config import TZ_NAME
 from app.queries.activity import get_today_steps
-from app.queries.sleep_sessions import _primary_device_session, _sleep_session_for_night, get_sleep_stage_breakdown
+from app.queries.sleep_sessions import get_sleep_stage_breakdown, primary_sleep_session_for_night
 from app.queries.vitals import get_today_series, get_today_vitals
 from app.routes._shared import TODAY_SERIES_FIELDS, _parse_optional_date
 
@@ -25,7 +25,8 @@ def get_today(date: str | None = None, current_user: dict = Depends(get_current_
     (duration + stage breakdown), if one was recorded.
 
     The sleep session is resolved by wake date, the same rule the Sleep
-    tab uses (_sleep_session_for_night + _primary_device_session). It
+    tab uses (primary_sleep_session_for_night), and labelled by that
+    wake date, as the Sleep tab does. It
     used to be "the most recent session before the end of the day",
     which showed the previous night's sleep as last night's whenever
     last night's hadn't synced yet (#8).
@@ -50,16 +51,13 @@ def get_today(date: str | None = None, current_user: dict = Depends(get_current_
     wake_date = parsed_date or datetime.now(ZoneInfo(TZ_NAME)).date()
 
     sleep = None
-    sessions = _sleep_session_for_night(username, wake_date)
-    if sessions:
-        device, session = _primary_device_session(sessions)
+    primary = primary_sleep_session_for_night(username, wake_date)
+    if primary is not None:
+        device, session = primary
         start, end = session["start_time"], session["end_time"]
         sleep = {
-            # Bedtime date, as before - the card labels the night by
-            # when it started.
-            "sleep_date": start.strftime("%Y-%m-%d"),
+            "wake_date": wake_date.isoformat(),
             "start_time": start.isoformat(),
-            "end_time": end.isoformat(),
             "duration_s": session["duration_s"],
             "stages_min": get_sleep_stage_breakdown(username, start, end, device=device),
         }

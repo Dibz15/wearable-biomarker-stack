@@ -49,6 +49,7 @@ from app.queries.sleep_sessions import (
     _nightly_means_in_bulk,
     get_nightly_baseline_comparison,
     _primary_device_session,
+    primary_sleep_session_for_night,
     get_sleep_overview_for_night,
     get_sleep_timing_trend,
     get_sleep_regularity_index,

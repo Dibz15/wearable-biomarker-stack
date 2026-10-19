@@ -243,6 +243,19 @@ def _primary_device_session(sessions: dict[str, dict]) -> tuple[str, dict]:
     '''
     return max(sessions.items(), key=lambda item: item[1]["duration_s"])
 
+def primary_sleep_session_for_night(user: str, wake_date: date) -> tuple[str, dict] | None:
+    ''' The one (device, session) that woke up on `wake_date`, or None
+    if no session was recorded for that night. This is "last night's
+    sleep" everywhere a single night is shown: the Sleep tab, the
+    journal and the Today card. It combines _sleep_session_for_night()
+    with _primary_device_session(), so callers don't repeat the
+    empty-check-then-pick steps.
+    '''
+    sessions = _sleep_session_for_night(user, wake_date)
+    if not sessions:
+        return None
+    return _primary_device_session(sessions)
+
 def get_sleep_overview_for_night(user: str, wake_date: date) -> dict | None:
     ''' Everything the Sleep tab's main day-view needs for ONE specific
     night, combining several already-existing per-session queries into
@@ -261,11 +274,11 @@ def get_sleep_overview_for_night(user: str, wake_date: date) -> dict | None:
     any device was worn, or a genuinely missed sync) - the caller
     should treat this as "no sleep data for this night", not an error.
     '''
-    sessions = _sleep_session_for_night(user, wake_date)
-    if not sessions:
+    primary = primary_sleep_session_for_night(user, wake_date)
+    if primary is None:
         return None
 
-    device, session = _primary_device_session(sessions)
+    device, session = primary
     start, end = session["start_time"], session["end_time"]
 
     stages = get_sleep_stage_breakdown(user, start, end, device=device)
@@ -577,10 +590,10 @@ def get_sleep_vitals_series(field: str, user: str, wake_date: date) -> dict[str,
     {"<device>": [{"t": <ISO8601>, "v": <value>}, ...]} - empty dict if
     no sleep session is recorded for this night.
     '''
-    sessions = _sleep_session_for_night(user, wake_date)
-    if not sessions:
+    primary = primary_sleep_session_for_night(user, wake_date)
+    if primary is None:
         return {}
-    device, session = _primary_device_session(sessions)
+    device, session = primary
     series = _grouped_series(field, user, session["start_time"], session["end_time"])
     return {device: series[device]} if device in series else {}
 
@@ -656,10 +669,10 @@ def get_sleep_hypnogram_for_night(user: str, wake_date: date) -> list[dict]:
     Returns an empty list (not an error) if no sleep session is
     recorded for this night.
     '''
-    sessions = _sleep_session_for_night(user, wake_date)
-    if not sessions:
+    primary = primary_sleep_session_for_night(user, wake_date)
+    if primary is None:
         return []
-    device, session = _primary_device_session(sessions)
+    device, session = primary
     return _sleep_stage_timeline(user, session["start_time"], session["end_time"], device=device)
 
 def get_nightly_differential_series(field: str, user: str, start_date: date, end_date: date, baseline_days: int = 7) -> dict[str, list[dict]]:
