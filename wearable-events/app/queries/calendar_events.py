@@ -244,13 +244,15 @@ def find_manual_events_in_range(user: str, start: datetime, end: datetime) -> li
     ]
 
 
-def find_calendar_event_point_tags(*, user: str, event_id: str, timestamp: datetime) -> set[str]:
-    ''' The tags this calendar event ACTUALLY has points for in Influx,
-    for this user - looked up by its event_id field over the same 1-second
-    window the deletes use. Exclude uses this rather than trusting the
-    cache's applied_tags, which can lag behind Influx: a sync that
-    retagged an event writes the new tag without deleting the old one,
-    and a retag whose delete failed leaves the old point behind.
+def find_calendar_event_points(*, user: str, event_id: str, timestamp: datetime) -> set[tuple[str, str]]:
+    ''' The points this calendar event ACTUALLY has in Influx for this
+    user, as (tag, calendar) pairs - looked up by its event_id field over
+    the same 1-second window the deletes use. Exclude/restore use this
+    rather than trusting the cache, which can lag behind Influx: a sync
+    that retagged an event writes the new tag without deleting the old
+    one, a retag whose delete failed leaves the old point behind, and
+    renaming a calendar leaves its existing points under the OLD
+    `calendar` tag value (so deletes must use each point's own value).
 
     Raises on query failure (unlike the other lookups here) - the caller
     must not treat "couldn't check" as "nothing there".
@@ -263,26 +265,33 @@ def find_calendar_event_point_tags(*, user: str, event_id: str, timestamp: datet
       |> filter(fn: (r) => r._measurement == "{_flux_str(EVENTS_MEASUREMENT)}")
       |> filter(fn: (r) => r.source == "calendar" and r.user == "{_flux_str(user)}")
       |> filter(fn: (r) => r._field == "event_id" and r._value == "{_flux_str(event_id)}")
-      |> keep(columns: ["tag"])
+      |> keep(columns: ["tag", "calendar"])
     '''
     tables = get_client().query_api().query(flux)
-    return {record.values["tag"] for table in tables for record in table.records if record.values.get("tag")}
+    return {
+        (record.values["tag"], record.values.get("calendar") or "")
+        for table in tables for record in table.records if record.values.get("tag")
+    }
 
 
-def delete_calendar_event_points(*, user: str, event_id: str, tags, timestamp: datetime,
-                                 calendar: str, action: str) -> list[str]:
-    ''' Best-effort delete of one calendar event's points for each tag.
-    Failures are logged, not raised - returns the tags whose delete
-    failed so callers that care (exclude/restore) can act on them.
-    `action` is only for the log line ("excluding", "retagging", ...).
+def delete_calendar_event_points(*, user: str, event_id: str, points, timestamp: datetime,
+                                 action: str) -> set[tuple[str, str]]:
+    ''' Best-effort delete of one calendar event's points, given as
+    (tag, calendar) pairs - the calendar is part of the delete predicate,
+    so it must be the value the point was written with. Failures are
+    logged, not raised - returns the pairs whose delete failed so callers
+    that care (exclude/restore) can act on them. A delete that matches
+    nothing is NOT an error to Influx, so callers that need certainty
+    re-check with find_calendar_event_points. `action` is only for the
+    log line ("excluding", "retagging", ...).
     '''
-    failed = []
-    for tag in sorted(set(tags)):
+    failed = set()
+    for tag, calendar in sorted(set(points)):
         try:
             delete_event_tag_point(user=user, tag=tag, source="calendar", timestamp=timestamp, calendar=calendar)
         except Exception as e:
             logger.warning(f"Failed to delete point while {action} calendar event {event_id} (tag={tag}): {e}")
-            failed.append(tag)
+            failed.add((tag, calendar))
     return failed
 
 
@@ -297,8 +306,8 @@ def replace_calendar_event_points(*, user: str, event_id: str, old_tags, new_tag
     raise. Returns the tags whose delete failed.
     '''
     failed = delete_calendar_event_points(
-        user=user, event_id=event_id, tags=set(old_tags) - set(new_tags),
-        timestamp=timestamp, calendar=calendar, action=action,
+        user=user, event_id=event_id, points={(t, calendar) for t in set(old_tags) - set(new_tags)},
+        timestamp=timestamp, action=action,
     )
     write_event_points(
         user=user,
@@ -309,4 +318,4 @@ def replace_calendar_event_points(*, user: str, event_id: str, old_tags, new_tag
         calendar=calendar,
         duration_min=duration_min,
     )
-    return failed
+    return sorted(tag for tag, _ in failed)

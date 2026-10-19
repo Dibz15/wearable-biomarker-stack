@@ -52,15 +52,23 @@ class FakeInflux:
         self.points.pop((kw["user"], kw["calendar"], kw["timestamp"], kw["tag"]), None)
 
     def find(self, *, user, event_id, timestamp):
-        return {k[3] for k, eid in self.points.items() if k[0] == user and eid == event_id}
+        return {(k[3], k[1]) for k, eid in self.points.items() if k[0] == user and eid == event_id}
 
     def tags_for(self, event_id, user="testadmin"):
-        return self.find(user=user, event_id=event_id, timestamp=None)
+        return {tag for tag, _ in self.find(user=user, event_id=event_id, timestamp=None)}
+
+
+# The fake for the current test, so _seed_event can put the seeded
+# event's points "in Influx" too (set/cleared by the fake_influx fixture).
+_current_fake = None
 
 
 @pytest.fixture
 def fake_influx():
-    return FakeInflux()
+    global _current_fake
+    _current_fake = FakeInflux()
+    yield _current_fake
+    _current_fake = None
 
 
 @pytest.fixture
@@ -71,7 +79,7 @@ def influx(monkeypatch, fake_influx):
     monkeypatch.setattr(ce, "write_event_points", writes)
     monkeypatch.setattr(ce, "delete_event_tag_point", deletes)
     monkeypatch.setattr(ics_sync, "write_event_points", writes)
-    monkeypatch.setattr(calendars_routes, "find_calendar_event_point_tags", fake_influx.find)
+    monkeypatch.setattr(calendars_routes, "find_calendar_event_points", fake_influx.find)
     return writes, deletes
 
 
@@ -90,6 +98,9 @@ def _seed_event(auth_client, *, tags=("work",), event_id="evt1", title="Standup"
     )
     if manually_tagged:
         db.set_cached_event_tags(event_id, _admin_id(), list(tags), manually_tagged=True)
+    if _current_fake is not None:
+        _current_fake.write(user="testadmin", tags=list(tags), calendar="Work",
+                            timestamp=datetime.fromisoformat(START_ISO), event_id=event_id)
     return calendar_id
 
 
@@ -319,49 +330,42 @@ def test_migration_rebuilds_cache_keyed_per_user_keeping_every_row(tmp_path, mon
     conn.close()
 
 
-def test_migration_rolls_back_cleanly_on_failure(tmp_path, monkeypatch):
-    """If the rebuild fails part-way, the original table must be left
-    exactly as it was (and a later startup can retry)."""
+@pytest.mark.parametrize("fail_after_rebuild", [False, True])
+def test_migration_rolls_back_cleanly_on_failure(tmp_path, monkeypatch, fail_after_rebuild):
+    """If the rebuild fails - at the start, or after every step including
+    the DROP + RENAME has run - the transaction must leave the original
+    table exactly as it was, and a later startup can retry."""
     path = tmp_path / "old.db"
     conn = sqlite3.connect(path)
     conn.executescript(_OLD_CACHE_DDL)
     conn.commit()
+    before = [tuple(r) for r in conn.execute(f"SELECT {_CACHE_COLS} FROM calendar_events_cache ORDER BY event_id")]
     conn.close()
     monkeypatch.setattr(db, "SQLITE_PATH", str(path))
 
-    real_connect = sqlite3.connect
+    real_rebuild = db._rebuild_cache_table
 
-    class FailingRename:
-        def __init__(self, inner):
-            self._inner = inner
+    def failing_rebuild(conn, ddl):
+        if fail_after_rebuild:
+            real_rebuild(conn, ddl)
+        raise RuntimeError("simulated failure")
 
-        def execute(self, sql, *args):
-            if sql.startswith("ALTER TABLE calendar_events_cache_new RENAME"):
-                raise sqlite3.OperationalError("simulated failure")
-            return self._inner.execute(sql, *args)
-
-        def __getattr__(self, name):
-            return getattr(self._inner, name)
-
-    def connect(*args, **kwargs):
-        conn = real_connect(*args, **kwargs)
-        return FailingRename(conn) if kwargs.get("isolation_level", "") is None else conn
-
-    monkeypatch.setattr(db.sqlite3, "connect", connect)
-    with pytest.raises(sqlite3.OperationalError):
+    monkeypatch.setattr(db, "_rebuild_cache_table", failing_rebuild)
+    with pytest.raises(RuntimeError, match="simulated failure"):
         db.init_db()
-    monkeypatch.setattr(db.sqlite3, "connect", real_connect)
 
     conn = sqlite3.connect(path)
     assert _cache_pk(conn) == [(1, "event_id")]
-    assert conn.execute("SELECT COUNT(*) FROM calendar_events_cache").fetchone()[0] == 2
+    assert [tuple(r) for r in conn.execute(f"SELECT {_CACHE_COLS} FROM calendar_events_cache ORDER BY event_id")] == before
     assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'calendar_events_cache_new'").fetchone() is None
+    assert "idx_cache_user_calendar" in [r[1] for r in conn.execute("PRAGMA index_list(calendar_events_cache)")]
     conn.close()
 
+    monkeypatch.setattr(db, "_rebuild_cache_table", real_rebuild)
     db.init_db()  # retry succeeds
     conn = sqlite3.connect(path)
     assert _cache_pk(conn) == [(1, "user_id"), (2, "event_id")]
-    assert conn.execute("SELECT COUNT(*) FROM calendar_events_cache").fetchone()[0] == 2
+    assert [tuple(r) for r in conn.execute(f"SELECT {_CACHE_COLS} FROM calendar_events_cache ORDER BY event_id")] == before
     conn.close()
 
 
@@ -461,7 +465,7 @@ def test_delete_event_tag_point_is_scoped_to_user(monkeypatch):
     assert '"calendar"="Family"' in predicates[0]
 
 
-def test_editing_tags_after_partial_exclude_keeps_stranded_points(auth_client, influx, monkeypatch):
+def test_editing_tags_after_partial_exclude_keeps_stranded_points(auth_client, influx, fake_influx, monkeypatch):
     """Tag edits on an excluded event are cache-only - they must not
     make a retry forget the point that failed to delete."""
     _, deletes = influx
@@ -470,6 +474,7 @@ def test_editing_tags_after_partial_exclude_keeps_stranded_points(auth_client, i
     def failing(**kwargs):
         if kwargs["tag"] == "meeting":
             raise RuntimeError("influx down")
+        fake_influx.delete(**kwargs)
 
     monkeypatch.setattr(ce, "delete_event_tag_point", failing)
     assert auth_client.post("/calendar_events/evt1/exclude").status_code == 502
@@ -482,13 +487,14 @@ def test_editing_tags_after_partial_exclude_keeps_stranded_points(auth_client, i
     assert [c["tag"] for c in deletes.calls] == ["meeting"]
 
 
-def test_restore_clears_stranded_points_not_in_restored_tags(auth_client, influx, monkeypatch):
+def test_restore_clears_stranded_points_not_in_restored_tags(auth_client, influx, fake_influx, monkeypatch):
     writes, deletes = influx
     _seed_event(auth_client, tags=("work", "meeting"), manually_tagged=True)
 
     def failing(**kwargs):
         if kwargs["tag"] == "meeting":
             raise RuntimeError("influx down")
+        fake_influx.delete(**kwargs)
 
     monkeypatch.setattr(ce, "delete_event_tag_point", failing)
     auth_client.post("/calendar_events/evt1/exclude")
@@ -642,12 +648,12 @@ def test_exclude_lookup_failure_keeps_event_incomplete_until_retry(auth_client, 
     def failing_find(**kwargs):
         raise RuntimeError("influx down")
 
-    monkeypatch.setattr(calendars_routes, "find_calendar_event_point_tags", failing_find)
+    monkeypatch.setattr(calendars_routes, "find_calendar_event_points", failing_find)
     resp = auth_client.post("/calendar_events/evt1/exclude")
     assert resp.status_code == 502 and "InfluxDB" in resp.json()["detail"]
     assert _timeline_entry(auth_client)["exclude_incomplete"] is True
 
-    monkeypatch.setattr(calendars_routes, "find_calendar_event_point_tags", fake_influx.find)
+    monkeypatch.setattr(calendars_routes, "find_calendar_event_points", fake_influx.find)
     assert auth_client.post("/calendar_events/evt1/exclude").status_code == 200
     assert fake_influx.tags_for("evt1") == set()
     assert _timeline_entry(auth_client)["exclude_incomplete"] is False
@@ -674,17 +680,17 @@ def test_delete_predicate_escapes_quotes_backslashes_and_newlines(monkeypatch):
     assert '"calendar"="Work\\nmain"' in predicates[0]
 
 
-def test_find_calendar_event_point_tags_escapes_and_reads_tags(monkeypatch):
+def test_find_calendar_event_points_escapes_and_reads_tag_calendar_pairs(monkeypatch):
     from datetime import timezone as tz
 
     queries = []
 
     class Record:
-        def __init__(self, tag):
-            self.values = {"tag": tag}
+        def __init__(self, tag, calendar):
+            self.values = {"tag": tag, "calendar": calendar}
 
     class Table:
-        records = [Record("work"), Record("meeting"), Record("work")]
+        records = [Record("work", "Work"), Record("meeting", "Work"), Record("work", "Work"), Record("work", "Old name")]
 
     class FakeQueryApi:
         def query(self, flux):
@@ -696,9 +702,101 @@ def test_find_calendar_event_point_tags_escapes_and_reads_tags(monkeypatch):
             return FakeQueryApi()
 
     monkeypatch.setattr(ce, "get_client", lambda: FakeClient())
-    tags = ce.find_calendar_event_point_tags(user='bob"${x}', event_id="evt1",
-                                             timestamp=datetime(2026, 10, 1, 9, tzinfo=tz.utc))
-    assert tags == {"work", "meeting"}
+    points = ce.find_calendar_event_points(user='bob"${x}', event_id="evt1",
+                                           timestamp=datetime(2026, 10, 1, 9, tzinfo=tz.utc))
+    assert points == {("work", "Work"), ("meeting", "Work"), ("work", "Old name")}
+    assert 'keep(columns: ["tag", "calendar"])' in queries[0]
     assert 'r.user == "bob\\"\\${x}"' in queries[0]
     assert 'r._value == "evt1"' in queries[0]
     assert "range(start: 2026-10-01T09:00:00.000000Z, stop: 2026-10-01T09:00:01.000000Z)" in queries[0]
+
+
+def test_exclude_after_calendar_rename_deletes_points_under_old_name(auth_client, influx, fake_influx):
+    """Renaming a calendar leaves its existing points under the old
+    `calendar` tag value - a delete using the new name matches nothing,
+    so exclude must delete each point with its own value."""
+    calendar_id = _seed_event(auth_client, tags=("work",))
+    assert auth_client.patch(f"/calendars/{calendar_id}", json={"name": "Job"}).status_code == 200
+
+    assert auth_client.post("/calendar_events/evt1/exclude").status_code == 200
+    assert fake_influx.tags_for("evt1") == set()
+    assert ("work", "Work") in {(c["tag"], c["calendar"]) for c in influx[1].calls}
+
+
+def test_exclude_rechecks_influx_and_strands_points_a_delete_missed(auth_client, influx, fake_influx, monkeypatch):
+    """Influx reports success for a delete that matched nothing - only a
+    re-check after deleting can tell the strike-off didn't take."""
+    _seed_event(auth_client, tags=("work",))
+    monkeypatch.setattr(ce, "delete_event_tag_point", lambda **kw: None)  # "succeeds", removes nothing
+
+    resp = auth_client.post("/calendar_events/evt1/exclude")
+    assert resp.status_code == 502 and "InfluxDB" in resp.json()["detail"]
+    assert json.loads(db.get_cached_event("evt1", _admin_id())["stranded_tags"]) == ["work"]
+    assert _timeline_entry(auth_client)["exclude_incomplete"] is True
+
+
+def test_exclude_records_found_points_as_stranded_before_deleting(auth_client, influx, fake_influx, monkeypatch):
+    """A crash mid-delete must not leave points the lookup found looking
+    like a completed strike-off."""
+    _seed_event(auth_client, tags=())  # cache knows no tags...
+    fake_influx.write(user="testadmin", tags=["old"], calendar="Work",
+                      timestamp=datetime.fromisoformat(START_ISO), event_id="evt1")  # ...but Influx has one
+    stranded_at_delete = []
+
+    def deleter(**kw):
+        stranded_at_delete.append(json.loads(db.get_cached_event("evt1", _admin_id())["stranded_tags"]))
+        fake_influx.delete(**kw)
+
+    monkeypatch.setattr(ce, "delete_event_tag_point", deleter)
+    assert auth_client.post("/calendar_events/evt1/exclude").status_code == 200
+    assert stranded_at_delete == [["old"]]
+    assert fake_influx.tags_for("evt1") == set()
+
+
+def test_exclude_recheck_failure_keeps_event_incomplete(auth_client, influx, fake_influx, monkeypatch):
+    _seed_event(auth_client, tags=("work",))
+    calls = []
+
+    def find_then_fail(**kw):
+        calls.append(1)
+        if len(calls) > 1:
+            raise RuntimeError("influx down")
+        return fake_influx.find(**kw)
+
+    monkeypatch.setattr(calendars_routes, "find_calendar_event_points", find_then_fail)
+    resp = auth_client.post("/calendar_events/evt1/exclude")
+    assert resp.status_code == 502 and "couldn't check InfluxDB" in resp.json()["detail"]
+    assert json.loads(db.get_cached_event("evt1", _admin_id())["stranded_tags"]) == ["work"]
+
+
+def test_restore_after_rename_replaces_old_name_points(auth_client, influx, fake_influx, monkeypatch):
+    """A leftover point under the calendar's old name would be counted
+    twice next to the restored one - restore removes it first."""
+    calendar_id = _seed_event(auth_client, tags=("work",), manually_tagged=True)
+
+    def keep_points(**kw):
+        raise RuntimeError("influx down")
+
+    monkeypatch.setattr(ce, "delete_event_tag_point", keep_points)
+    assert auth_client.post("/calendar_events/evt1/exclude").status_code == 502  # leaves (work, Work)
+    monkeypatch.setattr(ce, "delete_event_tag_point", influx[1])
+    auth_client.patch(f"/calendars/{calendar_id}", json={"name": "Job"})
+
+    assert auth_client.post("/calendar_events/evt1/restore").status_code == 200
+    assert fake_influx.find(user="testadmin", event_id="evt1", timestamp=None) == {("work", "Job")}
+
+
+def test_restore_lookup_failure_keeps_event_excluded(auth_client, influx, fake_influx, monkeypatch):
+    _seed_event(auth_client, tags=("work",))
+    auth_client.post("/calendar_events/evt1/exclude")
+    writes = influx[0]
+    writes.calls.clear()
+
+    def failing_find(**kw):
+        raise RuntimeError("influx down")
+
+    monkeypatch.setattr(calendars_routes, "find_calendar_event_points", failing_find)
+    resp = auth_client.post("/calendar_events/evt1/restore")
+    assert resp.status_code == 502 and "still excluded" in resp.json()["detail"]
+    assert writes.calls == []
+    assert db.get_cached_event("evt1", _admin_id())["excluded"] == 1

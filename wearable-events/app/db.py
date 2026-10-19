@@ -63,6 +63,23 @@ def _cache_has_per_user_key(conn) -> bool:
     return pk.get("user_id", 0) > 0 and pk.get("event_id", 0) > 0
 
 
+def _rebuild_cache_table(conn, new_table_ddl: str) -> int:
+    ''' The rebuild steps of _migrate_cache_to_per_user_key, run inside
+    its transaction (it commits or rolls back around this). Returns the
+    number of rows carried over. '''
+    columns = ", ".join(row[1] for row in conn.execute("PRAGMA table_info(calendar_events_cache)"))
+    before = conn.execute("SELECT COUNT(*) FROM calendar_events_cache").fetchone()[0]
+    conn.execute("DROP TABLE IF EXISTS calendar_events_cache_new")
+    conn.execute(new_table_ddl)
+    conn.execute(f"INSERT INTO calendar_events_cache_new ({columns}) SELECT {columns} FROM calendar_events_cache")
+    after = conn.execute("SELECT COUNT(*) FROM calendar_events_cache_new").fetchone()[0]
+    if after != before:
+        raise RuntimeError(f"row count mismatch while migrating calendar_events_cache ({before} -> {after})")
+    conn.execute("DROP TABLE calendar_events_cache")
+    conn.execute("ALTER TABLE calendar_events_cache_new RENAME TO calendar_events_cache")
+    return after
+
+
 def _migrate_cache_to_per_user_key():
     ''' One-off migration for installs created before calendar_events_cache
     was keyed by (user_id, event_id) - see the comment above that table in
@@ -94,18 +111,7 @@ def _migrate_cache_to_per_user_key():
         conn.execute("PRAGMA foreign_keys = OFF")
         conn.execute("BEGIN IMMEDIATE")
         try:
-            columns = ", ".join(row[1] for row in conn.execute("PRAGMA table_info(calendar_events_cache)"))
-            before = conn.execute("SELECT COUNT(*) FROM calendar_events_cache").fetchone()[0]
-            conn.execute("DROP TABLE IF EXISTS calendar_events_cache_new")
-            conn.execute(new_table_ddl)
-            conn.execute(
-                f"INSERT INTO calendar_events_cache_new ({columns}) SELECT {columns} FROM calendar_events_cache"
-            )
-            after = conn.execute("SELECT COUNT(*) FROM calendar_events_cache_new").fetchone()[0]
-            if after != before:
-                raise RuntimeError(f"row count mismatch while migrating calendar_events_cache ({before} -> {after})")
-            conn.execute("DROP TABLE calendar_events_cache")
-            conn.execute("ALTER TABLE calendar_events_cache_new RENAME TO calendar_events_cache")
+            kept = _rebuild_cache_table(conn, new_table_ddl)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -113,7 +119,7 @@ def _migrate_cache_to_per_user_key():
         # Re-applies the table's indexes (dropped with the old table);
         # everything else in schema.sql is IF NOT EXISTS, so a no-op.
         conn.executescript(schema)
-        logger.info(f"Migrated existing database: calendar_events_cache now keyed by (user_id, event_id), {after} row(s) kept")
+        logger.info(f"Migrated existing database: calendar_events_cache now keyed by (user_id, event_id), {kept} row(s) kept")
     finally:
         conn.execute("PRAGMA foreign_keys = ON")
         conn.close()

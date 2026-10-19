@@ -48,28 +48,33 @@ file. For the overall stack layout see
 - **Effect:** an excluded event stays on the Timeline, struck through,
   but has no points in Influx, so it doesn't count towards tags or event
   stats.
-- **Exclude** (`POST /calendar_events/{id}/exclude`) is pessimistic.
-  1. It marks the row `excluded` and records every tag to delete in
-     `stranded_tags`.
-  2. It looks up which tags the event actually has points for in Influx
-     (`find_calendar_event_point_tags`, by its `event_id` field) and adds
-     them. The cache can lag behind Influx: a sync that retags an event
-     writes the new tag without deleting the old one, and a retag whose
-     delete failed leaves the old point behind. If the lookup fails,
-     every known tag stays stranded and the endpoint returns 502.
-  3. It deletes those points.
-  4. It keeps in `stranded_tags` only the tags whose delete failed.
-  5. If any delete failed, it returns 502. The Timeline then shows
-     "removal failed · may still be counted" with a **Retry removal**
-     button. Calling exclude again deletes whatever is still stranded.
+- **Exclude** (`POST /calendar_events/{id}/exclude`) is driven by what's
+  actually in Influx, and is pessimistic.
+  1. It marks the row `excluded` and records every tag the cache knows
+     about in `stranded_tags`.
+  2. It looks up the event's actual points (`find_calendar_event_points`,
+     by its `event_id` field) and records those tags as stranded too,
+     before deleting anything. The cache can lag behind Influx: a sync
+     that retags an event writes the new tag without deleting the old
+     one, and a retag whose delete failed leaves the old point behind.
+  3. It deletes every point using that point's own `calendar` value. A
+     renamed calendar's existing points keep the old name, and a delete
+     with the new name would match nothing without reporting an error.
+  4. It looks again. Whatever is still there stays in `stranded_tags`.
+     If either lookup fails, everything stays stranded.
+  5. If anything is left stranded, it returns 502. The Timeline then
+     shows "removal failed · may still be counted" with a **Retry
+     removal** button, and calling exclude again is safe.
 - **Restore** (`POST /calendar_events/{id}/restore`):
-  - Deletes any stranded points that aren't part of the restored tag set.
+  - Looks up the event's actual points, and deletes any that the restored
+    set won't overwrite: tags not being restored, or points under a
+    renamed calendar's old name. That way nothing is counted twice.
   - Writes the restored tags. A manually-tagged event gets its cached
     tags; otherwise the event is reclassified against the current rules.
   - Clears the flag.
-  - If Influx fails part-way, the event stays excluded and the tags that
-    might have been written are recorded as stranded. The endpoint
-    returns 502, and calling it again is safe.
+  - If Influx can't be checked or fails part-way, the event stays
+    excluded and the tags that might have points are recorded as
+    stranded. The endpoint returns 502, and calling it again is safe.
   - Works the same for a disabled calendar. Disabling only stops future
     syncs and doesn't remove the calendar's existing points.
 - **While an event is excluded:**
