@@ -103,7 +103,7 @@ def patch_event(event_id: str, payload: ManualEventUpdateIn, current_user: dict 
     tags_to_delete = old_tags if timestamp_changed else (old_tags - new_tags)
     for tag in tags_to_delete:
         try:
-            delete_event_tag_point(tag=tag, source="manual", timestamp=old_timestamp)
+            delete_event_tag_point(user=username, tag=tag, source="manual", timestamp=old_timestamp)
         except Exception as e:
             logger.warning(f"Failed to delete stale point for manual event {event_id} (tag={tag}): {e}")
 
@@ -133,7 +133,7 @@ def delete_event(event_id: str, current_user: dict = Depends(get_current_user)):
 
     for tag in existing["tags"]:
         try:
-            delete_event_tag_point(tag=tag, source="manual", timestamp=existing["timestamp"])
+            delete_event_tag_point(user=username, tag=tag, source="manual", timestamp=existing["timestamp"])
         except Exception as e:
             logger.warning(f"Failed to delete point for manual event {event_id} (tag={tag}): {e}")
 
@@ -179,6 +179,10 @@ def get_timeline(start: str | None = None, end: str | None = None, current_user:
             "calendar": calendar_names.get(ev["calendar_id"], "(deleted calendar)"),
             "tags": json.loads(ev["applied_tags"] or "[]"),
             "manually_tagged": bool(ev["manually_tagged"]),
+            "excluded": bool(ev["excluded"]),
+            # Strike-off didn't finish removing every Influx point, so it
+            # may still be counted - the UI offers a retry.
+            "exclude_incomplete": bool(ev["excluded"]) and bool(json.loads(ev["stranded_tags"] or "[]")),
             "duration_min": ev["duration_min"],
         })
 

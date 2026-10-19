@@ -1,4 +1,5 @@
 import json
+import threading
 from datetime import datetime, timezone
 
 import httpx
@@ -8,6 +9,14 @@ from loguru import logger
 
 from app import db
 from app.influx import calendar_event_id, write_event_points
+
+# Serializes "check the excluded flag, then write/delete an event's Influx
+# points" across the scheduled sync, the reprocess thread and the
+# exclude/restore endpoints. Without it, a sync that read excluded=0 just
+# before someone clicked "Didn't attend" could write the points straight
+# back after they'd been deleted. One process (uvicorn + its scheduler
+# thread), so a plain in-process lock is enough.
+calendar_points_lock = threading.RLock()
 
 
 def _to_utc_datetime(dt_value) -> datetime:
@@ -123,34 +132,41 @@ def sync_calendar(calendar: dict, rules: list[dict], username: str):
             tags = classify_event(title, description, rules, calendar["default_tag"])
             event_id = calendar_event_id(calendar["name"], start_dt.isoformat(), title)
 
-            existing = db.get_cached_event(event_id, calendar["user_id"])
-            if existing and existing["manually_tagged"]:
-                # Respect a manual tag override from the Timeline UI -
-                # use the cached tags instead of what the ruleset would
-                # produce, so a scheduled sync doesn't silently revert
-                # someone's manual fix. See the manually_tagged comment
-                # in schema.sql.
-                tags = json.loads(existing["applied_tags"] or "[]")
+            # Hold the lock from reading the excluded flag through the
+            # write, so a concurrent "Didn't attend" can't interleave.
+            with calendar_points_lock:
+                existing = db.get_cached_event(event_id, calendar["user_id"])
+                if existing and existing["manually_tagged"]:
+                    # Respect a manual tag override from the Timeline UI -
+                    # use the cached tags instead of what the ruleset would
+                    # produce, so a scheduled sync doesn't silently revert
+                    # someone's manual fix. See the manually_tagged comment
+                    # in schema.sql.
+                    tags = json.loads(existing["applied_tags"] or "[]")
 
-            write_event_points(
-                user=username,
-                tags=tags,
-                source="calendar",
-                timestamp=start_dt,
-                event_id=event_id,
-                calendar=calendar["name"],
-                duration_min=duration_min,
-            )
-            db.upsert_cached_event(
-                event_id=event_id,
-                user_id=calendar["user_id"],
-                calendar_id=calendar["id"],
-                title=title,
-                description=description,
-                start_iso=start_dt.isoformat(),
-                duration_min=duration_min,
-                applied_tags=tags,
-            )
+                if not (existing and existing["excluded"]):
+                    # Struck off in the Timeline ("didn't attend") - keep
+                    # the cache row current but don't write it back into
+                    # Influx. See the excluded comment in schema.sql.
+                    write_event_points(
+                        user=username,
+                        tags=tags,
+                        source="calendar",
+                        timestamp=start_dt,
+                        event_id=event_id,
+                        calendar=calendar["name"],
+                        duration_min=duration_min,
+                    )
+                db.upsert_cached_event(
+                    event_id=event_id,
+                    user_id=calendar["user_id"],
+                    calendar_id=calendar["id"],
+                    title=title,
+                    description=description,
+                    start_iso=start_dt.isoformat(),
+                    duration_min=duration_min,
+                    applied_tags=tags,
+                )
             event_count += 1
         except Exception as e:
             # One malformed VEVENT shouldn't abort the whole calendar's sync

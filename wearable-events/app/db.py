@@ -49,6 +49,8 @@ def init_db():
         conn.executescript(_SCHEMA_PATH.read_text())
         _ensure_column(conn, "calendar_events_cache", "manually_tagged", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "keyword_rules", "exclusive", "INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(conn, "calendar_events_cache", "excluded", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "calendar_events_cache", "stranded_tags", "TEXT NOT NULL DEFAULT '[]'")
     logger.info(f"Initialized config db at {SQLITE_PATH}")
 
 
@@ -275,7 +277,8 @@ def upsert_cached_event(event_id: str, user_id: int, calendar_id: int, title: st
     retagged via the Timeline UI - everything else (title, description,
     timing) still updates normally, only the tags are protected. Without
     this, a manual fix would get silently reverted on the very next
-    15-minute sync.
+    15-minute sync. The `excluded` flag isn't in the SET list at all, so
+    an event struck off in the Timeline stays struck off across syncs.
     '''
     with get_conn() as conn:
         conn.execute(
@@ -323,4 +326,18 @@ def set_cached_event_tags(event_id: str, tags: list[str], *, manually_tagged: bo
         conn.execute(
             "UPDATE calendar_events_cache SET applied_tags = ?, manually_tagged = ?, updated_at = datetime('now') WHERE event_id = ?",
             (json.dumps(tags), int(manually_tagged), event_id)
+        )
+
+
+def set_cached_event_excluded(event_id: str, user_id: int, excluded: bool, stranded_tags: list[str] | None = None):
+    ''' Strike an event off ("didn't attend") or restore it, and record
+    which tag points may still be in Influx (stranded_tags - empty once a
+    strike-off has fully succeeded, see schema.sql). Only updates the
+    cache - the caller is responsible for the Influx side.
+    '''
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE calendar_events_cache SET excluded = ?, stranded_tags = ?, updated_at = datetime('now') "
+            "WHERE event_id = ? AND user_id = ?",
+            (int(excluded), json.dumps(sorted(set(stranded_tags or []))), event_id, user_id)
         )

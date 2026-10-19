@@ -71,7 +71,7 @@ areas (vitals, activity, sleep detail views) are welcome.
 - **[docs/REFERENCE.md](./docs/REFERENCE.md)**. architecture, directory
   structure, environment variables, auth model, data model, full API
   reference, keyword-rule classification, sleep entry addressing,
-  manual tag overrides, reprocessing internals, known limitations
+  manual tag overrides, "didn't attend" exclusions, reprocessing internals, known limitations
 - **[UI_DESIGN_NOTES.md](./UI_DESIGN_NOTES.md)**. running design notes
   on page layouts and UX patterns (mostly reverse-engineered from the
   Zepp app), cross-referenced against

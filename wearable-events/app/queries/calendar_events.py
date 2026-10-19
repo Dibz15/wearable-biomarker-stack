@@ -21,7 +21,7 @@ def calendar_event_id(calendar: str, start_time: str, title: str) -> str:
 def manual_event_id() -> str:
     return str(uuid.uuid4())
 
-def delete_event_tag_point(*, tag: str, source: str, timestamp: datetime, calendar: str | None = None):
+def delete_event_tag_point(*, user: str, tag: str, source: str, timestamp: datetime, calendar: str | None = None):
     ''' Delete the single Influx point for one (event, tag) pairing.
 
     event_id is stored as a FIELD, not a tag, on events points - and
@@ -34,9 +34,10 @@ def delete_event_tag_point(*, tag: str, source: str, timestamp: datetime, calend
     Known edge case: two events sharing the same tag/source/calendar
     starting at the exact same second would collide here; for personal
     use this is vanishingly unlikely and not worth the complexity of
-    handling. Doesn't filter on `user` (the rest of the predicate scopes
-    tightly enough in practice, and `user` isn't guaranteed stable if an
-    account were ever renamed - a real but narrow edge case).
+    handling. Always scoped to `user`: household members commonly
+    subscribe to the same shared calendar, so without it one person's
+    edit/strike-off would also delete the other's identical point.
+    (Usernames can't be renamed, so the `user` tag is stable.)
 
     Shared by the reprocess job (reclassifying calendar events under new
     keyword rules) and the manual event/calendar-tag-override edit
@@ -51,10 +52,10 @@ def delete_event_tag_point(*, tag: str, source: str, timestamp: datetime, calend
     # parsing with "bad logical expression, at position 26", landing
     # exactly on the "t" of "tag=" - the same class of bug documented for
     # "from=" in InfluxDB's own issue tracker/forums). Quoting the key
-    # itself, not just the value, is the documented fix. Quoting "source"
-    # and "calendar" defensively too, since there's no published
+    # itself, not just the value, is the documented fix. Quoting "user",
+    # "source" and "calendar" defensively too, since there's no published
     # authoritative list of every reserved word in this specific grammar.
-    predicate = f'_measurement="{EVENTS_MEASUREMENT}" AND "tag"="{tag}" AND "source"="{source}"'
+    predicate = f'_measurement="{EVENTS_MEASUREMENT}" AND "user"="{user}" AND "tag"="{tag}" AND "source"="{source}"'
     if calendar is not None:
         predicate += f' AND "calendar"="{calendar}"'
     delete_api.delete(start, stop, predicate, bucket=INFLUX_BUCKET, org=INFLUX_ORG)
